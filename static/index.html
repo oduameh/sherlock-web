@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sherlock Web — OSINT Username Search</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0d1117">
+<link rel="icon" type="image/png" href="/static/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg2: #161b22;
+    --bg3: #1c2330;
+    --border: #2d333b;
+    --text: #e6edf3;
+    --dim: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --amber: #d29922;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    min-height: 100vh;
+  }
+  header {
+    padding: 18px 28px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: baseline; gap: 12px;
+    background: linear-gradient(180deg, #11161d, var(--bg));
+  }
+  header h1 { font-size: 20px; font-weight: 700; letter-spacing: .3px; }
+  header h1 .magnify { color: var(--accent); }
+  header span.tag { color: var(--dim); font-size: 13px; }
+  main { display: flex; gap: 20px; padding: 20px 28px; align-items: flex-start; }
+  .panel {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px;
+  }
+  /* ---- left: controls ---- */
+  #controls { width: 340px; flex-shrink: 0; position: sticky; top: 20px; }
+  label { display: block; font-size: 12px; color: var(--dim); margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .6px; }
+  label:first-child { margin-top: 0; }
+  textarea, input[type=number], input[type=text] {
+    width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 9px 11px; font-size: 14px; font-family: inherit;
+  }
+  textarea { resize: vertical; min-height: 74px; }
+  textarea:focus, input:focus { outline: none; border-color: var(--accent); }
+  .row { display: flex; gap: 12px; align-items: center; }
+  .row > div { flex: 1; }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: 14px; color: var(--text); }
+  .checkbox-row input { accent-color: var(--accent); width: 16px; height: 16px; }
+  .hint { font-size: 12px; color: var(--dim); margin-top: 4px; }
+
+  /* site picker */
+  #sitePickerBtn {
+    width: 100%; text-align: left; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 9px 11px;
+    font-size: 14px; cursor: pointer; display: flex; justify-content: space-between; align-items: center;
+  }
+  #sitePickerBtn:hover { border-color: var(--accent); }
+  #sitePicker {
+    display: none; margin-top: 6px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg3); max-height: 260px; overflow: hidden; flex-direction: column;
+  }
+  #sitePicker.open { display: flex; }
+  #sitePicker .picker-head { padding: 8px; border-bottom: 1px solid var(--border); }
+  #siteList { overflow-y: auto; max-height: 200px; }
+  .site-item { display: flex; align-items: center; gap: 8px; padding: 5px 10px; font-size: 13px; cursor: pointer; }
+  .site-item:hover { background: rgba(88,166,255,.08); }
+  .site-item input { accent-color: var(--accent); }
+  .site-item .nsfw-tag { margin-left: auto; font-size: 10px; color: var(--amber); border: 1px solid var(--amber); border-radius: 4px; padding: 0 4px; }
+  .picker-actions { display: flex; gap: 8px; padding: 8px; border-top: 1px solid var(--border); }
+  .picker-actions button {
+    flex: 1; background: none; border: 1px solid var(--border); color: var(--dim);
+    border-radius: 5px; padding: 4px; font-size: 12px; cursor: pointer;
+  }
+  .picker-actions button:hover { color: var(--text); border-color: var(--accent); }
+
+  /* buttons */
+  .btn {
+    border: none; border-radius: 7px; padding: 10px 18px; font-size: 14px;
+    font-weight: 600; cursor: pointer; transition: filter .15s;
+  }
+  .btn:hover { filter: brightness(1.15); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  #startBtn { background: var(--accent); color: #08101d; width: 100%; margin-top: 16px; }
+  #stopBtn { background: var(--red); color: #fff; width: 100%; margin-top: 8px; display: none; }
+  .btn-ghost { background: var(--bg3); color: var(--text); border: 1px solid var(--border); font-size: 12px; padding: 6px 12px; }
+
+  /* ---- right: results ---- */
+  #resultsWrap { flex: 1; min-width: 0; }
+  #overallBar { display: none; margin-bottom: 14px; }
+  .progress-track { background: var(--bg3); border-radius: 6px; height: 8px; overflow: hidden; }
+  .progress-fill { background: linear-gradient(90deg, var(--accent), #79c0ff); height: 100%; width: 0%; transition: width .25s; }
+  #overallText { font-size: 12px; color: var(--dim); margin-top: 6px; }
+
+  .user-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; overflow: hidden; }
+  .user-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .user-head h2 { font-size: 16px; }
+  .badge { font-size: 12px; font-weight: 600; border-radius: 20px; padding: 2px 10px; }
+  .badge.found { background: rgba(63,185,80,.15); color: var(--green); border: 1px solid rgba(63,185,80,.4); }
+  .badge.scanning { background: rgba(88,166,255,.12); color: var(--accent); border: 1px solid rgba(88,166,255,.4); }
+  .badge.err { background: rgba(248,81,73,.12); color: var(--red); border: 1px solid rgba(248,81,73,.35); }
+  .user-head .mini-progress { flex: 1; min-width: 120px; }
+  .result-rows { max-height: 420px; overflow-y: auto; }
+  .rrow { display: flex; align-items: center; gap: 10px; padding: 7px 16px; font-size: 13.5px; border-bottom: 1px solid rgba(45,51,59,.5); }
+  .rrow:last-child { border-bottom: none; }
+  .rrow .site { font-weight: 600; min-width: 160px; }
+  .rrow a { color: var(--accent); text-decoration: none; word-break: break-all; }
+  .rrow a:hover { text-decoration: underline; }
+  .rrow .qt { margin-left: auto; color: var(--dim); font-size: 11px; white-space: nowrap; }
+  .rrow.error { opacity: .45; }
+  .rrow.error .status { color: var(--red); font-size: 12px; }
+  .empty-state { color: var(--dim); text-align: center; padding: 60px 20px; font-size: 14px; }
+  #exportBar { display: none; gap: 8px; margin-bottom: 14px; }
+
+  /* ---- history ---- */
+  #history { width: 250px; flex-shrink: 0; position: sticky; top: 20px; max-height: 80vh; overflow-y: auto; }
+  #history h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--dim); margin-bottom: 10px; }
+  .hist-item { padding: 8px 10px; border-radius: 7px; cursor: pointer; font-size: 13px; border: 1px solid transparent; margin-bottom: 4px; }
+  .hist-item:hover { background: var(--bg3); border-color: var(--border); }
+  .hist-item .h-user { font-weight: 600; }
+  .hist-item .h-meta { color: var(--dim); font-size: 11.5px; margin-top: 2px; }
+  .hist-item .h-found { color: var(--green); }
+
+  #toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: var(--red); color: #fff; padding: 10px 18px; border-radius: 8px;
+    font-size: 14px; display: none; z-index: 50;
+  }
+  @media (max-width: 1000px) {
+    main { flex-direction: column; }
+    #controls, #history { width: 100%; position: static; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="magnify">&#9906;</span> Sherlock Web</h1>
+  <span class="tag">hunt social media accounts by username across 400+ sites</span>
+</header>
+
+<main>
+  <!-- Controls -->
+  <section id="controls" class="panel">
+    <label for="usernames">Usernames</label>
+    <textarea id="usernames" placeholder="alice, bob&#10;or one per line" spellcheck="false"></textarea>
+    <div class="hint">Comma- or newline-separated for bulk search.</div>
+
+    <div class="row">
+      <div>
+        <label for="timeout">Timeout (s/site)</label>
+        <input type="number" id="timeout" value="10" min="1" max="120">
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <div class="checkbox-row" style="margin-top:0">
+          <input type="checkbox" id="nsfw">
+          <span>Include NSFW sites</span>
+        </div>
+      </div>
+    </div>
+
+    <label>Sites</label>
+    <button id="sitePickerBtn" type="button"><span id="sitePickerLabel">All sites</span><span>&#9662;</span></button>
+    <div id="sitePicker">
+      <div class="picker-head">
+        <input type="text" id="siteFilter" placeholder="Filter sites&hellip;">
+      </div>
+      <div id="siteList"></div>
+      <div class="picker-actions">
+        <button id="selectAllFiltered" type="button">Select filtered</button>
+        <button id="clearSites" type="button">Clear (all sites)</button>
+      </div>
+    </div>
+    <div class="hint">Empty selection = scan every site.</div>
+
+    <button id="startBtn" class="btn">Start search</button>
+    <button id="stopBtn" class="btn">Stop</button>
+  </section>
+
+  <!-- Results -->
+  <section id="resultsWrap">
+    <div id="overallBar">
+      <div class="progress-track"><div class="progress-fill" id="overallFill"></div></div>
+      <div id="overallText">Starting&hellip;</div>
+    </div>
+    <div id="exportBar">
+      <button class="btn btn-ghost" id="csvBtn">&#8681; CSV</button>
+      <button class="btn btn-ghost" id="jsonBtn">&#8681; JSON</button>
+      <button class="btn btn-ghost" id="clearBtn">Clear results</button>
+    </div>
+    <div id="results"><div class="empty-state">Enter one or more usernames and hit <b>Start search</b>.<br>Results stream in live as each site is checked.</div></div>
+  </section>
+
+  <!-- History -->
+  <aside id="history" class="panel">
+    <h3>History</h3>
+    <div id="historyList"><div class="hint">No runs yet.</div></div>
+  </aside>
+</main>
+
+<div id="toast"></div>
+
+<script>
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", function () {
+    navigator.serviceWorker.register("/sw.js").catch(function () { /* PWA is best-effort */ });
+  });
+}
+</script>
+<script>
+(function () {
+  "use strict";
+
+  var els = {
+    usernames: document.getElementById("usernames"),
+    timeout: document.getElementById("timeout"),
+    nsfw: document.getElementById("nsfw"),
+    sitePickerBtn: document.getElementById("sitePickerBtn"),
+    sitePickerLabel: document.getElementById("sitePickerLabel"),
+    sitePicker: document.getElementById("sitePicker"),
+    siteFilter: document.getElementById("siteFilter"),
+    siteList: document.getElementById("siteList"),
+    selectAllFiltered: document.getElementById("selectAllFiltered"),
+    clearSites: document.getElementById("clearSites"),
+    startBtn: document.getElementById("startBtn"),
+    stopBtn: document.getElementById("stopBtn"),
+    overallBar: document.getElementById("overallBar"),
+    overallFill: document.getElementById("overallFill"),
+    overallText: document.getElementById("overallText"),
+    exportBar: document.getElementById("exportBar"),
+    results: document.getElementById("results"),
+    historyList: document.getElementById("historyList"),
+    csvBtn: document.getElementById("csvBtn"),
+    jsonBtn: document.getElementById("jsonBtn"),
+    clearBtn: document.getElementById("clearBtn"),
+    toast: document.getElementById("toast")
+  };
+
+  var allSites = [];          // [{name, nsfw}]
+  var selectedSites = {};     // name -> true
+  var currentRun = [];        // collected results of the live/loaded run (for export)
+  var es = null;              // active EventSource
+  var cards = {};             // username -> DOM refs
+
+  /* ---------- toast ---------- */
+  var toastTimer = null;
+  function toast(msg) {
+    els.toast.textContent = msg;
+    els.toast.style.display = "block";
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { els.toast.style.display = "none"; }, 4000);
+  }
+
+  /* ---------- site picker ---------- */
+  function updatePickerLabel() {
+    var n = Object.keys(selectedSites).length;
+    els.sitePickerLabel.textContent = n === 0 ? "All sites" : n + " site" + (n > 1 ? "s" : "") + " selected";
+  }
+
+  function renderSiteList(filter) {
+    filter = (filter || "").toLowerCase();
+    els.siteList.innerHTML = "";
+    allSites.forEach(function (s) {
+      if (filter && s.name.toLowerCase().indexOf(filter) === -1) return;
+      var row = document.createElement("label");
+      row.className = "site-item";
+      var cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = !!selectedSites[s.name];
+      cb.addEventListener("change", function () {
+        if (cb.checked) selectedSites[s.name] = true; else delete selectedSites[s.name];
+        updatePickerLabel();
+      });
+      row.appendChild(cb);
+      row.appendChild(document.createTextNode(s.name));
+      if (s.nsfw) {
+        var tag = document.createElement("span");
+        tag.className = "nsfw-tag";
+        tag.textContent = "nsfw";
+        row.appendChild(tag);
+      }
+      els.siteList.appendChild(row);
+    });
+  }
+
+  els.sitePickerBtn.addEventListener("click", function () {
+    els.sitePicker.classList.toggle("open");
+  });
+  document.addEventListener("click", function (e) {
+    if (!els.sitePicker.contains(e.target) && e.target !== els.sitePickerBtn && !els.sitePickerBtn.contains(e.target)) {
+      els.sitePicker.classList.remove("open");
+    }
+  });
+  els.siteFilter.addEventListener("input", function () { renderSiteList(els.siteFilter.value); });
+  els.selectAllFiltered.addEventListener("click", function () {
+    var filter = els.siteFilter.value.toLowerCase();
+    allSites.forEach(function (s) {
+      if (!filter || s.name.toLowerCase().indexOf(filter) !== -1) selectedSites[s.name] = true;
+    });
+    renderSiteList(filter);
+    updatePickerLabel();
+  });
+  els.clearSites.addEventListener("click", function () {
+    selectedSites = {};
+    renderSiteList(els.siteFilter.value);
+    updatePickerLabel();
+  });
+
+  fetch("/api/sites").then(function (r) { return r.json(); }).then(function (sites) {
+    allSites = sites;
+    renderSiteList("");
+  }).catch(function () { toast("Failed to load site list"); });
+
+  /* ---------- result cards ---------- */
+  function clearResults() {
+    els.results.innerHTML = "";
+    cards = {};
+    currentRun = [];
+    els.exportBar.style.display = "none";
+  }
+
+  function getCard(username) {
+    if (cards[username]) return cards[username];
+    var card = document.createElement("div");
+    card.className = "user-card";
+    card.innerHTML =
+      '<div class="user-head">' +
+        "<h2></h2>" +
+        '<span class="badge scanning">scanning</span>' +
+        '<span class="badge found">0 found</span>' +
+        '<span class="badge err" style="display:none">0 errors</span>' +
+        '<div class="mini-progress progress-track"><div class="progress-fill"></div></div>' +
+      "</div>" +
+      '<div class="result-rows"></div>';
+    card.querySelector("h2").textContent = username;
+    els.results.appendChild(card);
+    var refs = {
+      root: card,
+      scanning: card.querySelector(".badge.scanning"),
+      found: card.querySelector(".badge.found"),
+      err: card.querySelector(".badge.err"),
+      fill: card.querySelector(".progress-fill"),
+      rows: card.querySelector(".result-rows"),
+      foundCount: 0,
+      errCount: 0
+    };
+    cards[username] = refs;
+    return refs;
+  }
+
+  function addFoundRow(username, site, url, queryTime, silent) {
+    var c = getCard(username);
+    var row = document.createElement("div");
+    row.className = "rrow";
+    var siteSpan = document.createElement("span");
+    siteSpan.className = "site";
+    siteSpan.textContent = site;
+    var a = document.createElement("a");
+    a.href = url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.textContent = url;
+    row.appendChild(siteSpan);
+    row.appendChild(a);
+    if (queryTime != null) {
+      var qt = document.createElement("span");
+      qt.className = "qt";
+      qt.textContent = Number(queryTime).toFixed(2) + "s";
+      row.appendChild(qt);
+    }
+    c.rows.appendChild(row);
+    c.foundCount++;
+    c.found.textContent = c.foundCount + " found";
+    if (!silent) currentRun.push({ username: username, site: site, url: url, status: "found" });
+  }
+
+  function addErrorRow(username, site, status, context) {
+    var c = getCard(username);
+    var row = document.createElement("div");
+    row.className = "rrow error";
+    var siteSpan = document.createElement("span");
+    siteSpan.className = "site";
+    siteSpan.textContent = site;
+    var st = document.createElement("span");
+    st.className = "status";
+    st.textContent = status + (context ? " — " + context : "");
+    row.appendChild(siteSpan);
+    row.appendChild(st);
+    c.rows.appendChild(row);
+    c.errCount++;
+    c.err.style.display = "";
+    c.err.textContent = c.errCount + " error" + (c.errCount > 1 ? "s" : "");
+    currentRun.push({ username: username, site: site, url: "", status: status, context: context || "" });
+  }
+
+  /* ---------- overall progress ---------- */
+  var totalUsers = 0, doneUsers = 0, totalSitesPerUser = 0, checkedCurrent = 0;
+  function updateOverall() {
+    var per = totalSitesPerUser || 1;
+    var pct = totalUsers ? ((doneUsers * per + checkedCurrent) / (totalUsers * per)) * 100 : 0;
+    els.overallFill.style.width = Math.min(100, pct).toFixed(1) + "%";
+    els.overallText.textContent = "User " + Math.min(doneUsers + 1, totalUsers) + " of " + totalUsers +
+      " — " + checkedCurrent + "/" + totalSitesPerUser + " sites checked";
+  }
+
+  /* ---------- search ---------- */
+  function setRunning(running) {
+    els.startBtn.disabled = running;
+    els.stopBtn.style.display = running ? "block" : "none";
+  }
+
+  function stopStream() {
+    if (es) { es.close(); es = null; }
+    setRunning(false);
+    Object.keys(cards).forEach(function (u) {
+      if (cards[u].scanning.textContent === "scanning") cards[u].scanning.textContent = "stopped";
+    });
+    els.overallText.textContent = "Stopped.";
+  }
+
+  els.stopBtn.addEventListener("click", stopStream);
+
+  els.startBtn.addEventListener("click", function () {
+    var raw = els.usernames.value.trim();
+    if (!raw) { toast("Enter at least one username"); return; }
+
+    stopStream();
+    clearResults();
+    els.overallBar.style.display = "block";
+    els.overallFill.style.width = "0%";
+    els.overallText.textContent = "Starting…";
+
+    var params = new URLSearchParams();
+    params.set("usernames", raw);
+    params.set("timeout", els.timeout.value || "10");
+    params.set("nsfw", els.nsfw.checked ? "true" : "false");
+    var sel = Object.keys(selectedSites);
+    if (sel.length) params.set("sites", sel.join(","));
+
+    es = new EventSource("/api/search/stream?" + params.toString());
+    setRunning(true);
+
+    es.addEventListener("meta", function (e) {
+      var d = JSON.parse(e.data);
+      totalUsers = d.usernames.length;
+      totalSitesPerUser = d.sites_total;
+      doneUsers = 0; checkedCurrent = 0;
+      updateOverall();
+    });
+
+    es.addEventListener("user_start", function (e) {
+      var d = JSON.parse(e.data);
+      checkedCurrent = 0;
+      var c = getCard(d.username);
+      c.scanning.textContent = "scanning";
+      updateOverall();
+    });
+
+    es.addEventListener("found", function (e) {
+      var d = JSON.parse(e.data);
+      addFoundRow(d.username, d.site, d.url, d.query_time);
+      els.exportBar.style.display = "flex";
+    });
+
+    es.addEventListener("error", function (e) {
+      var d = JSON.parse(e.data);
+      addErrorRow(d.username, d.site, d.status, d.context);
+    });
+
+    es.addEventListener("progress", function (e) {
+      var d = JSON.parse(e.data);
+      checkedCurrent = d.checked;
+      totalSitesPerUser = d.total;
+      var c = getCard(d.username);
+      c.fill.style.width = ((d.checked / d.total) * 100).toFixed(1) + "%";
+      updateOverall();
+    });
+
+    es.addEventListener("user_done", function (e) {
+      var d = JSON.parse(e.data);
+      doneUsers++;
+      var c = getCard(d.username);
+      c.scanning.textContent = "done";
+      c.fill.style.width = "100%";
+      updateOverall();
+      loadHistory();
+    });
+
+    es.addEventListener("fatal", function (e) {
+      var d = JSON.parse(e.data);
+      toast("Scan failed: " + d.message);
+      stopStream();
+    });
+
+    es.addEventListener("done", function () {
+      els.overallText.textContent = "All scans complete.";
+      if (es) { es.close(); es = null; }
+      setRunning(false);
+      loadHistory();
+    });
+
+    es.onerror = function () {
+      // EventSource fires onerror when the connection drops unexpectedly.
+      if (es && es.readyState === EventSource.CLOSED) {
+        setRunning(false);
+      }
+    };
+  });
+
+  /* ---------- export ---------- */
+  function download(filename, text, mime) {
+    var blob = new Blob([text], { type: mime });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  els.csvBtn.addEventListener("click", function () {
+    if (!currentRun.length) { toast("Nothing to export"); return; }
+    var lines = ["username,site,url,status"];
+    currentRun.forEach(function (r) {
+      lines.push([r.username, r.site, r.url, r.status].map(function (v) {
+        v = String(v == null ? "" : v);
+        return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+      }).join(","));
+    });
+    download("sherlock-results.csv", lines.join("\n"), "text/csv");
+  });
+
+  els.jsonBtn.addEventListener("click", function () {
+    if (!currentRun.length) { toast("Nothing to export"); return; }
+    download("sherlock-results.json", JSON.stringify(currentRun, null, 2), "application/json");
+  });
+
+  els.clearBtn.addEventListener("click", function () {
+    clearResults();
+    els.overallBar.style.display = "none";
+    els.results.innerHTML = '<div class="empty-state">Enter one or more usernames and hit <b>Start search</b>.<br>Results stream in live as each site is checked.</div>';
+  });
+
+  /* ---------- history ---------- */
+  function loadHistory() {
+    fetch("/api/history").then(function (r) { return r.json(); }).then(function (runs) {
+      if (!runs.length) {
+        els.historyList.innerHTML = '<div class="hint">No runs yet.</div>';
+        return;
+      }
+      els.historyList.innerHTML = "";
+      runs.forEach(function (run) {
+        var item = document.createElement("div");
+        item.className = "hist-item";
+        var u = document.createElement("div");
+        u.className = "h-user";
+        u.textContent = run.username;
+        var m = document.createElement("div");
+        m.className = "h-meta";
+        m.innerHTML = "";
+        m.textContent = run.ts + " · ";
+        var f = document.createElement("span");
+        f.className = "h-found";
+        f.textContent = run.found + "/" + run.total + " found";
+        m.appendChild(f);
+        item.appendChild(u);
+        item.appendChild(m);
+        item.addEventListener("click", function () { loadRun(run.id); });
+        els.historyList.appendChild(item);
+      });
+    }).catch(function () { /* history is best-effort */ });
+  }
+
+  function loadRun(id) {
+    fetch("/api/history/" + id).then(function (r) { return r.json(); }).then(function (run) {
+      if (run.error) { toast("Run not found"); return; }
+      stopStream();
+      clearResults();
+      els.overallBar.style.display = "none";
+      var c = getCard(run.username);
+      c.scanning.textContent = "loaded · " + run.ts;
+      c.fill.style.width = "100%";
+      (run.results || []).forEach(function (r) {
+        addFoundRow(run.username, r.site, r.url, null);
+      });
+      if (!run.results || !run.results.length) {
+        c.rows.innerHTML = '<div class="rrow error"><span class="status">No accounts found in this run.</span></div>';
+      }
+      els.exportBar.style.display = "flex";
+      els.results.scrollIntoView({ behavior: "smooth" });
+    }).catch(function () { toast("Failed to load run"); });
+  }
+
+  loadHistory();
+})();
+</script>
+</body>
+</html>
