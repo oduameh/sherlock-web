@@ -35,6 +35,23 @@ from sherlock_project.result import QueryStatus
 from sherlock_project.sherlock import sherlock
 from sherlock_project.sites import SitesInformation
 
+# recon package: heavy deps (maigret, holehe) are lazily imported inside it,
+# but guard the import anyway so the classic app always boots.
+try:
+    from recon import engines as recon_engines
+    from recon.correlate import correlate as recon_correlate
+    from recon.email_pivot import gravatar_lookup, holehe_available, holehe_scan
+    from recon.enrich import enrich_profiles
+    from recon.permutations import generate_variants
+    from recon.report import render_report
+
+    RECON_AVAILABLE = True
+except Exception as _recon_exc:  # pragma: no cover
+    import logging as _logging
+
+    _logging.getLogger("app").warning("recon package unavailable: %s", _recon_exc)
+    RECON_AVAILABLE = False
+
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "history.db"
 STATIC_DIR = BASE_DIR / "static"
@@ -99,34 +116,47 @@ def _init_db() -> None:
             )
             """
         )
+        # Migration: recon runs are stored in the same table, distinguished by
+        # kind. Existing rows get the default 'sherlock' and keep working.
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(runs)")]
+        if "kind" not in cols:
+            conn.execute(
+                "ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'sherlock'"
+            )
 
 
 _init_db()
 
 
-def save_run(username: str, found: int, total: int, results: list[dict]) -> None:
+def save_run(username: str, found: int, total: int, results: list[dict],
+             kind: str = "sherlock") -> int:
     """Persist one completed per-username run. Called from the scan thread."""
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "INSERT INTO runs (ts, username, found, total, results) VALUES (?,?,?,?,?)",
+        cur = conn.execute(
+            "INSERT INTO runs (ts, username, found, total, results, kind)"
+            " VALUES (?,?,?,?,?,?)",
             (
                 time.strftime("%Y-%m-%d %H:%M:%S"),
                 username,
                 found,
                 total,
                 json.dumps(results),
+                kind,
             ),
         )
+        return cur.lastrowid
 
 
 @app.get("/api/history")
 def get_history() -> list[dict]:
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
-            "SELECT id, ts, username, found, total FROM runs ORDER BY id DESC LIMIT 50"
+            "SELECT id, ts, username, found, total, kind FROM runs"
+            " ORDER BY id DESC LIMIT 50"
         ).fetchall()
     return [
-        {"id": r[0], "ts": r[1], "username": r[2], "found": r[3], "total": r[4]}
+        {"id": r[0], "ts": r[1], "username": r[2], "found": r[3], "total": r[4],
+         "kind": r[5]}
         for r in rows
     ]
 
@@ -135,7 +165,7 @@ def get_history() -> list[dict]:
 def get_run(run_id: int) -> JSONResponse:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            "SELECT id, ts, username, found, total, results FROM runs WHERE id = ?",
+            "SELECT id, ts, username, found, total, results, kind FROM runs WHERE id = ?",
             (run_id,),
         ).fetchone()
     if row is None:
@@ -148,6 +178,7 @@ def get_run(run_id: int) -> JSONResponse:
             "found": row[3],
             "total": row[4],
             "results": json.loads(row[5]),
+            "kind": row[6],
         }
     )
 
@@ -339,6 +370,397 @@ async def search_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ---------------------------------------------------------------------------
+# Deep recon (SSE): Sherlock + Maigret + variants + email pivot + enrichment
+# + correlation. Everything here is best-effort and degrades gracefully.
+# ---------------------------------------------------------------------------
+
+if RECON_AVAILABLE:
+
+    class _ReconSherlockNotify(QueryNotify):
+        """Forwards Sherlock per-site results to the recon coordinator."""
+
+        def __init__(self, scanned_name, variant_of, emit_threadsafe):
+            super().__init__()
+            self.scanned_name = scanned_name
+            self.variant_of = variant_of
+            self.emit = emit_threadsafe
+            self.checked = 0
+            self.total = 0
+
+        def update(self, result) -> None:
+            self.checked += 1
+            status = result.status
+            if status == QueryStatus.CLAIMED:
+                self.emit(
+                    "found", "sherlock", self.scanned_name, result.site_name,
+                    result.site_url_user, result.query_time, self.variant_of,
+                )
+            elif status in ERROR_STATUSES:
+                self.emit(
+                    "error", "sherlock", self.scanned_name, result.site_name,
+                    str(status.value), result.context or "", self.variant_of,
+                )
+            self.emit(
+                "progress", "sherlock", self.scanned_name,
+                self.checked, self.total, self.variant_of,
+            )
+
+    def _recon_sherlock_worker(items, site_data, timeout, emit_threadsafe,
+                               loop, done_event):
+        """Thread entry: scan (username, variant_of) pairs sequentially."""
+        try:
+            for scanned_name, variant_of in items:
+                notify = _ReconSherlockNotify(scanned_name, variant_of,
+                                              emit_threadsafe)
+                notify.total = len(site_data)
+                emit_threadsafe("engine_start", "sherlock", scanned_name,
+                                len(site_data), variant_of)
+                sherlock(scanned_name, site_data, notify, timeout=timeout)
+                emit_threadsafe("engine_done", "sherlock", scanned_name,
+                                variant_of)
+        except Exception as exc:
+            emit_threadsafe("engine_error", "sherlock",
+                            f"{type(exc).__name__}: {exc}")
+        finally:
+            loop.call_soon_threadsafe(done_event.set)
+
+    @app.get("/api/recon/stream")
+    async def recon_stream(
+        request: Request,
+        usernames: str = Query(""),
+        email: str = Query(""),
+        variants: bool = Query(False),
+        timeout: int = Query(10, ge=1, le=120),
+        nsfw: bool = Query(False),
+        sites: str = Query(""),
+    ) -> StreamingResponse:
+        email = email.strip()
+        names = [u.strip() for u in re.split(r"[,\n]+", usernames) if u.strip()]
+        if not names and email:
+            names = [email.split("@", 1)[0]]
+        if not names and not email:
+            return StreamingResponse(
+                iter(['event: fatal\ndata: {"message": "give a username or an email"}\n\n']),
+                media_type="text/event-stream",
+            )
+
+        queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        # --- shared run state (mutated on the event loop only) -----------
+        rows: dict[tuple[str, str], dict] = {}
+        accounts: list[dict] = []
+        variant_rows: list[dict] = []
+        email_state: dict = {"gravatar": None, "holehe": []}
+
+        def emit(event: str, payload: dict) -> None:
+            queue.put_nowait((event, payload))
+
+        def handle_found(engine, scanned_name, site, url, query_time,
+                         variant_of):
+            key = (scanned_name, recon_engines.normalize_site(site))
+            row = rows.get(key)
+            if row is not None:
+                if engine not in row["engines"]:
+                    row["engines"].append(engine)
+                    emit("merged", {
+                        "username": scanned_name, "site": row["site"],
+                        "engines": row["engines"], "variant_of": variant_of,
+                    })
+                return
+            row = {
+                "username": scanned_name, "site": site, "url": url,
+                "engines": [engine], "variant_of": variant_of,
+                "query_time": query_time,
+            }
+            rows[key] = row
+            (variant_rows if variant_of else accounts).append(row)
+            emit("found", dict(row))
+
+        def handle_error(engine, scanned_name, site, status, context,
+                         variant_of):
+            emit("error", {
+                "engine": engine, "username": scanned_name, "site": site,
+                "status": status, "context": context, "variant_of": variant_of,
+            })
+
+        def handle_progress(engine, scanned_name, checked, total, variant_of):
+            emit("progress", {
+                "engine": engine, "username": scanned_name,
+                "checked": checked, "total": total, "variant_of": variant_of,
+            })
+
+        def emit_threadsafe(kind, *args):
+            """Route worker-thread callbacks onto the event loop."""
+            handler = {
+                "found": handle_found,
+                "error": handle_error,
+                "progress": handle_progress,
+            }.get(kind)
+            if handler is not None:
+                loop.call_soon_threadsafe(handler, *args)
+            else:
+                loop.call_soon_threadsafe(
+                    _engine_lifecycle, kind, *args
+                )
+
+        def _engine_lifecycle(kind, engine, *args):
+            if kind == "engine_start":
+                scanned_name, total, variant_of = args
+                emit("engine_start", {
+                    "engine": engine, "username": scanned_name,
+                    "total": total, "variant_of": variant_of,
+                })
+            elif kind == "engine_done":
+                scanned_name, variant_of = args
+                emit("engine_done", {
+                    "engine": engine, "username": scanned_name,
+                    "variant_of": variant_of,
+                })
+            elif kind == "engine_error":
+                emit("engine_error", {"engine": engine, "message": args[0]})
+
+        # --- engine workers ----------------------------------------------
+        def start_sherlock(items, site_data):
+            done = asyncio.Event()
+            threading.Thread(
+                target=_recon_sherlock_worker,
+                args=(items, site_data, timeout, emit_threadsafe, loop, done),
+                daemon=True,
+            ).start()
+            return done
+
+        async def maigret_worker(items, site_dict):
+            if not recon_engines.maigret_available():
+                _engine_lifecycle("engine_error", "maigret",
+                                  "maigret package not installed")
+                return
+            from maigret.result import MaigretCheckStatus
+
+            total = len(site_dict)
+            for scanned_name, variant_of in items:
+                _engine_lifecycle("engine_start", "maigret", scanned_name,
+                                  total, variant_of)
+                checked = 0
+
+                def on_result(result, _name=scanned_name, _vo=variant_of):
+                    nonlocal checked
+                    checked += 1
+                    st = result.status  # MaigretCheckStatus enum
+                    if st == MaigretCheckStatus.CLAIMED:
+                        handle_found("maigret", _name, result.site_name,
+                                     result.site_url_user, None, _vo)
+                    elif st in (MaigretCheckStatus.UNKNOWN,
+                                MaigretCheckStatus.ILLEGAL):
+                        handle_error("maigret", _name, result.site_name,
+                                     str(st.value),
+                                     result.context or "", _vo)
+                    handle_progress("maigret", _name, checked, total, _vo)
+
+                try:
+                    await recon_engines.maigret_scan(
+                        scanned_name, site_dict, timeout, on_result
+                    )
+                except Exception as exc:
+                    _engine_lifecycle("engine_error", "maigret",
+                                      f"{type(exc).__name__}: {exc}")
+                _engine_lifecycle("engine_done", "maigret", scanned_name,
+                                  variant_of)
+
+        async def email_worker(addr):
+            grav = await gravatar_lookup(addr)
+            email_state["gravatar"] = grav
+            emit("email", {
+                "source": "gravatar", "email": addr, "found": bool(grav),
+                "profile": grav,
+            })
+            if holehe_available():
+                def on_holehe(entry):
+                    email_state["holehe"].append(entry)
+                    emit("email", {"source": "holehe", "email": addr, **entry})
+
+                await holehe_scan(addr, on_holehe)
+            else:
+                emit("email", {"source": "holehe", "email": addr,
+                               "error": "holehe not installed"})
+            hits = sum(1 for h in email_state["holehe"] if h.get("exists"))
+            emit("email_done", {"email": addr, "holehe_hits": hits,
+                                "gravatar": bool(grav)})
+
+        # --- coordinator ---------------------------------------------------
+        async def coordinator():
+            params = {"usernames": names, "email": email,
+                      "variants": variants, "timeout": timeout, "nsfw": nsfw}
+            try:
+                # Site subsets.
+                selected = {s.strip().lower() for s in sites.split(",")
+                            if s.strip()}
+                sher_data = {
+                    n: i for n, i in SITE_DATA_ALL.items()
+                    if (not selected or n.lower() in selected)
+                    and (nsfw or n not in NSFW_NAMES)
+                }
+                mai_sites = (
+                    {n: s for n, s in recon_engines.maigret_all_sites().items()
+                     if not selected or n.lower() in selected}
+                    if recon_engines.maigret_available() else {}
+                )
+                emit("meta", {
+                    **params, "sherlock_sites": len(sher_data),
+                    "maigret_sites": len(mai_sites),
+                })
+
+                base_items = [(n, None) for n in names]
+                sher_done = start_sherlock(base_items, sher_data)
+                mai_task = asyncio.create_task(maigret_worker(base_items,
+                                                              mai_sites))
+                email_task = (asyncio.create_task(email_worker(email))
+                              if email else None)
+                await sher_done.wait()
+                await mai_task
+
+                # Variants phase (reduced high-value site list).
+                if variants:
+                    sher_reduced = recon_engines.sherlock_variant_site_data(
+                        sher_data)
+                    mai_reduced = (
+                        recon_engines.maigret_variant_sites()
+                        if recon_engines.maigret_available() else {}
+                    )
+                    if selected:  # honor an explicit site selection
+                        sher_reduced = {n: i for n, i in sher_reduced.items()
+                                        if n.lower() in selected}
+                        mai_reduced = {n: s for n, s in mai_reduced.items()
+                                       if n.lower() in selected}
+                    for base in names:
+                        vs = generate_variants(base)
+                        emit("variants_planned", {"base": base, "variants": vs,
+                                                  "sites": len(sher_reduced)})
+                        if not vs:
+                            continue
+                        v_items = [(v, base) for v in vs]
+                        v_done = start_sherlock(v_items, sher_reduced)
+                        await maigret_worker(v_items, mai_reduced)
+                        await v_done.wait()
+
+                # Enrichment phase.
+                all_rows = accounts + variant_rows
+                emit("phase", {"phase": "enriching",
+                               "targets": min(40, len(all_rows))})
+                def on_enriched(row, data):
+                    emit("enriched", {
+                        "username": row["username"], "site": row["site"],
+                        "url": row["url"], "variant_of": row["variant_of"],
+                        "enrichment": data,
+                    })
+                await enrich_profiles(all_rows, on_enriched)
+
+                # Correlation phase.
+                clusters = await recon_correlate(all_rows)
+                emit("correlation", {"clusters": clusters})
+
+                # Wait for the email pivot before persisting.
+                if email_task is not None:
+                    await email_task
+
+                # Persist + finish.
+                subject = ", ".join(names) if names else email
+                total_checked = len(sher_data) + len(mai_sites)
+                results = {
+                    "params": params,
+                    "accounts": accounts,
+                    "variants": variant_rows,
+                    "email": email_state,
+                    "correlation": clusters,
+                }
+                run_id = save_run(subject, len(accounts), total_checked,
+                                  results, kind="recon")
+                emit("done", {
+                    "history_id": run_id,
+                    "found": len(accounts),
+                    "variant_hits": len(variant_rows),
+                    "clusters": len(clusters),
+                    "email_hits": sum(
+                        1 for h in email_state["holehe"] if h.get("exists")),
+                })
+            except Exception as exc:
+                emit("fatal", {"message": f"{type(exc).__name__}: {exc}"})
+            finally:
+                queue.put_nowait(None)  # sentinel
+
+        coord_task = asyncio.create_task(coordinator())
+
+        async def event_gen():
+            try:
+                while True:
+                    try:
+                        item = await asyncio.wait_for(queue.get(), timeout=15)
+                    except asyncio.TimeoutError:
+                        if await request.is_disconnected():
+                            break
+                        yield ": keepalive\n\n"
+                        continue
+                    if item is None:
+                        break
+                    event, payload = item
+                    yield f"event: {event}\ndata: {json.dumps(payload)}\n\n"
+            except asyncio.CancelledError:
+                coord_task.cancel()
+                raise
+
+        return StreamingResponse(
+            event_gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.get("/api/recon/report/{run_id}")
+    def recon_report(run_id: int) -> Response:
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT ts, username, results, kind FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            return Response("not found", status_code=404)
+        ts, username, results_json, kind = row
+        results = json.loads(results_json)
+        if kind == "recon":
+            run = {
+                "subject": username,
+                "ts": ts,
+                "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "params": results.get("params") or {},
+                "results": results,
+            }
+        else:  # plain sherlock run: render a minimal report
+            run = {
+                "subject": username,
+                "ts": ts,
+                "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "params": {"usernames": [username]},
+                "results": {
+                    "accounts": [
+                        {"username": username, "site": r.get("site"),
+                         "url": r.get("url"), "engines": ["sherlock"]}
+                        for r in results
+                    ],
+                    "variants": [], "email": {}, "correlation": [],
+                },
+            }
+        return Response(render_report(run), media_type="text/html")
+
+else:
+
+    @app.get("/api/recon/stream")
+    async def recon_stream_unavailable() -> StreamingResponse:
+        return StreamingResponse(
+            iter(['event: fatal\ndata: {"message": "recon package unavailable"}\n\n']),
+            media_type="text/event-stream",
+        )
 
 
 # ---------------------------------------------------------------------------

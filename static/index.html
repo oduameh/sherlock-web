@@ -128,6 +128,42 @@
   .hist-item .h-user { font-weight: 600; }
   .hist-item .h-meta { color: var(--dim); font-size: 11.5px; margin-top: 2px; }
   .hist-item .h-found { color: var(--green); }
+  .hist-item .h-kind { color: var(--accent); font-size: 10px; border: 1px solid rgba(88,166,255,.4); border-radius: 4px; padding: 0 4px; margin-left: 4px; }
+
+  /* ---- mode tabs ---- */
+  .mode-tabs { display: flex; gap: 6px; margin-bottom: 16px; }
+  .mode-tab {
+    flex: 1; background: var(--bg3); color: var(--dim); border: 1px solid var(--border);
+    border-radius: 7px; padding: 8px 0; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .mode-tab.active { color: var(--text); border-color: var(--accent); background: rgba(88,166,255,.1); }
+
+  /* ---- recon results ---- */
+  .engine-badge {
+    font-size: 10px; font-weight: 700; border-radius: 8px; padding: 1px 6px;
+    border: 1px solid; white-space: nowrap;
+  }
+  .engine-badge.sherlock { color: var(--accent); border-color: rgba(88,166,255,.4); }
+  .engine-badge.maigret { color: #bc8cff; border-color: rgba(188,140,255,.4); }
+  .rrow .badges { display: flex; gap: 4px; }
+  .rrow .enrich { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+  .rrow .enrich img { width: 28px; height: 28px; border-radius: 50%; background: var(--bg3); object-fit: cover; }
+  .rrow .enrich .e-name { font-weight: 600; font-size: 12.5px; }
+  .rrow .enrich .e-bio { color: var(--dim); font-size: 11.5px; }
+  .rrow .rmain { flex: 1; min-width: 0; }
+  .section-head {
+    font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--dim);
+    margin: 20px 0 8px;
+  }
+  .variant-tag { font-size: 10px; color: var(--amber); border: 1px solid rgba(210,153,34,.4); border-radius: 4px; padding: 0 4px; margin-left: 6px; }
+  .conf-track { background: var(--bg3); border-radius: 5px; height: 8px; width: 160px; overflow: hidden; display: inline-block; vertical-align: middle; }
+  .conf-fill { background: linear-gradient(90deg, var(--green), #79c0ff); height: 100%; }
+  .cluster-card { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; font-size: 13px; }
+  .cluster-card ul { margin: 8px 0 4px 18px; }
+  .cluster-card .rationale { color: var(--dim); font-size: 12px; }
+  #reportBtn { display: none; }
+  .email-hit { color: var(--green); }
+  .email-miss { color: var(--dim); }
 
   #toast {
     position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
@@ -149,6 +185,12 @@
 <main>
   <!-- Controls -->
   <section id="controls" class="panel">
+    <div class="mode-tabs">
+      <button id="tabQuick" class="mode-tab active" type="button">Quick scan</button>
+      <button id="tabDeep" class="mode-tab" type="button">Deep recon</button>
+    </div>
+
+    <div id="quickForm">
     <label for="usernames">Usernames</label>
     <textarea id="usernames" placeholder="alice, bob&#10;or one per line" spellcheck="false"></textarea>
     <div class="hint">Comma- or newline-separated for bulk search.</div>
@@ -183,6 +225,39 @@
 
     <button id="startBtn" class="btn">Start search</button>
     <button id="stopBtn" class="btn">Stop</button>
+    </div>
+
+    <div id="deepForm" style="display:none">
+      <label for="reconUsernames">Usernames</label>
+      <textarea id="reconUsernames" placeholder="alice, bob&#10;optional if email given" spellcheck="false"></textarea>
+      <div class="hint">Scanned with both Sherlock and Maigret; results merged.</div>
+
+      <label for="reconEmail">Email (optional)</label>
+      <input type="text" id="reconEmail" placeholder="name@example.com" spellcheck="false">
+      <div class="hint">Gravatar profile + registered-account checks (~120 sites, slow).</div>
+
+      <div class="row">
+        <div>
+          <label for="reconTimeout">Timeout (s/site)</label>
+          <input type="number" id="reconTimeout" value="10" min="1" max="120">
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <div class="checkbox-row" style="margin-top:0">
+            <input type="checkbox" id="reconVariants" checked>
+            <span>Scan username variants</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="checkbox-row">
+        <input type="checkbox" id="reconNsfw">
+        <span>Include NSFW sites</span>
+      </div>
+
+      <button id="reconStartBtn" class="btn" style="background:var(--green);color:#06130a;width:100%;margin-top:16px">Start deep recon</button>
+      <button id="reconStopBtn" class="btn" style="background:var(--red);color:#fff;width:100%;margin-top:8px;display:none">Stop</button>
+    </div>
   </section>
 
   <!-- Results -->
@@ -194,6 +269,7 @@
     <div id="exportBar">
       <button class="btn btn-ghost" id="csvBtn">&#8681; CSV</button>
       <button class="btn btn-ghost" id="jsonBtn">&#8681; JSON</button>
+      <button class="btn btn-ghost" id="reportBtn">&#8681; Report</button>
       <button class="btn btn-ghost" id="clearBtn">Clear results</button>
     </div>
     <div id="results"><div class="empty-state">Enter one or more usernames and hit <b>Start search</b>.<br>Results stream in live as each site is checked.</div></div>
@@ -240,8 +316,20 @@ if ("serviceWorker" in navigator) {
     historyList: document.getElementById("historyList"),
     csvBtn: document.getElementById("csvBtn"),
     jsonBtn: document.getElementById("jsonBtn"),
+    reportBtn: document.getElementById("reportBtn"),
     clearBtn: document.getElementById("clearBtn"),
-    toast: document.getElementById("toast")
+    toast: document.getElementById("toast"),
+    tabQuick: document.getElementById("tabQuick"),
+    tabDeep: document.getElementById("tabDeep"),
+    quickForm: document.getElementById("quickForm"),
+    deepForm: document.getElementById("deepForm"),
+    reconUsernames: document.getElementById("reconUsernames"),
+    reconEmail: document.getElementById("reconEmail"),
+    reconVariants: document.getElementById("reconVariants"),
+    reconTimeout: document.getElementById("reconTimeout"),
+    reconNsfw: document.getElementById("reconNsfw"),
+    reconStartBtn: document.getElementById("reconStartBtn"),
+    reconStopBtn: document.getElementById("reconStopBtn")
   };
 
   var allSites = [];          // [{name, nsfw}]
@@ -318,6 +406,23 @@ if ("serviceWorker" in navigator) {
     allSites = sites;
     renderSiteList("");
   }).catch(function () { toast("Failed to load site list"); });
+
+  /* ---------- mode tabs ---------- */
+  var mode = "quick";
+  els.tabQuick.addEventListener("click", function () {
+    mode = "quick";
+    els.tabQuick.classList.add("active");
+    els.tabDeep.classList.remove("active");
+    els.quickForm.style.display = "";
+    els.deepForm.style.display = "none";
+  });
+  els.tabDeep.addEventListener("click", function () {
+    mode = "deep";
+    els.tabDeep.classList.add("active");
+    els.tabQuick.classList.remove("active");
+    els.deepForm.style.display = "";
+    els.quickForm.style.display = "none";
+  });
 
   /* ---------- result cards ---------- */
   function clearResults() {
@@ -433,7 +538,10 @@ if ("serviceWorker" in navigator) {
     if (!raw) { toast("Enter at least one username"); return; }
 
     stopStream();
+    stopRecon();
     clearResults();
+    reconRows = {}; reconCards = {}; reconReportId = null;
+    els.reportBtn.style.display = "none";
     els.overallBar.style.display = "block";
     els.overallFill.style.width = "0%";
     els.overallText.textContent = "Starting…";
@@ -515,6 +623,384 @@ if ("serviceWorker" in navigator) {
     };
   });
 
+  /* ---------- deep recon ---------- */
+  var reconEs = null;
+  var reconRows = {};       // "username|normsite" -> {el, data}
+  var reconCards = {};      // section key -> card refs
+  var reconReportId = null;
+
+  function normSite(n) { return String(n).toLowerCase().replace(/[^a-z0-9]/g, ""); }
+
+  function setReconRunning(running) {
+    els.reconStartBtn.disabled = running;
+    els.reconStopBtn.style.display = running ? "block" : "none";
+  }
+
+  function stopRecon() {
+    if (reconEs) { reconEs.close(); reconEs = null; }
+    setReconRunning(false);
+  }
+
+  els.reconStopBtn.addEventListener("click", function () {
+    stopRecon();
+    els.overallText.textContent = "Stopped.";
+  });
+
+  function reconSection(key, title, badgeText) {
+    if (reconCards[key]) return reconCards[key];
+    var head = document.createElement("div");
+    head.className = "section-head";
+    head.textContent = title;
+    els.results.appendChild(head);
+    var card = document.createElement("div");
+    card.className = "user-card";
+    card.innerHTML =
+      '<div class="user-head"><h2></h2><span class="badge scanning">running</span>' +
+      '<span class="badge found">0 found</span>' +
+      '<span class="dim" style="font-size:11px;margin-left:auto"></span></div>' +
+      '<div class="result-rows"></div>';
+    card.querySelector("h2").textContent = badgeText || title;
+    els.results.appendChild(card);
+    var refs = {
+      head: head, root: card,
+      status: card.querySelector(".badge.scanning"),
+      found: card.querySelector(".badge.found"),
+      note: card.querySelector(".user-head .dim"),
+      rows: card.querySelector(".result-rows"),
+      foundCount: 0
+    };
+    reconCards[key] = refs;
+    return refs;
+  }
+
+  function engineBadges(container, engines) {
+    container.innerHTML = "";
+    (engines || []).forEach(function (e) {
+      var b = document.createElement("span");
+      b.className = "engine-badge " + e;
+      b.textContent = e;
+      container.appendChild(b);
+    });
+  }
+
+  function addReconFoundRow(d) {
+    var isVariant = !!d.variant_of;
+    var key = d.username + "|" + normSite(d.site);
+    var secKey = isVariant ? "variants:" + d.variant_of : "base:" + d.username;
+    var c = reconSection(secKey,
+      isVariant ? ("Variants of " + d.variant_of) : ("Username: " + d.username),
+      isVariant ? d.variant_of : d.username);
+    if (reconRows[key]) return; // duplicate event, ignore
+
+    var row = document.createElement("div");
+    row.className = "rrow";
+    var siteSpan = document.createElement("span");
+    siteSpan.className = "site";
+    siteSpan.textContent = d.site;
+    if (isVariant) {
+      var vt = document.createElement("span");
+      vt.className = "variant-tag";
+      vt.textContent = d.username;
+      siteSpan.appendChild(vt);
+    }
+    var main = document.createElement("div");
+    main.className = "rmain";
+    var a = document.createElement("a");
+    a.href = d.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+    a.textContent = d.url;
+    var badges = document.createElement("span");
+    badges.className = "badges";
+    badges.style.marginLeft = "8px";
+    engineBadges(badges, d.engines);
+    main.appendChild(a);
+    main.appendChild(badges);
+    row.appendChild(siteSpan);
+    row.appendChild(main);
+    c.rows.appendChild(row);
+    c.foundCount++;
+    c.found.textContent = c.foundCount + " found";
+
+    var entry = { username: d.username, site: d.site, url: d.url,
+                  status: "found", engines: (d.engines || []).slice(),
+                  variant_of: d.variant_of || "",
+                  display_name: "", bio: "", avatar: "" };
+    reconRows[key] = { el: row, badgesEl: badges, data: entry };
+    currentRun.push(entry);
+    els.exportBar.style.display = "flex";
+  }
+
+  function mergeReconRow(d) {
+    var key = d.username + "|" + normSite(d.site);
+    var r = reconRows[key];
+    if (!r) return;
+    r.data.engines = d.engines.slice();
+    engineBadges(r.badgesEl, d.engines);
+  }
+
+  function enrichReconRow(d) {
+    var key = d.username + "|" + normSite(d.site);
+    var r = reconRows[key];
+    if (!r) return;
+    var enr = d.enrichment || {};
+    var img = enr.jsonld_image || enr.og_image;
+    var name = enr.jsonld_name || enr.og_title || enr.title;
+    var bio = enr.jsonld_description || enr.og_description;
+    if (img) r.data.avatar = img;
+    if (name) r.data.display_name = name;
+    if (bio) r.data.bio = bio;
+    if (!img && !name && !bio) return;
+    var div = document.createElement("div");
+    div.className = "enrich";
+    if (img) {
+      var im = document.createElement("img");
+      im.src = img; im.alt = ""; im.loading = "lazy";
+      im.onerror = function () { im.style.display = "none"; };
+      div.appendChild(im);
+    }
+    var txt = document.createElement("div");
+    if (name) {
+      var n = document.createElement("div");
+      n.className = "e-name"; n.textContent = name;
+      txt.appendChild(n);
+    }
+    if (bio) {
+      var b = document.createElement("div");
+      b.className = "e-bio";
+      b.textContent = bio.length > 140 ? bio.slice(0, 137) + "…" : bio;
+      txt.appendChild(b);
+    }
+    div.appendChild(txt);
+    r.el.querySelector(".rmain").appendChild(div);
+  }
+
+  function addReconErrorRow(d) {
+    var isVariant = !!d.variant_of;
+    var secKey = isVariant ? "variants:" + d.variant_of : "base:" + d.username;
+    var c = reconSection(secKey,
+      isVariant ? ("Variants of " + d.variant_of) : ("Username: " + d.username),
+      isVariant ? d.variant_of : d.username);
+    var row = document.createElement("div");
+    row.className = "rrow error";
+    var s = document.createElement("span");
+    s.className = "site"; s.textContent = d.site;
+    var st = document.createElement("span");
+    st.className = "status";
+    st.textContent = "[" + d.engine + "] " + d.status + (d.context ? " — " + d.context : "");
+    row.appendChild(s); row.appendChild(st);
+    c.rows.appendChild(row);
+  }
+
+  function renderGravatar(email, profile) {
+    var c = reconSection("email", "Email pivot", email);
+    var row = document.createElement("div");
+    row.className = "rrow";
+    var main = document.createElement("div");
+    main.className = "rmain";
+    if (!profile) {
+      main.innerHTML = '<span class="dim">Gravatar: no public profile</span>';
+    } else {
+      var div = document.createElement("div");
+      div.className = "enrich";
+      if (profile.avatar_url) {
+        var im = document.createElement("img");
+        im.src = profile.avatar_url; im.alt = "";
+        im.onerror = function () { im.style.display = "none"; };
+        div.appendChild(im);
+      }
+      var txt = document.createElement("div");
+      var n = document.createElement("div");
+      n.className = "e-name";
+      n.textContent = profile.display_name || profile.full_name || "Gravatar profile";
+      txt.appendChild(n);
+      if (profile.about) {
+        var b = document.createElement("div");
+        b.className = "e-bio"; b.textContent = profile.about;
+        txt.appendChild(b);
+      }
+      if (profile.profile_url) {
+        var a = document.createElement("a");
+        a.href = profile.profile_url; a.target = "_blank";
+        a.rel = "noopener noreferrer"; a.textContent = profile.profile_url;
+        txt.appendChild(a);
+      }
+      (profile.accounts || []).forEach(function (acc) {
+        if (!acc.url) return;
+        var la = document.createElement("a");
+        la.href = acc.url; la.target = "_blank"; la.rel = "noopener noreferrer";
+        la.style.marginRight = "8px";
+        la.textContent = acc.name || acc.domain;
+        txt.appendChild(la);
+      });
+      div.appendChild(txt);
+      main.appendChild(div);
+    }
+    row.appendChild(main);
+    c.rows.appendChild(row);
+  }
+
+  var holeheCounts = { hits: 0, checked: 0 };
+  function addHoleheRow(d) {
+    var c = reconSection("email", "Email pivot", d.email || "email");
+    holeheCounts.checked++;
+    if (d.exists) holeheCounts.hits++;
+    c.note.textContent = holeheCounts.hits + " hits / " + holeheCounts.checked + " checks";
+    if (!d.exists && !d.error) return;  // keep the list to positives + errors
+    var row = document.createElement("div");
+    row.className = "rrow";
+    var s = document.createElement("span");
+    s.className = "site " + (d.exists ? "email-hit" : "email-miss");
+    s.textContent = d.site || "?";
+    var st = document.createElement("span");
+    st.className = d.exists ? "email-hit" : "email-miss";
+    st.textContent = d.exists ? ("registered" + (d.domain ? " — " + d.domain : ""))
+                              : (d.error ? "error: " + d.error : (d.rate_limit ? "rate limited" : ""));
+    row.appendChild(s); row.appendChild(st);
+    c.rows.appendChild(row);
+  }
+
+  function renderCorrelation(clusters) {
+    var c = reconSection("correlation", "Correlation", "clusters");
+    c.status.textContent = "done";
+    c.found.style.display = "none";
+    if (!clusters || !clusters.length) {
+      c.rows.innerHTML = '<div class="rrow"><span class="dim">No cross-account correlations found.</span></div>';
+      return;
+    }
+    clusters.forEach(function (cl) {
+      var card = document.createElement("div");
+      card.className = "cluster-card";
+      var top = document.createElement("div");
+      var track = document.createElement("span");
+      track.className = "conf-track";
+      var fill = document.createElement("span");
+      fill.className = "conf-fill";
+      fill.style.width = Math.min(100, cl.confidence) + "%";
+      track.appendChild(fill);
+      top.appendChild(track);
+      var lbl = document.createElement("b");
+      lbl.textContent = " " + cl.confidence + "% confidence";
+      top.appendChild(lbl);
+      card.appendChild(top);
+      var ul = document.createElement("ul");
+      (cl.members || []).forEach(function (m) {
+        var li = document.createElement("li");
+        var a = document.createElement("a");
+        a.href = m.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+        a.textContent = m.site + " — " + m.url;
+        li.appendChild(a);
+        ul.appendChild(li);
+      });
+      card.appendChild(ul);
+      (cl.links || []).forEach(function (l) {
+        var r = document.createElement("div");
+        r.className = "rationale";
+        r.textContent = "↔ " + l.rationale;
+        card.appendChild(r);
+      });
+      c.rows.appendChild(card);
+    });
+  }
+
+  els.reconStartBtn.addEventListener("click", function () {
+    var rawUsers = els.reconUsernames.value.trim();
+    var email = els.reconEmail.value.trim();
+    if (!rawUsers && !email) { toast("Enter a username or an email"); return; }
+
+    stopStream();
+    stopRecon();
+    clearResults();
+    reconRows = {}; reconCards = {}; reconReportId = null;
+    holeheCounts = { hits: 0, checked: 0 };
+    els.reportBtn.style.display = "none";
+    els.overallBar.style.display = "block";
+    els.overallFill.style.width = "0%";
+    els.overallText.textContent = "Deep recon running…";
+
+    var params = new URLSearchParams();
+    if (rawUsers) params.set("usernames", rawUsers);
+    if (email) params.set("email", email);
+    params.set("variants", els.reconVariants.checked ? "true" : "false");
+    params.set("timeout", els.reconTimeout.value || "10");
+    params.set("nsfw", els.reconNsfw.checked ? "true" : "false");
+
+    reconEs = new EventSource("/api/recon/stream?" + params.toString());
+    setReconRunning(true);
+
+    reconEs.addEventListener("meta", function (e) {
+      var d = JSON.parse(e.data);
+      els.overallText.textContent =
+        "Scanning " + d.sherlock_sites + " sherlock + " + d.maigret_sites +
+        " maigret sites" + (d.email ? " + email pivot" : "") + "…";
+    });
+    reconEs.addEventListener("found", function (e) {
+      addReconFoundRow(JSON.parse(e.data));
+    });
+    reconEs.addEventListener("merged", function (e) {
+      mergeReconRow(JSON.parse(e.data));
+    });
+    reconEs.addEventListener("error", function (e) {
+      addReconErrorRow(JSON.parse(e.data));
+    });
+    reconEs.addEventListener("progress", function (e) {
+      var d = JSON.parse(e.data);
+      var secKey = d.variant_of ? "variants:" + d.variant_of : "base:" + d.username;
+      var c = reconCards[secKey];
+      if (c) c.note.textContent = d.engine + " " + d.checked + "/" + d.total;
+    });
+    reconEs.addEventListener("engine_done", function (e) {
+      var d = JSON.parse(e.data);
+      var secKey = d.variant_of ? "variants:" + d.variant_of : "base:" + d.username;
+      var c = reconCards[secKey];
+      if (c) c.status.textContent = "scanning";
+    });
+    reconEs.addEventListener("engine_error", function (e) {
+      var d = JSON.parse(e.data);
+      toast(d.engine + " engine error: " + d.message);
+    });
+    reconEs.addEventListener("phase", function (e) {
+      var d = JSON.parse(e.data);
+      if (d.phase === "enriching")
+        els.overallText.textContent = "Enriching up to " + d.targets + " profiles…";
+    });
+    reconEs.addEventListener("enriched", function (e) {
+      enrichReconRow(JSON.parse(e.data));
+    });
+    reconEs.addEventListener("email", function (e) {
+      var d = JSON.parse(e.data);
+      if (d.source === "gravatar") renderGravatar(d.email, d.profile);
+      else if (d.source === "holehe") addHoleheRow(d);
+    });
+    reconEs.addEventListener("correlation", function (e) {
+      renderCorrelation(JSON.parse(e.data).clusters);
+    });
+    reconEs.addEventListener("fatal", function (e) {
+      toast("Recon failed: " + JSON.parse(e.data).message);
+      stopRecon();
+    });
+    reconEs.addEventListener("done", function (e) {
+      var d = JSON.parse(e.data);
+      els.overallText.textContent = "Recon complete — " + d.found + " accounts, " +
+        d.variant_hits + " variant hits, " + d.clusters + " clusters, " +
+        d.email_hits + " email hits.";
+      Object.keys(reconCards).forEach(function (k) {
+        reconCards[k].status.textContent = "done";
+      });
+      if (d.history_id) {
+        reconReportId = d.history_id;
+        els.reportBtn.style.display = "";
+      }
+      stopRecon();
+      loadHistory();
+    });
+    reconEs.onerror = function () {
+      if (reconEs && reconEs.readyState === EventSource.CLOSED) setReconRunning(false);
+    };
+  });
+
+  els.reportBtn.addEventListener("click", function () {
+    if (reconReportId) window.open("/api/recon/report/" + reconReportId, "_blank");
+  });
+
   /* ---------- export ---------- */
   function download(filename, text, mime) {
     var blob = new Blob([text], { type: mime });
@@ -527,9 +1013,11 @@ if ("serviceWorker" in navigator) {
 
   els.csvBtn.addEventListener("click", function () {
     if (!currentRun.length) { toast("Nothing to export"); return; }
-    var lines = ["username,site,url,status"];
+    var lines = ["username,site,url,status,engines,variant_of,display_name,bio"];
     currentRun.forEach(function (r) {
-      lines.push([r.username, r.site, r.url, r.status].map(function (v) {
+      lines.push([r.username, r.site, r.url, r.status,
+                  (r.engines || []).join("|"), r.variant_of || "",
+                  r.display_name || "", r.bio || ""].map(function (v) {
         v = String(v == null ? "" : v);
         return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
       }).join(","));
@@ -544,6 +1032,8 @@ if ("serviceWorker" in navigator) {
 
   els.clearBtn.addEventListener("click", function () {
     clearResults();
+    reconRows = {}; reconCards = {}; reconReportId = null;
+    els.reportBtn.style.display = "none";
     els.overallBar.style.display = "none";
     els.results.innerHTML = '<div class="empty-state">Enter one or more usernames and hit <b>Start search</b>.<br>Results stream in live as each site is checked.</div>';
   });
@@ -562,6 +1052,12 @@ if ("serviceWorker" in navigator) {
         var u = document.createElement("div");
         u.className = "h-user";
         u.textContent = run.username;
+        if (run.kind === "recon") {
+          var kb = document.createElement("span");
+          kb.className = "h-kind";
+          kb.textContent = "recon";
+          u.appendChild(kb);
+        }
         var m = document.createElement("div");
         m.className = "h-meta";
         m.innerHTML = "";
@@ -582,8 +1078,51 @@ if ("serviceWorker" in navigator) {
     fetch("/api/history/" + id).then(function (r) { return r.json(); }).then(function (run) {
       if (run.error) { toast("Run not found"); return; }
       stopStream();
+      stopRecon();
       clearResults();
+      reconRows = {}; reconCards = {}; reconReportId = null;
+      els.reportBtn.style.display = "none";
       els.overallBar.style.display = "none";
+
+      if (run.kind === "recon" && run.results && !Array.isArray(run.results)) {
+        // Deep recon run: re-render all sections read-only.
+        (run.results.accounts || []).forEach(function (r) {
+          addReconFoundRow({ username: r.username, site: r.site, url: r.url,
+                             engines: r.engines, variant_of: null });
+          if (r.enrichment) {
+            enrichReconRow({ username: r.username, site: r.site,
+                             enrichment: r.enrichment });
+          }
+        });
+        (run.results.variants || []).forEach(function (r) {
+          addReconFoundRow({ username: r.username, site: r.site, url: r.url,
+                             engines: r.engines, variant_of: r.variant_of });
+          if (r.enrichment) {
+            enrichReconRow({ username: r.username, site: r.site,
+                             enrichment: r.enrichment });
+          }
+        });
+        var em = run.results.email || {};
+        if (em.gravatar || (em.holehe || []).length) {
+          var addr = (run.results.params || {}).email || run.username;
+          renderGravatar(addr, em.gravatar);
+          (em.holehe || []).forEach(function (h) {
+            addHoleheRow({ email: addr, site: h.site, domain: h.domain,
+                           exists: h.exists, error: h.error,
+                           rate_limit: h.rate_limit });
+          });
+        }
+        renderCorrelation(run.results.correlation || []);
+        Object.keys(reconCards).forEach(function (k) {
+          reconCards[k].status.textContent = "loaded · " + run.ts;
+        });
+        reconReportId = run.id;
+        els.reportBtn.style.display = "";
+        els.exportBar.style.display = "flex";
+        els.results.scrollIntoView({ behavior: "smooth" });
+        return;
+      }
+
       var c = getCard(run.username);
       c.scanning.textContent = "loaded · " + run.ts;
       c.fill.style.width = "100%";
