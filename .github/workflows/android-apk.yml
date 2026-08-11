@@ -33,7 +33,6 @@ jobs:
       # SERVER_URL comes from the repo's `SERVER_URL` Actions variable; falls
       # back to the placeholder baked into android/app/build.gradle.kts.
       - name: Build debug APK
-        working-directory: android
         env:
           SERVER_URL: ${{ vars.SERVER_URL }}
         run: gradle -p android assembleDebug --no-daemon
