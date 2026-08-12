@@ -1,48 +1,30 @@
-// Sherlock Web service worker.
-// HTML is network-first so deploys show up immediately (cache is only a
-// fallback when offline). Icons/manifest are cache-first — they rarely change
-// and the cache name bump below evicts stale copies.
-// API requests (including the SSE stream) always go to the network.
-const CACHE = "sherlock-web-shell-v3";
-const STATIC_ASSETS = [
-  "/manifest.webmanifest",
-  "/static/icons/icon-192.png",
-  "/static/icons/icon-512.png"
-];
-
-self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches.open(CACHE).then((cache) => cache.addAll(STATIC_ASSETS)).then(() => self.skipWaiting())
-  );
-});
+// Kill-switch service worker.
+//
+// sherlock-web is a live, server-backed tool with no useful offline mode, and a
+// cached app shell kept causing stale-UI bugs (a page that looks loaded but runs
+// old code — e.g. "Start investigation does nothing" after a deploy). So the app
+// no longer uses a service worker at all.
+//
+// This file exists only to UN-install any worker a browser still has. Browsers
+// re-fetch sw.js on their own update check (it is served no-cache), bypassing any
+// old worker's cache; installing this version runs the activate handler below,
+// which purges every cache, unregisters itself, and reloads open tabs so they
+// drop service-worker control. After that the app always loads fresh from the
+// network. index.html also unregisters on load, so either path self-heals.
+self.addEventListener("install", () => self.skipWaiting());
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
-      .then(() => self.clients.claim())
+    (async () => {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+      await self.registration.unregister();
+      const clients = await self.clients.matchAll({ type: "window" });
+      for (const client of clients) {
+        try { client.navigate(client.url); } catch (e) { /* best effort */ }
+      }
+    })()
   );
 });
 
-self.addEventListener("fetch", (event) => {
-  const url = new URL(event.request.url);
-  // Never touch API/SSE traffic or non-GET requests.
-  if (event.request.method !== "GET" || url.pathname.startsWith("/api/")) return;
-  // HTML navigations: network-first, fall back to cache when offline.
-  if (event.request.mode === "navigate") {
-    event.respondWith(
-      fetch(event.request)
-        .then((res) => {
-          const copy = res.clone();
-          caches.open(CACHE).then((cache) => cache.put("/", copy));
-          return res;
-        })
-        .catch(() => caches.match("/"))
-    );
-    return;
-  }
-  // Static assets (icons, manifest): cache-first.
-  event.respondWith(
-    caches.match(event.request).then((hit) => hit || fetch(event.request))
-  );
-});
+// No fetch handler: every request goes straight to the network.
