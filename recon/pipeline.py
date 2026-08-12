@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from sherlock_project.notify import QueryNotify
 from sherlock_project.result import QueryStatus
@@ -307,8 +307,6 @@ async def run_pipeline(
     if phone:
         phone_state = phone_intel(phone)
         emit("phone_intel", phone_state)
-
-    tasks: list = []
 
     # Base username scans (dual engine, full site sets).
     base_items = [(u, {"kind": "base"}) for u in usernames]

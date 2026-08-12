@@ -1,0 +1,13 @@
+# Lint config used by CI and locally (`ruff check .`).
+#
+# Scoped to high-signal rules — pyflakes (F: unused imports/variables, undefined
+# names, bad f-strings, redefinitions) and syntax errors (E9) — so the check
+# blocks real problems without bikeshedding style. Widen `select` over time
+# (e.g. add "I" for import sorting, "E","W" for pycodestyle) once the code is
+# brought into line.
+target-version = "py312"
+line-length = 100
+exclude = ["venv", "android", "android-apk", "static", "__pycache__"]
+
+[lint]
+select = ["E9", "F"]

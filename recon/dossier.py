@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import html
 import time
-from typing import Any, Optional
+from typing import Any
 
 from recon.confidence import account_confidence
 
@@ -208,7 +208,6 @@ def render_dossier(inv: dict, summary: dict) -> str:
     name_rows = summary.get("name_accounts") or []
     email_state = summary.get("email") or {}
     phone = summary.get("phone") or {}
-    clusters = summary.get("correlation") or []
     candidates = summary.get("candidates") or []
 
     score = footprint_score(summary)
@@ -230,7 +229,7 @@ def render_dossier(inv: dict, summary: dict) -> str:
     # -- cover ---------------------------------------------------------------
     p.append("<div class='cover'>")
     p.append("<div class='conf'>CONFIDENTIAL — OSINT ASSESSMENT</div>")
-    p.append(f"<h1>Identity Investigation Dossier</h1>")
+    p.append("<h1>Identity Investigation Dossier</h1>")
     p.append(f"<div class='subj'>{_e(subject)}</div>")
     p.append("<table>")
     p.append(f"<tr><td>Investigation</td><td>#{_e(inv.get('id'))}</td></tr>")

@@ -7,7 +7,7 @@ not embedded. All dynamic values are HTML-escaped.
 from __future__ import annotations
 
 import html
-from typing import Any, Optional
+from typing import Any
 
 
 def _e(v: Any) -> str:
