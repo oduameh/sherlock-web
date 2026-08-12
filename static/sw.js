@@ -3,7 +3,7 @@
 // fallback when offline). Icons/manifest are cache-first — they rarely change
 // and the cache name bump below evicts stale copies.
 // API requests (including the SSE stream) always go to the network.
-const CACHE = "sherlock-web-shell-v2";
+const CACHE = "sherlock-web-shell-v3";
 const STATIC_ASSETS = [
   "/manifest.webmanifest",
   "/static/icons/icon-192.png",

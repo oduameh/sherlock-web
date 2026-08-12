@@ -1286,8 +1286,16 @@ if ("serviceWorker" in navigator) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
-    }).then(function (r) { return r.json(); }).then(function (resp) {
-      if (resp.error) { toast(resp.error); return; }
+    }).then(function (r) {
+      return r.json().catch(function () {
+        return { error: "server returned HTTP " + r.status };
+      });
+    }).then(function (resp) {
+      if (resp.error) {
+        toast(resp.error);
+        els.overallText.textContent = "Could not start: " + resp.error;
+        return;
+      }
       var invId = resp.investigation_id;
       currentInvInputs = {
         name: payload.name || "",
@@ -1295,7 +1303,11 @@ if ("serviceWorker" in navigator) {
         email: payload.email || ""
       };
       openInvestigationStream(invId, payload);
-    }).catch(function () { toast("Failed to create investigation"); });
+    }).catch(function () {
+      var msg = "Can't reach the server — is it still running? Reload the page and try again.";
+      toast(msg);
+      els.overallText.textContent = msg;
+    });
   });
 
   function openInvestigationStream(invId, payload) {
