@@ -33,6 +33,31 @@ security-guard coverage for the recon engines — no network required):
 ./venv/bin/python -m pytest -q
 ```
 
+## Persistence — SQLite or Postgres
+
+The backend is chosen by the `DATABASE_URL` environment variable:
+
+- **Unset (default)** — SQLite (`history.db`), zero-config for local development.
+- **A `postgres://` / `postgresql://` URL** — Postgres, the production backend.
+
+All application SQL is written once in the SQLite idiom; `dbconn.py` translates
+placeholders and primary keys for Postgres so the two stay in sync. **This
+matters on Railway:** its disk is ephemeral, so SQLite there loses every
+investigation, watchlist, and alert on each redeploy — point `DATABASE_URL` at
+the Railway Postgres add-on and casework survives.
+
+```bash
+# Railway: add the Postgres plugin, then it injects DATABASE_URL automatically.
+# Local, against a throwaway Postgres:
+DATABASE_URL=postgresql://postgres:pass@localhost:5432/sherlock ./run.sh
+
+# One-shot import of an existing history.db into Postgres:
+DATABASE_URL=postgresql://... ./venv/bin/python migrate_to_postgres.py history.db
+```
+
+CI runs the suite against SQLite and a separate boot + persistence check against
+real Postgres, so both backends stay green.
+
 ## Reliability & security hardening
 
 - **Concurrent SQLite** — all connections go through `dbconn.connect()`, which

@@ -6,3 +6,4 @@ holehe==1.61
 httpx==0.28.1
 pillow==12.3.0
 phonenumbers==8.13.55
+psycopg[binary]>=3.1

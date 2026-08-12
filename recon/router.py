@@ -232,7 +232,7 @@ def init_tables(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS site_health (
             site TEXT NOT NULL,
             engine TEXT NOT NULL,
-            window TEXT NOT NULL DEFAULT '[]',
+            "window" TEXT NOT NULL DEFAULT '[]',
             ewma_latency_ms REAL,
             consecutive_failures INTEGER NOT NULL DEFAULT 0,
             circuit_open_until TEXT,
@@ -279,7 +279,7 @@ class SiteHealthStore:
     @staticmethod
     def _load_state(conn: sqlite3.Connection, site: str, engine: str) -> dict:
         row = conn.execute(
-            "SELECT window, ewma_latency_ms, consecutive_failures,"
+            'SELECT "window", ewma_latency_ms, consecutive_failures,'
             " circuit_open_until, cooldown_seconds"
             " FROM site_health WHERE site = ? AND engine = ?",
             (site, engine),
@@ -320,12 +320,12 @@ class SiteHealthStore:
     def _write_state(conn: sqlite3.Connection, site: str, engine: str,
                      state: dict, now: float) -> None:
         conn.execute(
-            "INSERT INTO site_health (site, engine, window,"
+            'INSERT INTO site_health (site, engine, "window",'
             " ewma_latency_ms, consecutive_failures,"
             " circuit_open_until, cooldown_seconds, updated_at)"
             " VALUES (?,?,?,?,?,?,?,?)"
             " ON CONFLICT(site, engine) DO UPDATE SET"
-            " window = excluded.window,"
+            ' "window" = excluded."window",'
             " ewma_latency_ms = excluded.ewma_latency_ms,"
             " consecutive_failures = excluded.consecutive_failures,"
             " circuit_open_until = excluded.circuit_open_until,"
@@ -405,7 +405,7 @@ class SiteHealthStore:
         try:
             with db_connect(self.db_path) as conn:
                 rows = conn.execute(
-                    "SELECT site, engine, window, ewma_latency_ms,"
+                    'SELECT site, engine, "window", ewma_latency_ms,'
                     " consecutive_failures, circuit_open_until,"
                     " cooldown_seconds, updated_at FROM site_health"
                 ).fetchall()
