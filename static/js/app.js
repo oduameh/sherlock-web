@@ -59,6 +59,8 @@
     cy: document.getElementById("cy"),
     confSlider: document.getElementById("confSlider"),
     confSliderVal: document.getElementById("confSliderVal"),
+    nodeConfSlider: document.getElementById("nodeConfSlider"),
+    nodeConfSliderVal: document.getElementById("nodeConfSliderVal"),
     graphFitBtn: document.getElementById("graphFitBtn"),
     graphLabelsBtn: document.getElementById("graphLabelsBtn"),
     graphZoomInBtn: document.getElementById("graphZoomInBtn"),
@@ -1319,6 +1321,12 @@
     nameserver: "#6e7681"
   };
 
+  function confidenceBand(conf) {
+    if (conf >= 70) return { label: "High", cls: "conf-high" };
+    if (conf >= 40) return { label: "Medium", cls: "conf-med" };
+    return { label: "Low", cls: "conf-low" };
+  }
+
   function nodeColor(n) {
     if (n.type === "account") {
       var v = n.verification || (n.data || {}).verification;
@@ -1336,16 +1344,34 @@
     return 16 + Math.round((n.confidence || 40) * 0.22);
   }
 
-  function applyEdgeFilter() {
+  function applyGraphFilters() {
     if (!cy) return;
-    var min = parseInt(els.confSlider.value, 10);
-    els.confSliderVal.textContent = min + "%";
+    var edgeMin = parseInt(els.confSlider.value, 10);
+    var nodeMin = parseInt(els.nodeConfSlider.value, 10);
+    els.confSliderVal.textContent = edgeMin + "%";
+    els.nodeConfSliderVal.textContent = nodeMin + "%";
+    // Dim account nodes below the confidence threshold (other entity types —
+    // person/email/phone/domain/ip — are inputs/facts and always shown).
+    var dimmed = {};
+    cy.nodes().forEach(function (n) {
+      var weak = n.data("type") === "account" &&
+        (n.data("confidence") || 0) < nodeMin;
+      dimmed[n.id()] = weak;
+      n.style("opacity", weak ? 0.12 : 1);
+    });
+    // Hide an edge below the edge threshold, or if either endpoint is dimmed.
     cy.edges().forEach(function (e) {
-      e.style("display", (e.data("confidence") || 0) >= min ? "element" : "none");
+      var show = (e.data("confidence") || 0) >= edgeMin &&
+        !dimmed[e.data("source")] && !dimmed[e.data("target")];
+      e.style("display", show ? "element" : "none");
     });
   }
 
-  els.confSlider.addEventListener("input", applyEdgeFilter);
+  // Backwards-compatible alias (renderGraph calls applyEdgeFilter once built).
+  var applyEdgeFilter = applyGraphFilters;
+
+  els.confSlider.addEventListener("input", applyGraphFilters);
+  els.nodeConfSlider.addEventListener("input", applyGraphFilters);
 
   els.graphFitBtn.addEventListener("click", function () {
     if (cy) cy.fit(null, 40);
@@ -1390,9 +1416,15 @@
     body.appendChild(h);
     var t = document.createElement("div");
     t.className = "np-type";
-    t.textContent = d.type + (d.sublabel ? " · " + d.sublabel : "") +
-      " · confidence " + (d.confidence != null ? d.confidence + "%" : "—");
+    t.textContent = d.type + (d.sublabel ? " · " + d.sublabel : "");
     body.appendChild(t);
+    if (d.confidence != null) {
+      var band = confidenceBand(d.confidence);
+      var chip = document.createElement("span");
+      chip.className = "conf-band " + band.cls;
+      chip.textContent = band.label + " confidence · " + d.confidence + "%";
+      body.appendChild(chip);
+    }
 
     function addField(k, v, isLink) {
       if (v === null || v === undefined || v === "") return;

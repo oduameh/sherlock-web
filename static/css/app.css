@@ -1044,6 +1044,11 @@ select { appearance: auto; }
 }
 .legend-title:not(:first-child) { margin-top: var(--sp-3); }
 .legend-item { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.legend-note { color: var(--text-3); font-size: var(--fs-11); line-height: 1.4; }
+.conf-band { display: inline-block; margin-top: 6px; font-size: var(--fs-11); font-weight: 650; border-radius: var(--r-pill); padding: 2px 10px; border: 1px solid; font-variant-numeric: tabular-nums; }
+.conf-band.conf-high { color: var(--success); border-color: rgba(76, 195, 138, 0.4); background: var(--success-soft); }
+.conf-band.conf-med { color: var(--warn); border-color: rgba(224, 163, 56, 0.4); background: var(--warn-soft); }
+.conf-band.conf-low { color: var(--danger); border-color: rgba(240, 97, 93, 0.35); background: var(--danger-soft); }
 .legend-swatch { width: 12px; height: 12px; flex-shrink: 0; background: var(--sw, var(--text-3)); box-shadow: 0 0 8px -1px var(--sw); }
 .legend-swatch.sw-circle { border-radius: 50%; }
 .legend-swatch.sw-round { border-radius: 3px; }

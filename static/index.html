@@ -249,6 +249,8 @@
             <div class="legend-item"><span class="legend-swatch sw-circle sw-good" aria-hidden="true"></span>Confirmed &middot; multi-engine</div>
             <div class="legend-item"><span class="legend-swatch sw-circle sw-name" aria-hidden="true"></span>Name-derived</div>
             <div class="legend-item"><span class="legend-swatch sw-circle sw-flag" aria-hidden="true"></span>Likely false positive</div>
+            <div class="legend-title">Confidence</div>
+            <div class="legend-item legend-note">Node size = confidence · sliders hide weak matches</div>
           </div>
           <div id="graphToolbar">
             <span class="graph-zoom">
@@ -257,6 +259,10 @@
             </span>
             <button id="graphFitBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Fit graph to view">Fit</button>
             <button id="graphLabelsBtn" class="btn btn-ghost btn-sm" type="button" aria-pressed="true" aria-label="Toggle node labels">Labels</button>
+            <span class="toolbar-sep" aria-hidden="true"></span>
+            <label for="nodeConfSlider">min account confidence</label>
+            <input type="range" id="nodeConfSlider" min="0" max="100" value="0" step="5">
+            <span id="nodeConfSliderVal">0%</span>
             <span class="toolbar-sep" aria-hidden="true"></span>
             <label for="confSlider">min edge confidence</label>
             <input type="range" id="confSlider" min="0" max="100" value="0" step="5">
