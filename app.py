@@ -49,14 +49,21 @@ from sherlock_project.sites import SitesInformation
 try:
     from recon import engines as recon_engines
     from recon import monitor as recon_monitor
+    from recon.connections import find_connections, subject_identifiers
     from recon.correlate import correlate as recon_correlate
     from recon.dossier import render_dossier
     from recon.email_pivot import gravatar_lookup, holehe_available, holehe_scan
     from recon.enrich import enrich_profiles
+    from recon.exposure import exposure_summary
     from recon.graph import build_graph
     from recon.permutations import generate_variants
     from recon.pipeline import run_pipeline
     from recon.report import render_report
+    from recon.timeline import (
+        account_creation_dates,
+        account_events,
+        build_timeline,
+    )
     from recon.validate import is_probably_email
 
     RECON_AVAILABLE = True
@@ -1086,15 +1093,153 @@ if RECON_AVAILABLE:
                                 status_code=409)
         return JSONResponse(build_graph(inv["summary"]))
 
+    # --- investigation intelligence: exposure / timeline / connections -------
+
+    def _summary_rows(summary: dict) -> list[dict]:
+        summary = summary or {}
+        return ((summary.get("accounts") or [])
+                + (summary.get("variants") or [])
+                + (summary.get("name_accounts") or []))
+
+    def _all_investigation_idents() -> list[dict]:
+        """Load every stored investigation as {id, label, ident} for linking."""
+        with db_connect(DB_PATH) as conn:
+            rows = conn.execute(
+                "SELECT id, inputs, summary FROM investigations"
+            ).fetchall()
+        out = []
+        for rid, inputs_json, summary_json in rows:
+            inputs = json.loads(inputs_json) if inputs_json else {}
+            summary = json.loads(summary_json) if summary_json else {}
+            out.append({
+                "id": rid,
+                "label": _subject_label(inputs),
+                "ident": subject_identifiers(inputs, summary),
+            })
+        return out
+
+    def _investigation_connections(inv: dict,
+                                   others: list[dict] | None = None
+                                   ) -> list[dict]:
+        target_ident = subject_identifiers(inv["inputs"], inv["summary"] or {})
+        if others is None:
+            others = _all_investigation_idents()
+        return find_connections(inv["id"], target_ident, others)
+
+    async def _investigation_timeline(inv: dict) -> list[dict]:
+        """Assemble the subject timeline (opened, scans, alerts, account ages)."""
+        inputs = inv["inputs"]
+        summary = inv["summary"] or {}
+        events: list[dict] = [{
+            "date": inv["created_at"], "kind": "opened",
+            "title": "Investigation opened",
+            "detail": _subject_label(inputs) or None,
+        }]
+
+        # Scan runs linked to this investigation.
+        with db_connect(DB_PATH) as conn:
+            run_rows = conn.execute(
+                "SELECT ts, found, total FROM runs WHERE investigation_id = ?"
+                " ORDER BY id",
+                (inv["id"],),
+            ).fetchall()
+            watch_rows = conn.execute(
+                "SELECT id, label, inputs FROM watchlist"
+            ).fetchall()
+            alert_rows = conn.execute(
+                "SELECT watch_id, created_at, message FROM watch_alerts"
+                " ORDER BY id"
+            ).fetchall()
+        for ts, found, total in run_rows:
+            events.append({
+                "date": ts, "kind": "scan", "title": "Scan run",
+                "detail": f"{found} account(s) found across {total} site(s)",
+            })
+
+        # Watchlist alerts from watches that share a handle/email with this
+        # subject (public-signature overlap, not a hard link).
+        target_ident = subject_identifiers(inputs, summary)
+        matched_watches = {}
+        for wid, label, w_inputs_json in watch_rows:
+            w_ident = subject_identifiers(
+                json.loads(w_inputs_json) if w_inputs_json else {}, {})
+            if (target_ident["handles"] & w_ident["handles"]
+                    or target_ident["emails"] & w_ident["emails"]):
+                matched_watches[wid] = label
+        for wid, created_at, message in alert_rows:
+            if wid in matched_watches:
+                events.append({
+                    "date": created_at, "kind": "alert", "title": message,
+                    "detail": f"watch: {matched_watches[wid]}",
+                })
+
+        # Public account-creation dates (GitHub API, best-effort, no key).
+        rows = _summary_rows(summary)
+        try:
+            dates = await account_creation_dates(rows)
+        except Exception:
+            dates = {}
+        events.extend(account_events(rows, dates))
+
+        return build_timeline(events)
+
+    @app.get("/api/investigate/{inv_id}/exposure")
+    def investigate_exposure(inv_id: int) -> JSONResponse:
+        inv = _get_investigation(inv_id)
+        if inv is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse({
+            "investigation_id": inv_id,
+            "status": inv["status"],
+            "exposure": exposure_summary(inv["summary"] or {}),
+        })
+
+    @app.get("/api/investigate/{inv_id}/timeline")
+    async def investigate_timeline(inv_id: int) -> JSONResponse:
+        inv = _get_investigation(inv_id)
+        if inv is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        timeline = await _investigation_timeline(inv)
+        return JSONResponse({
+            "investigation_id": inv_id,
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "timeline": timeline,
+        })
+
+    @app.get("/api/investigate/{inv_id}/connections")
+    def investigate_connections(inv_id: int) -> JSONResponse:
+        inv = _get_investigation(inv_id)
+        if inv is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        others = _all_investigation_idents()
+        connections = _investigation_connections(inv, others)
+        return JSONResponse({
+            "investigation_id": inv_id,
+            "checked": max(0, len(others) - 1),
+            "connections": connections,
+        })
+
     @app.get("/api/investigate/{inv_id}/report")
-    def investigate_report(inv_id: int) -> Response:
+    async def investigate_report(inv_id: int) -> Response:
         inv = _get_investigation(inv_id)
         if inv is None:
             return Response("not found", status_code=404)
         if not inv["summary"]:
             return Response("investigation has not run yet", status_code=409)
-        return Response(render_dossier(inv, inv["summary"]),
-                        media_type="text/html")
+        # Enrich the dossier with the timeline + cross-case connections.
+        try:
+            timeline = await _investigation_timeline(inv)
+        except Exception:
+            timeline = None
+        try:
+            connections = _investigation_connections(inv)
+        except Exception:
+            connections = None
+        return Response(
+            render_dossier(inv, inv["summary"], timeline=timeline,
+                           connections=connections),
+            media_type="text/html",
+        )
 
     # --- watchlist + alerts ---------------------------------------------------
 
