@@ -247,6 +247,55 @@ def _connections_section(connections: list[dict]) -> str:
     return "".join(out)
 
 
+_BROKER_STATUS_LABEL = {
+    "listed": "Profile listed",
+    "blocked": "Blocked (check manually)",
+    "not_found": "Not found",
+    "manual": "Opt-out available",
+}
+
+
+def _broker_section(brokers: dict) -> str:
+    """Data-broker exposure + opt-out map (the Incogni-style remediation view)."""
+    rows = brokers.get("brokers") or []
+    s = brokers.get("summary") or {}
+    out = [f"<h2>Data-broker exposure ({len(rows)} brokers)</h2>"]
+    out.append(
+        "<p class='dim'>People-search sites and data brokers that may expose "
+        "this subject. Each row links directly to that broker's opt-out page — "
+        "the removal path. Most brokers block automated presence checks (shown "
+        "as &lsquo;blocked&rsquo;, never a false &lsquo;not found&rsquo;); those "
+        "must be checked by hand via the search link.</p>"
+    )
+    order = {"listed": 0, "blocked": 1, "manual": 2, "not_found": 3}
+    rows = sorted(rows, key=lambda b: order.get(b.get("status"), 9))
+    out.append("<table class='data'><tr><th>Broker</th><th>Category</th>"
+               "<th>Status</th><th>Opt-out</th></tr>")
+    for b in rows:
+        status = _BROKER_STATUS_LABEL.get(b.get("status"), b.get("status") or "")
+        search = b.get("search_url")
+        search_link = (f" · <a href='{_e(search)}'>search</a>" if search else "")
+        out.append(
+            f"<tr><td><b>{_e(b.get('name'))}</b></td>"
+            f"<td>{_e((b.get('category') or '').capitalize())}</td>"
+            f"<td>{_e(status)}</td>"
+            f"<td><a href='{_e(b.get('optout_url'))}'>opt out</a>{search_link}</td>"
+            f"</tr>"
+        )
+    out.append("</table>")
+    if s.get("listed"):
+        out.append(f"<p><b>{s['listed']}</b> confirmed listing(s) found. ")
+    else:
+        out.append("<p class='dim'>")
+    out.append(
+        f"California residents can remove data from 500+ registered brokers with "
+        f"one free request via the state DROP portal: "
+        f"<a href='{_e(brokers.get('drop_portal'))}'>"
+        f"{_e(brokers.get('drop_portal'))}</a>.</p>"
+    )
+    return "".join(out)
+
+
 def render_dossier(inv: dict, summary: dict, *,
                    timeline: list | None = None,
                    connections: list | None = None) -> str:
@@ -450,6 +499,11 @@ def render_dossier(inv: dict, summary: dict, *,
             p.append("<p class='dim'>" + _e(", ".join(subs[:60]))
                      + ("…" if len(subs) > 60 else "") + "</p>")
 
+    # -- data-broker exposure --------------------------------------------------------
+    brokers = summary.get("brokers") or {}
+    if brokers and brokers.get("brokers"):
+        p.append(_broker_section(brokers))
+
     # -- methodology / limitations -----------------------------------------------------
     p.append("<h2>Methodology</h2>")
     p.append(
@@ -469,6 +523,10 @@ def render_dossier(inv: dict, summary: dict, *,
         "logs (crt.sh). Public data, no API keys.</li>"
         "<li>Enrichment: public profile pages only (title, Open Graph, "
         "JSON-LD Person fields).</li>"
+        "<li>Data-broker exposure: a curated map of people-search sites and "
+        "data brokers with direct opt-out links; best-effort presence checks on "
+        "the minority with predictable search URLs (WAF/CAPTCHA responses are "
+        "reported as &lsquo;blocked&rsquo;, never a false &lsquo;not found&rsquo;).</li>"
         "<li>Verification: each fetched profile is cross-checked for the "
         "scanned handle; a &lsquo;verified&rsquo; chip means the handle appears "
         "on the page, &lsquo;likely false&rsquo; means the page reads like a "

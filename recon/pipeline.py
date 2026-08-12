@@ -32,6 +32,7 @@ from recon.permutations import generate_variants
 from recon.phone_pivot import phone_intel
 from recon.router import RunRouter, retry_delay
 from recon.validate import is_probably_email
+from recon import brokers
 from recon import whatsmyname
 
 logger = logging.getLogger("recon.pipeline")
@@ -138,6 +139,7 @@ async def run_pipeline(
     email: str = "",
     phone: str = "",
     domain: str = "",
+    location: str = "",
     variants: bool = False,
     thorough: bool = False,
     timeout: int = 10,
@@ -174,6 +176,8 @@ async def run_pipeline(
     email_state: dict = {"gravatar": None, "holehe": []}
     phone_state: dict = {}
     domain_state: dict = {}
+    broker_state: dict = {}
+    location = (location or "").strip()
 
     def emit_threadsafe(kind: str, *args) -> None:
         """Route worker-thread callbacks onto the event loop."""
@@ -429,6 +433,12 @@ async def run_pipeline(
         domain_state.update(data)
         emit("domain_intel", data)
 
+    async def broker_worker(person, loc):
+        data = await brokers.broker_exposure(person, loc)
+        broker_state.clear()
+        broker_state.update(data)
+        emit("broker_exposure", data)
+
     # --- plan --------------------------------------------------------------
     candidates = generate_name_candidates(name) if name else []
 
@@ -508,6 +518,9 @@ async def run_pipeline(
     email_task = asyncio.create_task(email_worker(email)) if email else None
     domain_task = (asyncio.create_task(domain_worker(pivot_domain))
                    if pivot_domain else None)
+    # Data-broker exposure keys on a real name (brokers index by name/address).
+    broker_task = (asyncio.create_task(broker_worker(name, location))
+                   if name else None)
 
     # --- phases ------------------------------------------------------------
     await wait_all(base_events)
@@ -558,16 +571,18 @@ async def run_pipeline(
     clusters = await correlate(all_rows)
     emit("correlation", {"clusters": clusters})
 
-    # Wait for the email + domain pivots before persisting.
+    # Wait for the email + domain + broker pivots before persisting.
     if email_task is not None:
         await email_task
     if domain_task is not None:
         await domain_task
+    if broker_task is not None:
+        await broker_task
 
     summary = {
         "params": {
             "name": name, "usernames": usernames, "email": email,
-            "phone": phone, "domain": pivot_domain,
+            "phone": phone, "domain": pivot_domain, "location": location,
             "variants": variants, "thorough": thorough, "timeout": timeout,
         },
         "candidates": candidates,
@@ -577,6 +592,7 @@ async def run_pipeline(
         "email": email_state,
         "phone": phone_state or None,
         "domain": domain_state or None,
+        "brokers": broker_state or None,
         "correlation": clusters,
     }
     router.finish()
@@ -588,6 +604,8 @@ async def run_pipeline(
         "email_hits": sum(1 for h in email_state["holehe"] if h.get("exists")),
         "phone": bool(phone_state),
         "domain": bool(domain_state),
+        "brokers": (broker_state.get("summary", {}).get("total")
+                    if broker_state else 0),
         **router.breakdown(),
     })
     return summary

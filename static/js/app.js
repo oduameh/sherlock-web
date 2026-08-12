@@ -48,6 +48,7 @@
     invEmail: document.getElementById("invEmail"),
     invPhone: document.getElementById("invPhone"),
     invDomain: document.getElementById("invDomain"),
+    invLocation: document.getElementById("invLocation"),
     invVariants: document.getElementById("invVariants"),
     invThorough: document.getElementById("invThorough"),
     invTimeout: document.getElementById("invTimeout"),
@@ -1022,6 +1023,59 @@
     }
   }
 
+  var BROKER_STATUS = {
+    listed: { cls: "b-listed", label: "listed" },
+    blocked: { cls: "b-blocked", label: "blocked (check manually)" },
+    not_found: { cls: "b-none", label: "not found" },
+    manual: { cls: "b-manual", label: "opt out" }
+  };
+
+  function renderBrokerExposure(d) {
+    if (!d || !d.brokers) return;
+    var c = invSection("brokers", "Data-broker exposure", d.name || "brokers");
+    c.status.textContent = "done";
+    c.found.style.display = "none";
+    c.rows.innerHTML = "";
+    var s = d.summary || {};
+    var head = document.createElement("div");
+    head.className = "dim";
+    head.style.padding = "2px 16px 8px";
+    head.innerHTML = (s.total || 0) + " brokers · " + (s.listed || 0) +
+      " listed · " + (s.blocked || 0) + " blocked · " +
+      '<a href="' + d.drop_portal + '" target="_blank" rel="noopener noreferrer">' +
+      "remove from 500+ via California DROP portal &#8599;</a>";
+    c.rows.appendChild(head);
+    // strong signals first: listed, then blocked, then the rest
+    var order = { listed: 0, blocked: 1, manual: 2, not_found: 3 };
+    var sorted = (d.brokers || []).slice().sort(function (a, b) {
+      return (order[a.status] || 9) - (order[b.status] || 9);
+    });
+    sorted.forEach(function (b) {
+      var meta = BROKER_STATUS[b.status] || BROKER_STATUS.manual;
+      var row = document.createElement("div");
+      row.className = "brow";
+      var name = document.createElement("span");
+      name.className = "site"; name.textContent = b.name;
+      var cat = document.createElement("span");
+      cat.className = "engine"; cat.textContent = b.category || "";
+      var badge = document.createElement("span");
+      badge.className = "badge " + meta.cls; badge.textContent = meta.label;
+      var links = document.createElement("span");
+      links.className = "brow-links";
+      if (b.search_url) {
+        var sl = document.createElement("a");
+        sl.href = b.search_url; sl.target = "_blank"; sl.rel = "noopener noreferrer";
+        sl.textContent = "search"; links.appendChild(sl);
+      }
+      var ol = document.createElement("a");
+      ol.href = b.optout_url; ol.target = "_blank"; ol.rel = "noopener noreferrer";
+      ol.textContent = "opt out"; links.appendChild(ol);
+      row.appendChild(name); row.appendChild(cat);
+      row.appendChild(badge); row.appendChild(links);
+      c.rows.appendChild(row);
+    });
+  }
+
   function renderCorrelation(clusters) {
     var c = invSection("correlation", "Correlation", "clusters");
     c.status.textContent = "done";
@@ -1127,6 +1181,7 @@
       email: els.invEmail.value.trim(),
       phone: els.invPhone.value.trim(),
       domain: els.invDomain.value.trim(),
+      location: els.invLocation.value.trim(),
       variants: els.invVariants.checked,
       thorough: els.invThorough.checked,
       timeout: parseInt(els.invTimeout.value || "10", 10)
@@ -1226,6 +1281,9 @@
     });
     invEs.addEventListener("domain_intel", function (e) {
       renderDomainIntel(JSON.parse(e.data));
+    });
+    invEs.addEventListener("broker_exposure", function (e) {
+      renderBrokerExposure(JSON.parse(e.data));
     });
     invEs.addEventListener("correlation", function (e) {
       renderCorrelation(JSON.parse(e.data).clusters);
@@ -1920,6 +1978,7 @@
     }
     if (summary.phone) renderPhoneIntel(summary.phone);
     if (summary.domain) renderDomainIntel(summary.domain);
+    if (summary.brokers) renderBrokerExposure(summary.brokers);
     renderCorrelation(summary.correlation || []);
     Object.keys(invCards).forEach(function (k) {
       invCards[k].status.textContent = "loaded · " + run.ts;

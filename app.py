@@ -908,6 +908,19 @@ if RECON_AVAILABLE:
                 {"error": f"'{domain}' is not a valid domain"}, status_code=400)
         return JSONResponse(await domain_intel(domain))
 
+    @app.get("/api/brokers")
+    async def broker_lookup(name: str = Query(...),
+                            location: str = Query("")) -> JSONResponse:
+        """Data-broker exposure for a person: which brokers likely hold their
+        data, each with a direct opt-out link. Best-effort presence checks on
+        the auto-checkable minority; the rest link straight to opt-out."""
+        from recon.brokers import broker_exposure
+
+        name = name.strip()
+        if not name:
+            return JSONResponse({"error": "a name is required"}, status_code=400)
+        return JSONResponse(await broker_exposure(name, location.strip()))
+
     def _get_investigation(inv_id: int):
         with db_connect(DB_PATH) as conn:
             row = conn.execute(
@@ -960,6 +973,7 @@ if RECON_AVAILABLE:
             "email": str(body.get("email") or "").strip(),
             "phone": str(body.get("phone") or "").strip(),
             "domain": str(body.get("domain") or "").strip().lower(),
+            "location": str(body.get("location") or "").strip(),
             "variants": bool(body.get("variants")),
             "thorough": bool(body.get("thorough")),
             "timeout": max(1, min(120, int(body.get("timeout") or 10))),
@@ -1049,6 +1063,7 @@ if RECON_AVAILABLE:
                     name=inputs["name"], usernames=inputs["usernames"],
                     email=inputs["email"], phone=inputs["phone"],
                     domain=inputs.get("domain", ""),
+                    location=inputs.get("location", ""),
                     variants=inputs["variants"],
                     thorough=inputs.get("thorough", False),
                     timeout=inputs["timeout"],
