@@ -114,11 +114,19 @@
 
   var EMPTY_STATE_HTML =
     '<div class="empty-state">' +
-      '<div class="empty-icon" aria-hidden="true">' +
-        '<svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><line x1="15.2" y1="15.2" x2="21" y2="21"/></svg>' +
+      '<div class="hero">' +
+        '<span class="hero-eyebrow"><span class="hero-eyebrow-dot" aria-hidden="true"></span>OSINT investigation console</span>' +
+        '<h2 class="hero-title">One clue in.<span class="hero-accent">A full identity out.</span></h2>' +
+        '<p class="hero-lead">Give the panel on the left a name, username, email, phone, or domain. Sherlock Web fans out across engines and public data sources, verifies what it finds, and correlates it into one confidence-scored picture.</p>' +
       "</div>" +
-      "<p>One clue in — a name, username, email, or phone — and hit <b>Start investigation</b>.</p>" +
-      '<p class="empty-sub">Accounts, email exposure, phone intel, correlations and an identity graph stream in live.</p>' +
+      '<div class="cap-grid" aria-label="What Sherlock Web checks">' +
+        '<div class="cap-card"><span class="cap-ic" aria-hidden="true"><svg viewBox="0 0 20 20" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="6.2" height="6.2" rx="1.4"/><rect x="10.8" y="3" width="6.2" height="6.2" rx="1.4"/><rect x="3" y="10.8" width="6.2" height="6.2" rx="1.4"/><rect x="10.8" y="10.8" width="6.2" height="6.2" rx="1.4"/></svg></span><div class="cap-body"><span class="cap-t">Accounts across engines</span><span class="cap-d">Sherlock, Maigret &amp; WhatsMyName — cross-checked and de-duplicated.</span></div></div>' +
+        '<div class="cap-card"><span class="cap-ic" aria-hidden="true"><svg viewBox="0 0 20 20" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4.5" width="15" height="11" rx="1.8"/><path d="M3 6l7 5 7-5"/></svg></span><div class="cap-body"><span class="cap-t">Email exposure</span><span class="cap-d">Gravatar profiles plus where the address is registered.</span></div></div>' +
+        '<div class="cap-card"><span class="cap-ic" aria-hidden="true"><svg viewBox="0 0 20 20" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2.5" width="8" height="15" rx="1.8"/><line x1="9" y1="15" x2="11" y2="15"/></svg></span><div class="cap-body"><span class="cap-t">Phone intelligence</span><span class="cap-d">Validity, region, carrier and line type — fully offline.</span></div></div>' +
+        '<div class="cap-card"><span class="cap-ic" aria-hidden="true"><svg viewBox="0 0 20 20" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7.5"/><path d="M2.5 10h15"/><path d="M10 2.5c2 2.4 3 5 3 7.5s-1 5.1-3 7.5c-2-2.4-3-5-3-7.5s1-5.1 3-7.5z"/></svg></span><div class="cap-body"><span class="cap-t">Domain recon</span><span class="cap-d">DNS, RDAP registration and subdomains from CT logs.</span></div></div>' +
+        '<div class="cap-card"><span class="cap-ic" aria-hidden="true"><svg viewBox="0 0 20 20" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.5l6 2.2v4.3c0 3.7-2.5 6.7-6 8-3.5-1.3-6-4.3-6-8V4.7z"/><path d="M7.5 10l1.7 1.7L13 8"/></svg></span><div class="cap-body"><span class="cap-t">Data-broker exposure</span><span class="cap-d">People-search footprint with direct opt-out links.</span></div></div>' +
+        '<div class="cap-card"><span class="cap-ic" aria-hidden="true"><svg viewBox="0 0 20 20" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2"/><circle cx="15" cy="6" r="2"/><circle cx="10" cy="15" r="2"/><path d="M6.6 7.4l2.5 6M13.4 7.4l-2.5 6M6.9 6h6.2"/></svg></span><div class="cap-body"><span class="cap-t">Identity graph</span><span class="cap-d">Correlated, confidence-scored entities on one canvas.</span></div></div>' +
+      "</div>" +
     "</div>";
 
   /* ============================ utils ============================ */
@@ -236,6 +244,22 @@
     health: document.getElementById("tabHealth")
   };
 
+  /* topbar contextual title/subtitle per section */
+  var SECTION_META = {
+    investigate: { title: "Investigate", sub: "One clue in → a full identity out" },
+    watchlist: { title: "Watchlist", sub: "Continuous monitoring with change alerts" },
+    history: { title: "History", sub: "Reload any past investigation or scan" },
+    health: { title: "Source Health", sub: "Adaptive routing, reliability & circuit breakers" }
+  };
+  var sectionTitleEl = document.getElementById("sectionTitle");
+  var sectionSubEl = document.getElementById("sectionSub");
+  function setSectionMeta(tab) {
+    var m = SECTION_META[tab];
+    if (!m) return;
+    if (sectionTitleEl) sectionTitleEl.textContent = m.title;
+    if (sectionSubEl) sectionSubEl.textContent = m.sub;
+  }
+
   function closeSidebar() {
     els.sidebar.classList.remove("open");
     els.sidebarOverlay.classList.remove("open");
@@ -264,6 +288,7 @@
       Object.keys(tabEls).forEach(function (k) {
         tabEls[k].classList.toggle("active", k === tab);
       });
+      setSectionMeta(tab);
       if (tab === "watchlist") { loadWatchlist(); loadAllAlerts(); }
       if (tab === "history") { loadHistory(); }
       if (tab === "health") { loadHealthSources(); }
