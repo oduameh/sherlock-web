@@ -167,6 +167,17 @@
   .rrow .qt { margin-left: auto; color: var(--dim); font-size: 11px; white-space: nowrap; }
   .rrow.error { opacity: .45; }
   .rrow.error .status { color: var(--red); font-size: 12px; }
+
+  /* ---- source health ---- */
+  .hrow { display: flex; align-items: center; gap: 10px; padding: 7px 0; font-size: 13px; border-bottom: 1px solid rgba(45,51,59,.5); flex-wrap: wrap; }
+  .hrow:last-child { border-bottom: none; }
+  .hrow .site { font-weight: 600; min-width: 140px; }
+  .hrow .engine { color: var(--dim); font-size: 11px; }
+  .hrow .cls { color: var(--amber); font-size: 12px; }
+  .hrow .meta { margin-left: auto; color: var(--dim); font-size: 11.5px; white-space: nowrap; }
+  .badge.circuit-open { background: rgba(248,81,73,.12); color: var(--red); border: 1px solid rgba(248,81,73,.35); }
+  .badge.circuit-half { background: rgba(210,153,34,.12); color: var(--amber); border: 1px solid rgba(210,153,34,.35); }
+  .badge.circuit-closed { background: rgba(63,185,80,.15); color: var(--green); border: 1px solid rgba(63,185,80,.4); }
   .empty-state { color: var(--dim); text-align: center; padding: 60px 20px; font-size: 14px; }
   #exportBar { display: none; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; align-items: center; }
   #exportBar select { width: auto; padding: 6px 8px; font-size: 12px; }
@@ -291,6 +302,7 @@
     <button class="app-tab active" data-tab="investigate" type="button">Investigate</button>
     <button class="app-tab" data-tab="watchlist" type="button">Watchlist</button>
     <button class="app-tab" data-tab="history" type="button">History</button>
+    <button class="app-tab" data-tab="health" type="button">Health</button>
   </nav>
   <div id="bellWrap">
     <button id="bellBtn" type="button" title="Alerts">&#128276;<span id="alertBadge">0</span></button>
@@ -476,6 +488,18 @@
   <div id="historyPage"><div class="hint">No runs yet.</div></div>
 </main>
 
+<!-- ============ SOURCE HEALTH ============ -->
+<main id="tabHealth" class="page">
+  <h2 style="font-size:17px;margin-bottom:14px">Source health <span style="color:var(--dim);font-size:12.5px;font-weight:400">— adaptive routing: per-site reliability, error classes, circuit breakers</span></h2>
+  <div class="panel" style="margin-bottom:16px">
+    <div id="healthSummary" class="hint">Loading&hellip;</div>
+  </div>
+  <div class="panel">
+    <h3 style="font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim);margin-bottom:10px">Tracked sources (worst first)</h3>
+    <div id="healthList"><div class="hint">No source observations yet.</div></div>
+  </div>
+</main>
+
 <div id="toast"></div>
 
 <script src="/static/vendor/cytoscape.min.js"></script>
@@ -587,7 +611,8 @@ if ("serviceWorker" in navigator) {
   var tabEls = {
     investigate: document.getElementById("tabInvestigate"),
     watchlist: document.getElementById("tabWatchlist"),
-    history: document.getElementById("tabHistory")
+    history: document.getElementById("tabHistory"),
+    health: document.getElementById("tabHealth")
   };
   document.querySelectorAll(".app-tab").forEach(function (btn) {
     btn.addEventListener("click", function () {
@@ -599,6 +624,7 @@ if ("serviceWorker" in navigator) {
       });
       if (tab === "watchlist") { loadWatchlist(); loadAllAlerts(); }
       if (tab === "history") { loadHistory(); }
+      if (tab === "health") { loadHealthSources(); }
     });
   });
   function switchTab(tab) {
@@ -703,6 +729,84 @@ if ("serviceWorker" in navigator) {
     holeheCounts = { hits: 0, checked: 0 };
     els.overallBar.style.display = "block";
     els.overallFill.style.width = "0%";
+  }
+
+  /* ---------- adaptive routing: error breakdown + source health ---------- */
+  var ERROR_LABELS = {
+    timeout: "timeouts", dns: "DNS failures", tls: "TLS errors",
+    conn_reset: "connection resets", http_429: "rate-limited",
+    http_403_waf: "WAF-blocked", http_5xx: "server errors (5xx)",
+    detector_stale: "stale detectors", unknown: "unknown errors"
+  };
+
+  function breakdownText(d) {
+    var bd = (d && d.error_breakdown) || {};
+    var total = 0;
+    Object.keys(bd).forEach(function (k) { total += bd[k]; });
+    if (!total) return "";
+    var parts = Object.keys(bd).map(function (k) {
+      return bd[k] + " " + (ERROR_LABELS[k] || k);
+    });
+    return total + " errors: " + parts.join(", ");
+  }
+
+  function degradedText(d) {
+    return (d && d.degraded_sources)
+      ? d.degraded_sources + " degraded source(s) skipped (circuit open)" : "";
+  }
+
+  function noteSkippedDegraded(d) {
+    var names = (d.sites || []).map(function (s) { return s.site; });
+    toast("Skipping " + d.count + " degraded source(s) (circuit open): " +
+          names.slice(0, 5).join(", ") + (names.length > 5 ? "…" : ""));
+  }
+
+  function loadHealthSources() {
+    var sum = document.getElementById("healthSummary");
+    var list = document.getElementById("healthList");
+    fetch("/api/health/sources").then(function (r) { return r.json(); }).then(function (d) {
+      if (!d.available) {
+        sum.textContent = "Source health unavailable — routing is disabled (database error).";
+        list.innerHTML = "";
+        return;
+      }
+      var a = d.aggregate || {};
+      sum.textContent = (a.sites_tracked || 0) + " sources tracked · " +
+        (a.observations || 0) + " observations · " +
+        Math.round((a.overall_failure_rate || 0) * 100) + "% overall failure rate · " +
+        (a.circuits_open || 0) + " circuit(s) open";
+      if (!d.sites || !d.sites.length) {
+        list.innerHTML = '<div class="hint">No source observations yet.</div>';
+        return;
+      }
+      list.innerHTML = "";
+      d.sites.forEach(function (s) {
+        var row = document.createElement("div");
+        row.className = "hrow";
+        var circuitCls = s.circuit === "open" ? "circuit-open"
+          : (s.circuit === "half-open" ? "circuit-half" : "circuit-closed");
+        var circuitTxt = s.circuit === "open"
+          ? "open · " + Math.max(1, Math.ceil(s.cooldown_remaining_s / 60)) + "m left"
+          : s.circuit;
+        row.innerHTML =
+          '<span class="site"></span>' +
+          '<span class="engine"></span>' +
+          '<span class="badge ' + circuitCls + '"></span>' +
+          '<span class="cls"></span>' +
+          '<span class="meta"></span>';
+        row.querySelector(".site").textContent = s.site;
+        row.querySelector(".engine").textContent = s.engine;
+        row.querySelector(".badge").textContent = circuitTxt;
+        row.querySelector(".cls").textContent =
+          s.dominant_error ? (ERROR_LABELS[s.dominant_error] || s.dominant_error) : "";
+        row.querySelector(".meta").textContent =
+          Math.round((s.failure_rate || 0) * 100) + "% fail · " + s.observations + " obs" +
+          (s.ewma_latency_ms != null ? " · " + Math.round(s.ewma_latency_ms) + "ms" : "");
+        list.appendChild(row);
+      });
+    }).catch(function () {
+      sum.textContent = "Failed to load source health.";
+    });
   }
 
   /* ---------- quick-scan result cards ---------- */
@@ -880,8 +984,23 @@ if ("serviceWorker" in navigator) {
       stopStream();
     });
 
-    es.addEventListener("done", function () {
-      els.overallText.textContent = "All scans complete.";
+    es.addEventListener("skipped_degraded", function (e) {
+      noteSkippedDegraded(JSON.parse(e.data));
+    });
+
+    es.addEventListener("retry", function (e) {
+      var d = JSON.parse(e.data);
+      if (d.username) getCard(d.username).scanning.textContent = "retrying…";
+    });
+
+    es.addEventListener("done", function (e) {
+      var d = JSON.parse(e.data);
+      var msg = "All scans complete.";
+      var bd = breakdownText(d);
+      if (bd) msg += " " + bd + ".";
+      var dg = degradedText(d);
+      if (dg) msg += " " + dg + ".";
+      els.overallText.textContent = msg;
       if (es) { es.close(); es = null; }
       setRunning(false);
       loadHistory();
@@ -1434,11 +1553,19 @@ if ("serviceWorker" in navigator) {
       toast("Investigation failed: " + JSON.parse(e.data).message);
       stopInvestigation();
     });
+    invEs.addEventListener("skipped_degraded", function (e) {
+      noteSkippedDegraded(JSON.parse(e.data));
+    });
     invEs.addEventListener("done", function (e) {
       var d = JSON.parse(e.data);
-      els.overallText.textContent = "Investigation complete — " + d.found + " accounts, " +
+      var msg = "Investigation complete — " + d.found + " accounts, " +
         d.variant_hits + " variant hits, " + d.name_hits + " candidate hits, " +
         d.clusters + " clusters, " + d.email_hits + " email hits.";
+      var bd = breakdownText(d);
+      if (bd) msg += " " + bd + ".";
+      var dg = degradedText(d);
+      if (dg) msg += " " + dg + ".";
+      els.overallText.textContent = msg;
       els.overallFill.style.width = "100%";
       Object.keys(invCards).forEach(function (k) {
         invCards[k].status.textContent = "done";

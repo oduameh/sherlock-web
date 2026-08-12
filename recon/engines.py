@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger("recon.engines")
 
@@ -130,7 +130,8 @@ class _MaigretNotify:
 
 
 async def maigret_scan(username: str, site_dict: dict[str, Any], timeout: int,
-                       on_result: Callable[[Any], None]) -> dict:
+                       on_result: Callable[[Any], None],
+                       proxy: Optional[str] = None) -> dict:
     """Run one maigret scan. Returns the raw results dict."""
     from maigret.maigret import maigret as maigret_search
 
@@ -141,6 +142,7 @@ async def maigret_scan(username: str, site_dict: dict[str, Any], timeout: int,
         query_notify=_MaigretNotify(on_result),
         timeout=timeout,
         no_progressbar=True,
+        proxy=proxy,
     )
 
 

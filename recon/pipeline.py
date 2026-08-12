@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from typing import Callable, Optional
 
 from sherlock_project.notify import QueryNotify
@@ -29,6 +30,7 @@ from recon.domain_pivot import domain_from_email, domain_intel
 from recon.names import generate_name_candidates
 from recon.permutations import generate_variants
 from recon.phone_pivot import phone_intel
+from recon.router import RunRouter, retry_delay
 from recon.validate import is_probably_email
 
 logger = logging.getLogger("recon.pipeline")
@@ -45,17 +47,23 @@ Emit = Callable[[str, dict], None]
 class _SherlockNotify(QueryNotify):
     """Forwards Sherlock per-site results through the threadsafe emitter."""
 
-    def __init__(self, scanned_name: str, group: dict, emit_ts: Callable):
+    def __init__(self, scanned_name: str, group: dict, emit_ts: Callable,
+                 router: Optional[RunRouter] = None):
         super().__init__()
         self.scanned_name = scanned_name
         self.group = group
         self.emit_ts = emit_ts
+        self.router = router
         self.checked = 0
         self.total = 0
 
     def update(self, result) -> None:  # called once per site, from scan thread
         self.checked += 1
         status = result.status
+        if self.router is not None:
+            self.router.observe("sherlock", result.site_name,
+                                str(status.value), result.context or "",
+                                result.query_time, username=self.scanned_name)
         if status == QueryStatus.CLAIMED:
             self.emit_ts("found", "sherlock", self.scanned_name,
                          result.site_name, result.site_url_user,
@@ -70,20 +78,44 @@ class _SherlockNotify(QueryNotify):
 
 def _sherlock_worker(items: list, site_data: dict, timeout: int,
                      emit_ts: Callable, loop: asyncio.AbstractEventLoop,
-                     done_event: asyncio.Event) -> None:
+                     done_event: asyncio.Event,
+                     router: Optional[RunRouter] = None) -> None:
     """Thread entry: scan (username, group) pairs sequentially."""
     try:
         for scanned_name, group in items:
-            notify = _SherlockNotify(scanned_name, group, emit_ts)
+            notify = _SherlockNotify(scanned_name, group, emit_ts, router)
             notify.total = len(site_data)
             emit_ts("engine_start", "sherlock", scanned_name,
                     len(site_data), group)
-            sherlock(scanned_name, site_data, notify, timeout=timeout)
+            sherlock(scanned_name, site_data, notify, timeout=timeout,
+                     proxy=router.proxy if router else None)
+            _retry_transient(router, "sherlock", scanned_name, site_data,
+                             timeout, emit_ts, notify)
             emit_ts("engine_done", "sherlock", scanned_name, group)
     except Exception as exc:
         emit_ts("engine_error", "sherlock", f"{type(exc).__name__}: {exc}")
     finally:
         loop.call_soon_threadsafe(done_event.set)
+
+
+def _retry_transient(router: Optional[RunRouter], engine: str,
+                     scanned_name: str, site_data: dict, timeout: int,
+                     emit_ts: Callable, notify) -> None:
+    """Retry this pass's transient failures once each (sync; sherlock only)."""
+    if router is None:
+        return
+    for rec in router.drain_transient(engine, scanned_name):
+        if rec["site"] not in site_data:
+            continue
+        router.retries_done += 1
+        emit_ts("retry", rec)
+        time.sleep(retry_delay())
+        try:
+            sherlock(scanned_name, {rec["site"]: site_data[rec["site"]]},
+                     notify, timeout=timeout, proxy=router.proxy)
+        except Exception:
+            logger.exception("retry failed for %s on %s",
+                             scanned_name, rec["site"])
 
 
 def _shard(items: list, n: int) -> list[list]:
@@ -106,6 +138,7 @@ async def run_pipeline(
     sher_data: dict,
     emit: Emit,
     loop: asyncio.AbstractEventLoop,
+    db_path=None,
 ) -> dict:
     """Run the full investigation. Returns the persistable summary dict.
 
@@ -142,6 +175,7 @@ async def run_pipeline(
             "found": _handle_found,
             "error": _handle_error,
             "progress": _handle_progress,
+            "retry": _handle_retry,
         }.get(kind)
         if handler is not None:
             loop.call_soon_threadsafe(handler, *args)
@@ -194,6 +228,9 @@ async def run_pipeline(
             "candidate": group.get("candidate"),
         })
 
+    def _handle_retry(rec):
+        emit("retry", dict(rec))
+
     def _engine_lifecycle(kind, engine, *args):
         if kind == "engine_start":
             scanned_name, total, group = args
@@ -222,7 +259,8 @@ async def run_pipeline(
             done = asyncio.Event()
             threading.Thread(
                 target=_sherlock_worker,
-                args=(shard, site_data, timeout, emit_threadsafe, loop, done),
+                args=(shard, site_data, timeout, emit_threadsafe, loop, done,
+                      router),
                 daemon=True,
             ).start()
             events.append(done)
@@ -250,6 +288,10 @@ async def run_pipeline(
                     nonlocal checked
                     checked += 1
                     st = result.status  # MaigretCheckStatus enum
+                    router.observe("maigret", result.site_name,
+                                   str(st.value), result.context or "",
+                                   getattr(result, "query_time", None),
+                                   username=_name)
                     if st == MaigretCheckStatus.CLAIMED:
                         _handle_found("maigret", _name, result.site_name,
                                       result.site_url_user, None, _g)
@@ -261,10 +303,25 @@ async def run_pipeline(
 
                 try:
                     await engines.maigret_scan(scanned_name, site_dict,
-                                               timeout, on_result)
+                                               timeout, on_result,
+                                               proxy=router.proxy)
                 except Exception as exc:
                     _engine_lifecycle("engine_error", "maigret",
                                       f"{type(exc).__name__}: {exc}")
+                # Retry this pass's transient failures once each.
+                for rec in router.drain_transient("maigret", scanned_name):
+                    if rec["site"] not in site_dict:
+                        continue
+                    router.retries_done += 1
+                    emit("retry", dict(rec))
+                    await asyncio.sleep(retry_delay())
+                    try:
+                        await engines.maigret_scan(
+                            scanned_name, {rec["site"]: site_dict[rec["site"]]},
+                            timeout, on_result, proxy=router.proxy)
+                    except Exception:
+                        logger.exception("maigret retry failed for %s on %s",
+                                         scanned_name, rec["site"])
                 _engine_lifecycle("engine_done", "maigret", scanned_name,
                                   group)
 
@@ -298,13 +355,20 @@ async def run_pipeline(
 
     # --- plan --------------------------------------------------------------
     candidates = generate_name_candidates(name) if name else []
-    mai_all = (
-        engines.maigret_all_sites() if engines.maigret_available() else {}
-    )
+
+    # Adaptive routing: drop open-circuit sites before any engine runs, and
+    # record every observation the engines produce. Disabled (no-op) when the
+    # DB is unavailable.
+    router = RunRouter(db_path, emit=emit)
+    sher_data = router.filter_sites(sher_data, "sherlock")
+    mai_all = router.filter_sites(
+        engines.maigret_all_sites() if engines.maigret_available() else {},
+        "maigret")
     sher_reduced = engines.sherlock_variant_site_data(sher_data)
-    mai_reduced = (
-        engines.maigret_variant_sites() if engines.maigret_available() else {}
-    )
+    mai_reduced = router.filter_sites(
+        engines.maigret_variant_sites() if engines.maigret_available() else {},
+        "maigret")
+    router.announce_skipped()
 
     emit("meta", {
         "name": name, "usernames": usernames, "email": email, "phone": phone,
@@ -414,6 +478,7 @@ async def run_pipeline(
         "domain": domain_state or None,
         "correlation": clusters,
     }
+    router.finish()
     emit("done", {
         "found": len(accounts),
         "variant_hits": len(variant_rows),
@@ -422,5 +487,6 @@ async def run_pipeline(
         "email_hits": sum(1 for h in email_state["holehe"] if h.get("exists")),
         "phone": bool(phone_state),
         "domain": bool(domain_state),
+        **router.breakdown(),
     })
     return summary
