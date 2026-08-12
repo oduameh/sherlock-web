@@ -1,0 +1,177 @@
+"""Build the interactive identity-graph JSON from an investigation summary.
+
+Nodes: one central person node, account nodes (sized by confidence, colored
+by engine count client-side), one email node, one phone node, and email
+registration nodes from holehe hits. Edges carry a confidence score and a
+human-readable rationale, mostly derived from the correlator.
+
+Confidence heuristic (advisory):
+  account node    45 base, +25 two-engine confirmation, +20 enrichment with
+                  a display name or avatar, -15 for name-derived candidates
+  account edge    same as its account node
+  correlation     the correlator's own score (avatar/name/bio signals)
+  holehe edge     70 (registered-account check is a strong but single signal)
+"""
+
+from __future__ import annotations
+
+from typing import Any, Optional
+
+
+def _avatar(row: dict) -> Optional[str]:
+    enr = row.get("enrichment") or {}
+    return enr.get("jsonld_image") or enr.get("og_image")
+
+
+def _display_name(row: dict) -> Optional[str]:
+    enr = row.get("enrichment") or {}
+    return enr.get("jsonld_name") or enr.get("og_title") or enr.get("title")
+
+
+def _account_confidence(row: dict) -> int:
+    conf = 45
+    if len(row.get("engines") or []) >= 2:
+        conf += 25
+    if _display_name(row) or _avatar(row):
+        conf += 20
+    if row.get("source") == "name":
+        conf -= 15  # name-derived candidates are speculative until confirmed
+    return max(5, min(100, conf))
+
+
+def build_graph(summary: dict) -> dict:
+    """summary: the stored investigation summary. Returns {nodes, edges}."""
+    params = summary.get("params") or {}
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    node_ids: set[str] = set()
+
+    def add_node(node: dict) -> None:
+        if node["id"] not in node_ids:
+            node_ids.add(node["id"])
+            nodes.append(node)
+
+    def add_edge(source: str, target: str, confidence: int,
+                 rationale: str) -> None:
+        edges.append({
+            "id": f"e{len(edges)}",
+            "source": source, "target": target,
+            "confidence": max(0, min(100, int(confidence))),
+            "rationale": rationale,
+        })
+
+    # --- central person node ------------------------------------------------
+    label = (params.get("name") or (params.get("usernames") or [""])[0]
+             or params.get("email") or params.get("phone") or "subject")
+    add_node({
+        "id": "person", "type": "person", "label": label,
+        "confidence": 100,
+        "data": {k: v for k, v in params.items() if v},
+    })
+
+    # --- account nodes ------------------------------------------------------
+    url_to_id: dict[str, str] = {}
+    all_rows = ((summary.get("accounts") or [])
+                + (summary.get("variants") or [])
+                + (summary.get("name_accounts") or []))
+    for row in all_rows:
+        nid = f"acct:{row.get('site')}:{row.get('username')}"
+        conf = _account_confidence(row)
+        enr = row.get("enrichment") or {}
+        if row.get("source") == "name":
+            rationale = (f"name-derived candidate '{row.get('candidate')}' "
+                         f"from '{row.get('from_name')}'")
+        elif row.get("source") == "variant":
+            rationale = f"username variant of '{row.get('variant_of')}'"
+        else:
+            rationale = "username match"
+        add_node({
+            "id": nid, "type": "account",
+            "label": row.get("username"), "sublabel": row.get("site"),
+            "url": row.get("url"), "avatar": _avatar(row),
+            "confidence": conf, "engines": row.get("engines") or [],
+            "data": {
+                "site": row.get("site"), "url": row.get("url"),
+                "source": row.get("source"),
+                "variant_of": row.get("variant_of"),
+                "from_name": row.get("from_name"),
+                "candidate": row.get("candidate"),
+                "display_name": _display_name(row),
+                "bio": enr.get("jsonld_description")
+                       or enr.get("og_description"),
+            },
+        })
+        if row.get("url"):
+            url_to_id[row["url"]] = nid
+        add_edge("person", nid, conf, rationale)
+
+    # --- email node + holehe registration nodes ------------------------------
+    email_addr = params.get("email") or ""
+    email_state = summary.get("email") or {}
+    grav = email_state.get("gravatar")
+    if email_addr:
+        add_node({
+            "id": "email", "type": "email", "label": email_addr,
+            "confidence": 100,
+            "avatar": (grav or {}).get("avatar_url"),
+            "data": {
+                "gravatar": grav,
+                "holehe_hits": sum(
+                    1 for h in (email_state.get("holehe") or [])
+                    if h.get("exists")),
+            },
+        })
+        add_edge("person", "email", 100, "input email")
+        for h in email_state.get("holehe") or []:
+            if not h.get("exists"):
+                continue
+            nid = f"reg:{h.get('site')}"
+            add_node({
+                "id": nid, "type": "registration",
+                "label": h.get("site"), "sublabel": h.get("domain"),
+                "confidence": 70,
+                "data": {"domain": h.get("domain"),
+                         "email_recovery": h.get("email_recovery"),
+                         "phone_number": h.get("phone_number")},
+            })
+            add_edge("email", nid, 70,
+                     "registered-account check positive (holehe)")
+
+    # --- phone node -----------------------------------------------------------
+    phone = summary.get("phone")
+    if phone:
+        add_node({
+            "id": "phone", "type": "phone",
+            "label": phone.get("international") or params.get("phone"),
+            "confidence": 100,
+            "data": phone,
+        })
+        add_edge("person", "phone", 100, "input phone")
+
+    # --- correlation edges between accounts ----------------------------------
+    for cluster in summary.get("correlation") or []:
+        members = cluster.get("members") or []
+        member_ids = [url_to_id.get(m.get("url")) for m in members]
+        member_ids = [m for m in member_ids if m]
+        for link in cluster.get("links") or []:
+            # Link endpoints are "site (url)" labels — resolve via the url.
+            ids = []
+            for endpoint in (link.get("a"), link.get("b")):
+                url = endpoint[endpoint.find("(") + 1:endpoint.rfind(")")] \
+                    if endpoint and "(" in endpoint else None
+                nid = url_to_id.get(url)
+                if nid:
+                    ids.append(nid)
+            if len(ids) == 2 and ids[0] != ids[1]:
+                add_edge(ids[0], ids[1], link.get("score", 50),
+                         link.get("rationale") or "correlated profiles")
+        # Fallback: if no links resolved, connect members in a chain.
+        if len(member_ids) >= 2 and not any(
+            e["source"] in member_ids and e["target"] in member_ids
+            for e in edges
+        ):
+            for a, b in zip(member_ids, member_ids[1:]):
+                add_edge(a, b, cluster.get("confidence", 50),
+                         "same correlation cluster")
+
+    return {"nodes": nodes, "edges": edges}

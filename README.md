@@ -164,4 +164,78 @@ use it only on addresses you are authorized to investigate, respect site rate
 limits and terms of service, and comply with applicable law (GDPR and
 similar). Correlation results are statistical guesses, not proof of identity.
 
-## Usage notes
+## v3 — Investigations
+
+v3 turns the app from a scanner into an investigation product: **one clue in
+(name, username, email, or phone) → automated investigation → interactive
+identity graph → professional dossier → continuous monitoring.**
+
+- **Name → username candidates** (`recon/names.py`) — a 2-4 word full name
+  generates up to 20 ranked candidate handles (`firstlast`, `first.last`,
+  `flast`, `firstl`, `f.last`, `lastfirst`, … plus only the common digit
+  suffixes `1`/`01`/`123` — no speculative birth years). Lowercase ASCII,
+  transliteration-safe. Candidates are scanned against the curated ~40-site
+  high-value list and results are tagged `from_name` / `candidate`.
+- **Phone pivot** (`recon/phone_pivot.py`) — offline `phonenumbers` parsing:
+  validity, E.164, country/region, carrier, line type, timezones. No
+  WhatsApp/Telegram presence checks (those need APIs we don't have).
+- **Unified investigation** (`recon/pipeline.py`) — one SSE pipeline runs all
+  of it: name-candidate scan, dual-engine username scan, variants, email
+  pivot, phone intel, enrichment, correlation. Name candidates are fanned out
+  across 3 Sherlock threads / 3 concurrent Maigret scans to keep wall time
+  sane.
+- **Identity graph** (`recon/graph.py` + vendored Cytoscape 3.30.4 in
+  `static/vendor/`) — person node in the center; account nodes sized by
+  confidence and colored by engine count; email/phone/registration nodes;
+  edges carry confidence + rationale from the correlator. Click a node for a
+  detail panel; a slider hides low-confidence edges.
+- **Dossier report** (`recon/dossier.py`) — print-friendly
+  (`@media print`, no external assets) professional report: CONFIDENTIAL cover
+  block, auto-generated executive summary, digital-footprint score (0-100,
+  documented heuristic: 4/account cap 40, 5/email-registration cap 25, 10
+  Gravatar, 2/enriched-profile cap 15, 10 valid phone), identity-graph edge
+  table, confirmed accounts, name-candidate matches, email pivot, phone intel,
+  methodology, limitations, responsible-use footer.
+- **Watchlist monitoring** (`recon/monitor.py`) — watches re-scan the
+  subject's usernames/email against the high-value sites only (no enrichment)
+  on a configurable interval (min 6h). A background asyncio task (60s tick)
+  picks due watches, diffs the found-set against the stored signature, and
+  writes alert rows ("new account: X on GitHub", "account gone: Y",
+  "new holehe hit: Z"). The first run establishes the baseline silently.
+  State lives in SQLite, so the monitor resumes across restarts (Railway's
+  ephemeral disk means history/alerts reset on redeploy — accepted).
+
+New/changed endpoints:
+
+- `POST /api/investigate` — JSON `{name?, usernames?, email?, phone?,
+  variants?, timeout?}` (at least one clue required) → `{investigation_id}`
+- `GET /api/investigate/{id}` — stored investigation (inputs, summary, status)
+- `GET /api/investigate/{id}/stream?nsfw=false` — SSE stream of the full
+  pipeline (`meta_run`, `meta`, `candidates`, `found`, `merged`, `error`,
+  `progress`, `engine_*`, `variants_planned`, `phase`, `enriched`, `email`,
+  `email_done`, `phone_intel`, `correlation`, `saved`, `done`, `fatal`)
+- `GET /api/investigate/{id}/graph` — `{nodes, edges}` JSON for the identity
+  graph (nodes: `person`/`account`/`email`/`phone`/`registration`, with
+  `label`, `url`, `avatar`, `confidence`, `engines`; edges: `source`,
+  `target`, `confidence`, `rationale`)
+- `GET /api/investigate/{id}/report` — the dossier (HTML)
+- `GET/POST /api/watchlist`, `POST /api/watchlist/{id}/toggle`,
+  `DELETE /api/watchlist/{id}`
+- `GET /api/alerts?unseen=1`, `POST /api/alerts/mark_seen`
+
+Storage: new `investigations`, `watchlist`, and `watch_alerts` tables, plus a
+nullable `runs.investigation_id` column linking history rows to
+investigations — all created by automatic migrations on startup; existing
+rows keep working. `/api/recon/stream` and the classic endpoints are
+unchanged.
+
+Graceful degradation: `phonenumbers` missing → phone pivot returns an
+"unavailable" result; `cytoscape.min.js` missing → the graph panel shows a
+fallback notice; everything else already degraded per-engine.
+
+### Responsible use
+
+Same rules as v2, plus: monitoring runs unattended re-scans of public data —
+only watch subjects you are authorized to investigate, keep intervals modest,
+and honor the dossier's responsible-use footer (no stalking, harassment, or
+employment/credit/housing decisions).

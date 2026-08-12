@@ -81,11 +81,15 @@ def _holehe_functions() -> list:
     return get_functions(modules)
 
 
-async def holehe_scan(email: str, on_result: Callable[[dict], None]) -> list[dict]:
-    """Run every holehe module sequentially (rate-friendly), streaming results.
+async def holehe_scan(email: str, on_result: Callable[[dict], None],
+                      only: Optional[set[str]] = None,
+                      delay: float = HOLEHE_DELAY_S) -> list[dict]:
+    """Run holehe modules sequentially (rate-friendly), streaming results.
 
     Each result dict: {site, domain, exists, rate_limit, error?, others?}.
-    Calls ``on_result`` per completed module. Never raises.
+    Calls ``on_result`` per completed module. Never raises. ``only`` (a set of
+    normalized site names) restricts the run to a subset — used by the
+    watchlist monitor's light scans.
     """
     results: list[dict] = []
     try:
@@ -94,6 +98,8 @@ async def holehe_scan(email: str, on_result: Callable[[dict], None]) -> list[dic
         logger.exception("holehe import failed")
         on_result({"site": "holehe", "error": "holehe unavailable"})
         return results
+    if only is not None:
+        functions = [fn for fn in functions if fn.__name__.lower() in only]
 
     async with httpx.AsyncClient(
         timeout=HOLEHE_MODULE_TIMEOUT_S,
@@ -132,5 +138,5 @@ async def holehe_scan(email: str, on_result: Callable[[dict], None]) -> list[dic
                 on_result(entry)
             except Exception:
                 logger.exception("holehe on_result callback failed")
-            await asyncio.sleep(HOLEHE_DELAY_S)
+            await asyncio.sleep(delay)
     return results

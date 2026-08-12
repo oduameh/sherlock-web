@@ -18,6 +18,7 @@ Sherlock library API used (sherlock-project 0.16.0):
 import asyncio
 import base64
 import json
+import logging
 import os
 import re
 import secrets
@@ -25,6 +26,8 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+
+logging.basicConfig(level=logging.INFO)
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -39,10 +42,14 @@ from sherlock_project.sites import SitesInformation
 # but guard the import anyway so the classic app always boots.
 try:
     from recon import engines as recon_engines
+    from recon import monitor as recon_monitor
     from recon.correlate import correlate as recon_correlate
+    from recon.dossier import render_dossier
     from recon.email_pivot import gravatar_lookup, holehe_available, holehe_scan
     from recon.enrich import enrich_profiles
+    from recon.graph import build_graph
     from recon.permutations import generate_variants
+    from recon.pipeline import run_pipeline
     from recon.report import render_report
 
     RECON_AVAILABLE = True
@@ -123,18 +130,36 @@ def _init_db() -> None:
             conn.execute(
                 "ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'sherlock'"
             )
+        # Migration: link result rows to an investigation (nullable).
+        if "investigation_id" not in cols:
+            conn.execute(
+                "ALTER TABLE runs ADD COLUMN investigation_id INTEGER"
+            )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS investigations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                inputs TEXT NOT NULL,
+                summary TEXT,
+                status TEXT NOT NULL DEFAULT 'pending'
+            )
+            """
+        )
+        if RECON_AVAILABLE:
+            recon_monitor.init_tables(conn)
 
 
 _init_db()
 
 
-def save_run(username: str, found: int, total: int, results: list[dict],
-             kind: str = "sherlock") -> int:
+def save_run(username: str, found: int, total: int, results,
+             kind: str = "sherlock", investigation_id: int = None) -> int:
     """Persist one completed per-username run. Called from the scan thread."""
     with sqlite3.connect(DB_PATH) as conn:
         cur = conn.execute(
-            "INSERT INTO runs (ts, username, found, total, results, kind)"
-            " VALUES (?,?,?,?,?,?)",
+            "INSERT INTO runs (ts, username, found, total, results, kind,"
+            " investigation_id) VALUES (?,?,?,?,?,?,?)",
             (
                 time.strftime("%Y-%m-%d %H:%M:%S"),
                 username,
@@ -142,6 +167,7 @@ def save_run(username: str, found: int, total: int, results: list[dict],
                 total,
                 json.dumps(results),
                 kind,
+                investigation_id,
             ),
         )
         return cur.lastrowid
@@ -151,12 +177,12 @@ def save_run(username: str, found: int, total: int, results: list[dict],
 def get_history() -> list[dict]:
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
-            "SELECT id, ts, username, found, total, kind FROM runs"
-            " ORDER BY id DESC LIMIT 50"
+            "SELECT id, ts, username, found, total, kind, investigation_id"
+            " FROM runs ORDER BY id DESC LIMIT 50"
         ).fetchall()
     return [
         {"id": r[0], "ts": r[1], "username": r[2], "found": r[3], "total": r[4],
-         "kind": r[5]}
+         "kind": r[5], "investigation_id": r[6]}
         for r in rows
     ]
 
@@ -165,7 +191,8 @@ def get_history() -> list[dict]:
 def get_run(run_id: int) -> JSONResponse:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            "SELECT id, ts, username, found, total, results, kind FROM runs WHERE id = ?",
+            "SELECT id, ts, username, found, total, results, kind,"
+            " investigation_id FROM runs WHERE id = ?",
             (run_id,),
         ).fetchone()
     if row is None:
@@ -179,6 +206,7 @@ def get_run(run_id: int) -> JSONResponse:
             "total": row[4],
             "results": json.loads(row[5]),
             "kind": row[6],
+            "investigation_id": row[7],
         }
     )
 
@@ -752,6 +780,324 @@ if RECON_AVAILABLE:
                 },
             }
         return Response(render_report(run), media_type="text/html")
+
+    # -----------------------------------------------------------------------
+    # v3: Investigations — unified pipeline, graph, dossier, monitoring
+    # -----------------------------------------------------------------------
+
+    def _subject_label(inputs: dict) -> str:
+        bits = []
+        if inputs.get("name"):
+            bits.append(inputs["name"])
+        bits.extend(inputs.get("usernames") or [])
+        if inputs.get("email"):
+            bits.append(inputs["email"])
+        if inputs.get("phone"):
+            bits.append(inputs["phone"])
+        return ", ".join(bits)
+
+    def _get_investigation(inv_id: int):
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT id, created_at, inputs, summary, status"
+                " FROM investigations WHERE id = ?",
+                (inv_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row[0], "created_at": row[1],
+            "inputs": json.loads(row[2]),
+            "summary": json.loads(row[3]) if row[3] else None,
+            "status": row[4],
+        }
+
+    def _set_investigation(inv_id: int, status: str,
+                           summary: dict | None = None) -> None:
+        with sqlite3.connect(DB_PATH) as conn:
+            if summary is not None:
+                conn.execute(
+                    "UPDATE investigations SET status = ?, summary = ?"
+                    " WHERE id = ?",
+                    (status, json.dumps(summary), inv_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE investigations SET status = ? WHERE id = ?",
+                    (status, inv_id),
+                )
+
+    @app.post("/api/investigate")
+    async def create_investigation(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "JSON object expected"},
+                                status_code=400)
+
+        raw_users = body.get("usernames") or []
+        if isinstance(raw_users, str):
+            raw_users = re.split(r"[,\n]+", raw_users)
+        usernames = [u.strip() for u in raw_users if str(u).strip()]
+
+        inputs = {
+            "name": str(body.get("name") or "").strip(),
+            "usernames": usernames,
+            "email": str(body.get("email") or "").strip(),
+            "phone": str(body.get("phone") or "").strip(),
+            "variants": bool(body.get("variants")),
+            "timeout": max(1, min(120, int(body.get("timeout") or 10))),
+        }
+        if not (inputs["name"] or usernames or inputs["email"]
+                or inputs["phone"]):
+            return JSONResponse(
+                {"error": "provide at least one of: name, usernames, email,"
+                          " phone"},
+                status_code=400,
+            )
+        # Parity with deep recon: an email-only investigation also scans the
+        # local part as a username.
+        if not usernames and inputs["email"] and not inputs["name"]:
+            usernames = [inputs["email"].split("@", 1)[0]]
+            inputs["usernames"] = usernames
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.execute(
+                "INSERT INTO investigations (created_at, inputs, status)"
+                " VALUES (?,?, 'pending')",
+                (time.strftime("%Y-%m-%d %H:%M:%S"), json.dumps(inputs)),
+            )
+            inv_id = cur.lastrowid
+        return JSONResponse({"investigation_id": inv_id})
+
+    @app.get("/api/investigate/{inv_id}")
+    def get_investigation(inv_id: int) -> JSONResponse:
+        inv = _get_investigation(inv_id)
+        if inv is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(inv)
+
+    @app.get("/api/investigate/{inv_id}/stream")
+    async def investigate_stream(request: Request, inv_id: int,
+                                 nsfw: bool = Query(False)
+                                 ) -> StreamingResponse:
+        inv = _get_investigation(inv_id)
+        if inv is None:
+            return StreamingResponse(
+                iter(['event: fatal\ndata: {"message": "investigation not found"}\n\n']),
+                media_type="text/event-stream",
+            )
+        inputs = inv["inputs"]
+        _set_investigation(inv_id, "running")
+
+        queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        sher_data = {
+            n: i for n, i in SITE_DATA_ALL.items()
+            if nsfw or n not in NSFW_NAMES
+        }
+
+        async def coordinator():
+            def emit(event: str, payload: dict) -> None:
+                queue.put_nowait((event, payload))
+
+            try:
+                summary = await run_pipeline(
+                    name=inputs["name"], usernames=inputs["usernames"],
+                    email=inputs["email"], phone=inputs["phone"],
+                    variants=inputs["variants"], timeout=inputs["timeout"],
+                    sher_data=sher_data, emit=emit, loop=loop,
+                )
+                _set_investigation(inv_id, "done", summary)
+                subject = _subject_label(inputs)
+                n_found = (len(summary["accounts"])
+                           + len(summary["variants"])
+                           + len(summary["name_accounts"]))
+                run_id = save_run(subject, n_found, len(sher_data), summary,
+                                  kind="investigation",
+                                  investigation_id=inv_id)
+                emit("saved", {"history_id": run_id,
+                               "investigation_id": inv_id})
+            except Exception as exc:
+                _set_investigation(inv_id, "failed")
+                emit("fatal", {"message": f"{type(exc).__name__}: {exc}"})
+            finally:
+                queue.put_nowait(None)  # sentinel
+
+        coord_task = asyncio.create_task(coordinator())
+
+        async def event_gen():
+            yield f"event: meta_run\ndata: {json.dumps({'investigation_id': inv_id})}\n\n"
+            try:
+                while True:
+                    try:
+                        item = await asyncio.wait_for(queue.get(), timeout=15)
+                    except asyncio.TimeoutError:
+                        if await request.is_disconnected():
+                            break
+                        yield ": keepalive\n\n"
+                        continue
+                    if item is None:
+                        break
+                    event, payload = item
+                    yield f"event: {event}\ndata: {json.dumps(payload)}\n\n"
+            except asyncio.CancelledError:
+                coord_task.cancel()
+                raise
+
+        return StreamingResponse(
+            event_gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.get("/api/investigate/{inv_id}/graph")
+    def investigate_graph(inv_id: int) -> JSONResponse:
+        inv = _get_investigation(inv_id)
+        if inv is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if not inv["summary"]:
+            return JSONResponse({"error": "investigation has not run yet"},
+                                status_code=409)
+        return JSONResponse(build_graph(inv["summary"]))
+
+    @app.get("/api/investigate/{inv_id}/report")
+    def investigate_report(inv_id: int) -> Response:
+        inv = _get_investigation(inv_id)
+        if inv is None:
+            return Response("not found", status_code=404)
+        if not inv["summary"]:
+            return Response("investigation has not run yet", status_code=409)
+        return Response(render_dossier(inv, inv["summary"]),
+                        media_type="text/html")
+
+    # --- watchlist + alerts ---------------------------------------------------
+
+    @app.get("/api/watchlist")
+    def list_watchlist() -> list[dict]:
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute(
+                "SELECT id, created_at, label, inputs, interval_hours,"
+                " last_run_at, enabled FROM watchlist ORDER BY id DESC"
+            ).fetchall()
+            counts = dict(conn.execute(
+                "SELECT watch_id, COUNT(*) FROM watch_alerts GROUP BY watch_id"
+            ).fetchall())
+        return [
+            {"id": r[0], "created_at": r[1], "label": r[2],
+             "inputs": json.loads(r[3]), "interval_hours": r[4],
+             "last_run_at": r[5], "enabled": bool(r[6]),
+             "alerts": counts.get(r[0], 0)}
+            for r in rows
+        ]
+
+    @app.post("/api/watchlist")
+    async def create_watch(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        inputs = body.get("inputs") or {}
+        if isinstance(inputs.get("usernames"), str):
+            inputs["usernames"] = [
+                u.strip() for u in re.split(r"[,\n]+", inputs["usernames"])
+                if u.strip()
+            ]
+        if not (inputs.get("usernames") or inputs.get("email")
+                or inputs.get("name")):
+            return JSONResponse(
+                {"error": "watch needs usernames, email, or name"},
+                status_code=400,
+            )
+        label = str(body.get("label") or "").strip() or (
+            ", ".join(inputs.get("usernames") or [])
+            or inputs.get("email") or inputs.get("name"))
+        interval = max(recon_monitor.MIN_INTERVAL_HOURS,
+                       int(body.get("interval_hours")
+                           or recon_monitor.DEFAULT_INTERVAL_HOURS))
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.execute(
+                "INSERT INTO watchlist"
+                " (created_at, label, inputs, interval_hours, enabled)"
+                " VALUES (?,?,?,?,1)",
+                (time.strftime("%Y-%m-%d %H:%M:%S"), label,
+                 json.dumps(inputs), interval),
+            )
+            watch_id = cur.lastrowid
+        return JSONResponse({"watch_id": watch_id, "label": label,
+                             "interval_hours": interval})
+
+    @app.post("/api/watchlist/{watch_id}/toggle")
+    def toggle_watch(watch_id: int) -> JSONResponse:
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT enabled FROM watchlist WHERE id = ?", (watch_id,)
+            ).fetchone()
+            if row is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            new_state = 0 if row[0] else 1
+            conn.execute("UPDATE watchlist SET enabled = ? WHERE id = ?",
+                         (new_state, watch_id))
+        return JSONResponse({"id": watch_id, "enabled": bool(new_state)})
+
+    @app.delete("/api/watchlist/{watch_id}")
+    def delete_watch(watch_id: int) -> JSONResponse:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("DELETE FROM watch_alerts WHERE watch_id = ?",
+                         (watch_id,))
+            cur = conn.execute("DELETE FROM watchlist WHERE id = ?",
+                               (watch_id,))
+        if cur.rowcount == 0:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse({"deleted": watch_id})
+
+    @app.get("/api/alerts")
+    def list_alerts(unseen: bool = Query(False)) -> list[dict]:
+        sql = (
+            "SELECT a.id, a.watch_id, a.created_at, a.kind, a.message,"
+            " a.data, a.seen, w.label FROM watch_alerts a"
+            " LEFT JOIN watchlist w ON w.id = a.watch_id"
+        )
+        if unseen:
+            sql += " WHERE a.seen = 0"
+        sql += " ORDER BY a.id DESC LIMIT 100"
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute(sql).fetchall()
+        return [
+            {"id": r[0], "watch_id": r[1], "created_at": r[2], "kind": r[3],
+             "message": r[4], "data": json.loads(r[5]) if r[5] else None,
+             "seen": bool(r[6]), "watch_label": r[7]}
+            for r in rows
+        ]
+
+    @app.post("/api/alerts/mark_seen")
+    async def mark_alerts_seen(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        ids = (body or {}).get("ids") or []
+        with sqlite3.connect(DB_PATH) as conn:
+            if ids:
+                conn.execute(
+                    f"UPDATE watch_alerts SET seen = 1 WHERE id IN"
+                    f" ({','.join('?' for _ in ids)})",
+                    [int(i) for i in ids],
+                )
+            else:
+                conn.execute("UPDATE watch_alerts SET seen = 1 WHERE seen = 0")
+        return JSONResponse({"ok": True})
+
+    # --- background monitor ---------------------------------------------------
+
+    @app.on_event("startup")
+    async def start_monitor() -> None:
+        sher_light = recon_engines.sherlock_variant_site_data(SITE_DATA_ALL)
+        asyncio.create_task(
+            recon_monitor.monitor_loop(DB_PATH, sher_light)
+        )
 
 else:
 
