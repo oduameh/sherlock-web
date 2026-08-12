@@ -269,6 +269,71 @@ class SiteHealthStore:
 
     # -- writes ------------------------------------------------------------
 
+    @staticmethod
+    def _blank_state() -> dict:
+        return {"window": [], "ewma": None, "consec": 0,
+                "open_until": None, "cooldown": BASE_COOLDOWN_S}
+
+    @staticmethod
+    def _load_state(conn: sqlite3.Connection, site: str, engine: str) -> dict:
+        row = conn.execute(
+            "SELECT window, ewma_latency_ms, consecutive_failures,"
+            " circuit_open_until, cooldown_seconds"
+            " FROM site_health WHERE site = ? AND engine = ?",
+            (site, engine),
+        ).fetchone()
+        if not row:
+            return SiteHealthStore._blank_state()
+        return {"window": json.loads(row[0]), "ewma": row[1], "consec": row[2],
+                "open_until": row[3], "cooldown": row[4]}
+
+    @staticmethod
+    def _apply(state: dict, ok: bool, err_class: Optional[str],
+               latency_ms: Optional[float], ts: float) -> None:
+        """Fold one observation into ``state`` (pure state transition)."""
+        state["window"].append({"ok": 1 if ok else 0, "class": err_class,
+                                "ts": ts})
+        state["window"] = state["window"][-WINDOW_SIZE:]
+        if latency_ms is not None:
+            state["ewma"] = (latency_ms if state["ewma"] is None
+                             else 0.3 * latency_ms + 0.7 * state["ewma"])
+        if ok:
+            # Success closes the circuit (incl. the half-open probe) and resets
+            # the cooldown ladder.
+            state["consec"] = 0
+            state["open_until"] = None
+            state["cooldown"] = BASE_COOLDOWN_S
+        else:
+            state["consec"] += 1
+            open_ts = _parse(state["open_until"])
+            currently_open = open_ts is not None and open_ts > ts
+            # Only trip when closed or half-open; failures recorded while open
+            # don't stack more cooldown doublings.
+            if not currently_open and should_trip(state["consec"],
+                                                  state["window"]):
+                state["open_until"] = _fmt(ts + state["cooldown"])
+                state["cooldown"] = next_cooldown(state["cooldown"])
+
+    @staticmethod
+    def _write_state(conn: sqlite3.Connection, site: str, engine: str,
+                     state: dict, now: float) -> None:
+        conn.execute(
+            "INSERT INTO site_health (site, engine, window,"
+            " ewma_latency_ms, consecutive_failures,"
+            " circuit_open_until, cooldown_seconds, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(site, engine) DO UPDATE SET"
+            " window = excluded.window,"
+            " ewma_latency_ms = excluded.ewma_latency_ms,"
+            " consecutive_failures = excluded.consecutive_failures,"
+            " circuit_open_until = excluded.circuit_open_until,"
+            " cooldown_seconds = excluded.cooldown_seconds,"
+            " updated_at = excluded.updated_at",
+            (site, engine, json.dumps(state["window"]), state["ewma"],
+             state["consec"], state["open_until"], state["cooldown"],
+             _fmt(now)),
+        )
+
     def record(self, site: str, engine: str, ok: bool,
                err_class: Optional[str] = None,
                latency_ms: Optional[float] = None,
@@ -279,60 +344,33 @@ class SiteHealthStore:
         now = time.time() if now is None else now
         try:
             with db_connect(self.db_path) as conn:
-                row = conn.execute(
-                    "SELECT window, ewma_latency_ms, consecutive_failures,"
-                    " circuit_open_until, cooldown_seconds"
-                    " FROM site_health WHERE site = ? AND engine = ?",
-                    (site, engine),
-                ).fetchone()
-                if row:
-                    window = json.loads(row[0])
-                    ewma = row[1]
-                    consec = row[2]
-                    open_until = row[3]
-                    cooldown = row[4]
-                else:
-                    window, ewma, consec, open_until = [], None, 0, None
-                    cooldown = BASE_COOLDOWN_S
+                state = self._load_state(conn, site, engine)
+                self._apply(state, ok, err_class, latency_ms, now)
+                self._write_state(conn, site, engine, state, now)
+        except (sqlite3.Error, OSError) as exc:
+            self._guard(exc)
 
-                window.append({"ok": 1 if ok else 0, "class": err_class,
-                               "ts": now})
-                window = window[-WINDOW_SIZE:]
-                if latency_ms is not None:
-                    ewma = (latency_ms if ewma is None
-                            else 0.3 * latency_ms + 0.7 * ewma)
+    def record_batch(self, buffered: dict, now: Optional[float] = None) -> None:
+        """Flush a run's buffered observations in ONE transaction.
 
-                if ok:
-                    # Success closes the circuit (incl. the half-open probe)
-                    # and resets the cooldown ladder.
-                    consec = 0
-                    open_until = None
-                    cooldown = BASE_COOLDOWN_S
-                else:
-                    consec += 1
-                    open_ts = _parse(open_until)
-                    currently_open = open_ts is not None and open_ts > now
-                    # Only trip when closed or half-open; failures recorded
-                    # while open don't stack more cooldown doublings.
-                    if not currently_open and should_trip(consec, window):
-                        open_until = _fmt(now + cooldown)
-                        cooldown = next_cooldown(cooldown)
-
-                conn.execute(
-                    "INSERT INTO site_health (site, engine, window,"
-                    " ewma_latency_ms, consecutive_failures,"
-                    " circuit_open_until, cooldown_seconds, updated_at)"
-                    " VALUES (?,?,?,?,?,?,?,?)"
-                    " ON CONFLICT(site, engine) DO UPDATE SET"
-                    " window = excluded.window,"
-                    " ewma_latency_ms = excluded.ewma_latency_ms,"
-                    " consecutive_failures = excluded.consecutive_failures,"
-                    " circuit_open_until = excluded.circuit_open_until,"
-                    " cooldown_seconds = excluded.cooldown_seconds,"
-                    " updated_at = excluded.updated_at",
-                    (site, engine, json.dumps(window), ewma, consec,
-                     open_until, cooldown, _fmt(now)),
-                )
+        ``buffered`` maps ``(site, engine)`` to an ordered list of observation
+        dicts (``{ok, class, latency_ms, ts}``). Observations are replayed in
+        order per key — identical to calling :meth:`record` for each, but with
+        a single connection and, since a run's whole history for a key is
+        folded before the row is written, free of the lost-update race that
+        concurrent per-observation writes would otherwise hit.
+        """
+        if not self.available or not buffered:
+            return
+        now = time.time() if now is None else now
+        try:
+            with db_connect(self.db_path) as conn:
+                for (site, engine), obs_list in buffered.items():
+                    state = self._load_state(conn, site, engine)
+                    for obs in obs_list:
+                        self._apply(state, obs["ok"], obs["class"],
+                                    obs["latency_ms"], obs["ts"])
+                    self._write_state(conn, site, engine, state, now)
         except (sqlite3.Error, OSError) as exc:
             self._guard(exc)
 
@@ -500,6 +538,13 @@ class RunRouter:
         self.observations = 0
         self.error_observations = 0
         self.disabled = self.store is None or not self.store.available
+        # observe() is called from multiple sherlock worker threads AND the
+        # async event loop (maigret's callback). Rather than write to SQLite on
+        # that hot path — thousands of times per run, blocking the loop, and
+        # racing concurrent read-modify-write on the same row — observations are
+        # buffered under this lock and flushed once in finish().
+        self._lock = threading.Lock()
+        self._buffer: dict[tuple[str, str], list[dict]] = {}
         self.proxy: Optional[str] = None
         pool = proxy_pool if proxy_pool is not None else ProxyPool()
         if not self.disabled and pool.configured:
@@ -542,23 +587,29 @@ class RunRouter:
     def observe(self, engine: str, site: str, status: str,
                 context: str = "", query_time: Optional[float] = None,
                 username: Optional[str] = None) -> None:
-        """Record one per-site check result (called for EVERY status)."""
+        """Record one per-site check result (called for EVERY status).
+
+        Cheap and non-blocking: updates in-memory tallies and buffers the
+        observation. The buffer is persisted in :meth:`finish`.
+        """
         err_class = classify(status, context)
-        self.observations += 1
-        if err_class is not None:
-            self.error_observations += 1
-            self.error_counts[err_class] += 1
-            if err_class in TRANSIENT_CLASSES:
-                self._transient.append({
-                    "engine": engine, "site": site, "username": username,
-                    "class": err_class,
+        latency_ms = query_time * 1000 if query_time else None
+        ts = time.time()
+        with self._lock:
+            self.observations += 1
+            if err_class is not None:
+                self.error_observations += 1
+                self.error_counts[err_class] += 1
+                if err_class in TRANSIENT_CLASSES:
+                    self._transient.append({
+                        "engine": engine, "site": site, "username": username,
+                        "class": err_class,
+                    })
+            if not self.disabled:
+                self._buffer.setdefault((site, engine), []).append({
+                    "ok": err_class is None, "class": err_class,
+                    "latency_ms": latency_ms, "ts": ts,
                 })
-        if self.disabled:
-            return
-        self.store.record(
-            site, engine, ok=err_class is None, err_class=err_class,
-            latency_ms=query_time * 1000 if query_time else None,
-        )
 
     # -- post-pass: smart retries ----------------------------------------------
 
@@ -570,20 +621,32 @@ class RunRouter:
         discarded so each failed check is retried at most once per run.
         """
         picked, rest = [], []
-        for rec in self._transient:
-            if (rec["engine"] == engine and rec["username"] == username
-                    and self.retries_done + len(picked) < RETRY_CAP):
-                picked.append(rec)
-            else:
-                rest.append(rec)
-        self._transient = rest
+        with self._lock:
+            for rec in self._transient:
+                if (rec["engine"] == engine and rec["username"] == username
+                        and self.retries_done + len(picked) < RETRY_CAP):
+                    picked.append(rec)
+                else:
+                    rest.append(rec)
+            self._transient = rest
         return picked
 
     # -- end of run -------------------------------------------------------------
 
     def finish(self) -> None:
-        """Record proxy health for the run (majority-error pass = failure)."""
-        if self.proxy and not self.disabled and self.observations:
+        """Flush buffered observations and record proxy health for the run.
+
+        Circuit state only takes effect via :meth:`filter_sites` at the start of
+        the *next* run, so persisting at run end (rather than per observation)
+        is behaviourally identical for callers — and far cheaper.
+        """
+        if self.disabled:
+            return
+        with self._lock:
+            buffered, self._buffer = self._buffer, {}
+        if buffered:
+            self.store.record_batch(buffered)
+        if self.proxy and self.observations:
             ok = self.error_observations / self.observations <= 0.5
             self.store.record_proxy(self.proxy, ok)
 

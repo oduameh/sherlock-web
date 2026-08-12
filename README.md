@@ -77,6 +77,14 @@ scanned once; success closes the circuit (cooldown resets), failure re-trips
 it with the doubled cooldown. Skips are never silent: scans emit a
 `skipped_degraded` SSE event listing the excluded sites.
 
+Every check is recorded, but not on the hot path: observations are buffered in
+memory during a run and flushed to `site_health` in a single transaction at the
+end. This keeps the per-check callback (called thousands of times per run, some
+on the async event loop) free of blocking SQLite I/O and free of the
+lost-update race that concurrent per-observation writes would otherwise hit.
+Circuit state only takes effect at the *start* of the next run, so end-of-run
+persistence is behaviourally identical.
+
 **Smart retries.** After each engine pass, failures classed as transient
 (`timeout`, `conn_reset`, `http_5xx`, `dns`) are retried **once** after a
 jittered 5–15s delay, sequentially, capped at **40 retries per run**; each

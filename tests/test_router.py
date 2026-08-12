@@ -259,10 +259,60 @@ def test_run_router_observation_records(store):
     r.observe("sherlock", "GitHub", "Claimed", query_time=0.5)
     r.observe("sherlock", "GitHub", "Unknown", "Timeout Error",
               query_time=10.0)
+    r.finish()  # observations are buffered and flushed here
     row = _circuit(store)
     assert row is not None
     assert len(row["window"]) == 2
     assert r.error_counts == {"timeout": 1}
+
+
+def test_observations_are_buffered_until_finish(store):
+    # observe() must not touch the DB on the hot path — nothing is persisted
+    # until finish() flushes the buffer.
+    r = RunRouter(store.db_path)
+    r.observe("sherlock", "GitHub", "Unknown", "Timeout Error")
+    assert _circuit(store) is None
+    r.finish()
+    assert len(_circuit(store)["window"]) == 1
+
+
+def test_record_batch_matches_per_observation_records(store):
+    # 5 buffered failures replayed in order trip the circuit exactly as five
+    # separate record() calls would.
+    buffered = {
+        ("GitHub", "sherlock"): [
+            {"ok": False, "class": "http_429", "latency_ms": None,
+             "ts": NOW + i}
+            for i in range(5)
+        ]
+    }
+    store.record_batch(buffered, now=NOW + 5)
+    row = _circuit(store)
+    assert row["consecutive_failures"] == 5
+    assert row["circuit_open_until"] is not None
+    assert row["cooldown_seconds"] == BASE_COOLDOWN_S * 2
+
+
+def test_concurrent_observe_is_race_free(store):
+    # Many threads observing the same site concurrently must not lose entries
+    # (the old per-observation read-modify-write dropped window rows).
+    import threading as _t
+    r = RunRouter(store.db_path)
+
+    def worker():
+        for _ in range(25):
+            r.observe("sherlock", "GitHub", "Unknown", "Timeout Error",
+                      username="u")
+
+    threads = [_t.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    r.finish()
+    # 100 observations, window is capped at WINDOW_SIZE, all counted.
+    assert r.observations == 100
+    assert len(_circuit(store)["window"]) == router.WINDOW_SIZE
 
 
 def test_drain_transient_retries_only_transient_once_capped():
