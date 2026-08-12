@@ -712,6 +712,7 @@ if RECON_AVAILABLE:
                         "username": row["username"], "site": row["site"],
                         "url": row["url"], "variant_of": row["variant_of"],
                         "enrichment": data,
+                        "verification": row.get("verification"),
                     })
                 await enrich_profiles(all_rows, on_enriched)
 
@@ -911,6 +912,28 @@ if RECON_AVAILABLE:
         if inv is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         return JSONResponse(inv)
+
+    @app.post("/api/investigate/{inv_id}/rerun")
+    def rerun_investigation(inv_id: int) -> JSONResponse:
+        """Clone an investigation's inputs into a fresh, unrun investigation.
+
+        Each run stays a distinct history entry, so a subject becomes a living
+        case file you can re-scan over time and diff by eye. The caller streams
+        the returned id like any new investigation.
+        """
+        src = _get_investigation(inv_id)
+        if src is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        inputs = src["inputs"]
+        with db_connect(DB_PATH) as conn:
+            cur = conn.execute(
+                "INSERT INTO investigations (created_at, inputs, status)"
+                " VALUES (?,?, 'pending')",
+                (time.strftime("%Y-%m-%d %H:%M:%S"), json.dumps(inputs)),
+            )
+            new_id = cur.lastrowid
+        return JSONResponse({"investigation_id": new_id, "inputs": inputs,
+                             "rerun_of": inv_id})
 
     @app.get("/api/investigate/{inv_id}/stream")
     async def investigate_stream(request: Request, inv_id: int,

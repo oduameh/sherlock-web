@@ -197,6 +197,11 @@
     margin: 20px 0 8px;
   }
   .variant-tag { font-size: 10px; color: var(--amber); border: 1px solid rgba(210,153,34,.4); border-radius: 4px; padding: 0 4px; margin-left: 6px; }
+  .verify-badge { font-size: 10px; border-radius: 4px; padding: 0 5px; margin-left: 6px; border: 1px solid; vertical-align: middle; white-space: nowrap; }
+  .verify-badge.confirmed { color: var(--green); border-color: rgba(63,185,80,.5); }
+  .verify-badge.unconfirmed { color: var(--dim); border-color: rgba(139,148,158,.4); }
+  .verify-badge.false { color: var(--red); border-color: rgba(248,81,73,.5); }
+  .rrow.fp { opacity: .55; }
   .conf-track { background: var(--bg3); border-radius: 5px; height: 8px; width: 160px; overflow: hidden; display: inline-block; vertical-align: middle; }
   .conf-fill { background: linear-gradient(90deg, var(--green), #79c0ff); height: 100%; }
   .cluster-card { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; font-size: 13px; }
@@ -307,7 +312,7 @@
     <div id="invForm">
       <label for="invName">Full name</label>
       <input type="text" id="invName" placeholder="Jane Q Public" spellcheck="false">
-      <div class="hint">Generates up to 20 candidate handles, scanned on high-value sites.</div>
+      <div class="hint">Generates up to 24 candidate handles (incl. nicknames — Robert → bob/rob), scanned on high-value sites.</div>
 
       <label for="invUsernames">Usernames</label>
       <textarea id="invUsernames" placeholder="alice, bob&#10;or one per line" spellcheck="false"></textarea>
@@ -388,6 +393,7 @@
       <div id="overallText">Starting&hellip;</div>
     </div>
     <div id="exportBar">
+      <button class="btn btn-ghost" id="rerunBtn" style="display:none">&#8635; Re-run</button>
       <button class="btn btn-ghost" id="dossierBtn" style="display:none">&#8681; Dossier</button>
       <button class="btn btn-ghost" id="graphBtn" style="display:none">&#9673; Graph</button>
       <select id="watchInterval" title="Watch interval">
@@ -500,6 +506,7 @@ if ("serviceWorker" in navigator) {
     results: document.getElementById("results"),
     csvBtn: document.getElementById("csvBtn"),
     jsonBtn: document.getElementById("jsonBtn"),
+    rerunBtn: document.getElementById("rerunBtn"),
     dossierBtn: document.getElementById("dossierBtn"),
     graphBtn: document.getElementById("graphBtn"),
     watchBtn: document.getElementById("watchBtn"),
@@ -671,6 +678,7 @@ if ("serviceWorker" in navigator) {
     currentInvId = null;
     currentInvInputs = null;
     els.exportBar.style.display = "none";
+    els.rerunBtn.style.display = "none";
     els.dossierBtn.style.display = "none";
     els.graphBtn.style.display = "none";
     els.watchBtn.style.display = "none";
@@ -973,6 +981,7 @@ if ("serviceWorker" in navigator) {
                   variant_of: d.variant_of || "",
                   from_name: d.from_name || "",
                   candidate: d.candidate || "",
+                  verification: "",
                   display_name: "", bio: "", avatar: "" };
     invRows[key] = { el: row, badgesEl: badges, data: entry };
     currentRun.push(entry);
@@ -987,10 +996,36 @@ if ("serviceWorker" in navigator) {
     engineBadges(r.badgesEl, d.engines);
   }
 
+  var VERIFY_LABELS = {
+    confirmed: { cls: "confirmed", text: "✓ verified" },
+    unconfirmed: { cls: "unconfirmed", text: "? unconfirmed" },
+    likely_false_positive: { cls: "false", text: "⚠ likely false" }
+  };
+
+  function setVerifyBadge(r, v) {
+    if (!v || !v.status) return;
+    var meta = VERIFY_LABELS[v.status];
+    if (!meta) return;
+    r.data.verification = v.status;
+    r.el.classList.toggle("fp", v.status === "likely_false_positive");
+    var badge = r.el.querySelector(".verify-badge");
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.className = "verify-badge";
+      var main = r.el.querySelector(".rmain");
+      var enrich = main.querySelector(".enrich");
+      main.insertBefore(badge, enrich || null);
+    }
+    badge.className = "verify-badge " + meta.cls;
+    badge.textContent = meta.text;
+    if (v.signals && v.signals.length) badge.title = v.signals.join("; ");
+  }
+
   function enrichInvRow(d) {
     var key = d.username + "|" + normSite(d.site);
     var r = invRows[key];
     if (!r) return;
+    if (d.verification) setVerifyBadge(r, d.verification);
     var enr = d.enrichment || {};
     var img = enr.jsonld_image || enr.og_image;
     var name = enr.jsonld_name || enr.og_title || enr.title;
@@ -1200,9 +1235,32 @@ if ("serviceWorker" in navigator) {
   function enableInvestigationActions(id, inputs) {
     currentInvId = id;
     if (inputs) currentInvInputs = inputs;
+    els.rerunBtn.style.display = "";
     els.dossierBtn.style.display = "";
     els.graphBtn.style.display = "";
     els.watchBtn.style.display = "";
+  }
+
+  function startRerun(sourceId) {
+    if (!sourceId) { toast("No investigation to re-run"); return; }
+    els.overallText.textContent = "Re-running investigation…";
+    fetch("/api/investigate/" + sourceId + "/rerun", { method: "POST" })
+      .then(function (r) { return r.json(); })
+      .then(function (resp) {
+        if (resp.error) { toast(resp.error); return; }
+        switchTab("investigate");
+        stopStream();
+        stopInvestigation();
+        resetInvestigationUI();
+        if (resp.inputs) {
+          currentInvInputs = {
+            name: resp.inputs.name || "",
+            usernames: resp.inputs.usernames || [],
+            email: resp.inputs.email || ""
+          };
+        }
+        openInvestigationStream(resp.investigation_id, {});
+      }).catch(function () { toast("Re-run failed"); });
   }
 
   els.invStartBtn.addEventListener("click", function () {
@@ -1322,6 +1380,10 @@ if ("serviceWorker" in navigator) {
     };
   }
 
+  els.rerunBtn.addEventListener("click", function () {
+    startRerun(currentInvId);
+  });
+
   els.dossierBtn.addEventListener("click", function () {
     if (currentInvId) window.open("/api/investigate/" + currentInvId + "/report", "_blank");
   });
@@ -1367,8 +1429,13 @@ if ("serviceWorker" in navigator) {
   };
 
   function nodeColor(n) {
-    if (n.type === "account" && (n.engines || []).length >= 2) return "#3fb950";
-    if (n.type === "account" && (n.data || {}).source === "name") return "#d29922";
+    if (n.type === "account") {
+      var v = n.verification || (n.data || {}).verification;
+      if (v === "likely_false_positive") return "#f85149";  // flagged red
+      if (v === "confirmed") return "#3fb950";               // verified green
+      if ((n.engines || []).length >= 2) return "#3fb950";
+      if ((n.data || {}).source === "name") return "#d29922";
+    }
     return NODE_COLORS[n.type] || "#8b949e";
   }
 
@@ -1774,8 +1841,15 @@ if ("serviceWorker" in navigator) {
             enableInvestigationActions(run.investigation_id);
             els.graphBtn.click();
           });
+          var rr = document.createElement("button");
+          rr.textContent = "re-run";
+          rr.addEventListener("click", function (e) {
+            e.stopPropagation();
+            startRerun(run.investigation_id);
+          });
           actions.appendChild(rep);
           actions.appendChild(gr);
+          actions.appendChild(rr);
           item.appendChild(actions);
         }
         item.addEventListener("click", function () { loadRun(run.id); });
@@ -1785,26 +1859,24 @@ if ("serviceWorker" in navigator) {
   }
 
   function renderSummaryReadOnly(summary, run) {
+    function restore(r, extra) {
+      addInvFoundRow(Object.assign({ username: r.username, site: r.site,
+                                     url: r.url, engines: r.engines }, extra));
+      if (r.enrichment || r.verification)
+        enrichInvRow({ username: r.username, site: r.site,
+                       enrichment: r.enrichment || {},
+                       verification: r.verification });
+    }
     (summary.accounts || []).forEach(function (r) {
-      addInvFoundRow({ username: r.username, site: r.site, url: r.url,
-                       engines: r.engines, source: "base",
-                       variant_of: null, from_name: null, candidate: null });
-      if (r.enrichment) enrichInvRow({ username: r.username, site: r.site,
-                                       enrichment: r.enrichment });
+      restore(r, { source: "base", variant_of: null, from_name: null,
+                   candidate: null });
     });
     (summary.variants || []).forEach(function (r) {
-      addInvFoundRow({ username: r.username, site: r.site, url: r.url,
-                       engines: r.engines, source: "variant",
-                       variant_of: r.variant_of });
-      if (r.enrichment) enrichInvRow({ username: r.username, site: r.site,
-                                       enrichment: r.enrichment });
+      restore(r, { source: "variant", variant_of: r.variant_of });
     });
     (summary.name_accounts || []).forEach(function (r) {
-      addInvFoundRow({ username: r.username, site: r.site, url: r.url,
-                       engines: r.engines, source: "name",
-                       from_name: r.from_name, candidate: r.candidate });
-      if (r.enrichment) enrichInvRow({ username: r.username, site: r.site,
-                                       enrichment: r.enrichment });
+      restore(r, { source: "name", from_name: r.from_name,
+                   candidate: r.candidate });
     });
     var params = summary.params || {};
     var em = summary.email || {};

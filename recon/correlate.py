@@ -15,6 +15,12 @@ import re
 from typing import Any, Optional
 
 from recon import safeweb
+from recon.confidence import (
+    AVATAR_WEIGHT,
+    BIO_WEIGHT,
+    CORRELATION_LINK_MIN,
+    NAME_WEIGHT,
+)
 
 logger = logging.getLogger("recon.correlate")
 
@@ -148,17 +154,17 @@ async def correlate(rows: list[dict]) -> list[dict]:
             if ha is not None and hb is not None:
                 d = hamming(ha, hb)
                 if d <= AVATAR_HAMMING_MAX:
-                    score += 50
+                    score += AVATAR_WEIGHT
                     reasons.append(f"avatars match (hash distance {d})")
             nsim = name_similarity(_display_name(a), _display_name(b))
             if nsim >= NAME_SIM_MIN:
-                score += round(30 * nsim)
+                score += round(NAME_WEIGHT * nsim)
                 reasons.append(f"display names {nsim:.0%} similar")
             bsim = bio_similarity(_bio(a), _bio(b))
             if bsim >= BIO_JACCARD_MIN:
-                score += round(20 * min(1.0, bsim / BIO_JACCARD_MIN))
+                score += round(BIO_WEIGHT * min(1.0, bsim / BIO_JACCARD_MIN))
                 reasons.append(f"bios share {bsim:.0%} of words")
-            if score >= 40:  # below this, a link is too speculative to report
+            if score >= CORRELATION_LINK_MIN:  # below this, too speculative
                 links.append({
                     "a": label(a), "b": label(b),
                     "score": min(100, score),

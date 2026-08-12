@@ -36,6 +36,8 @@ padding:1px 7px;margin-right:4px;border:1px solid}
 .badge.sherlock{color:var(--accent);border-color:rgba(88,166,255,.4)}
 .badge.maigret{color:#bc8cff;border-color:rgba(188,140,255,.4)}
 .badge.variant{color:var(--amber);border-color:rgba(210,153,34,.4)}
+.badge.vok{color:var(--green);border-color:rgba(63,185,80,.5)}
+.badge.vno{color:var(--red);border-color:rgba(248,81,73,.5)}
 .conf-track{background:var(--bg3);border-radius:5px;height:8px;width:140px;overflow:hidden;display:inline-block;vertical-align:middle}
 .conf-fill{background:linear-gradient(90deg,var(--green),#79c0ff);height:100%}
 .dim{color:var(--dim);font-size:12px}
@@ -48,6 +50,15 @@ def _engine_badges(engines: list[str]) -> str:
     return "".join(
         f'<span class="badge {_e(e)}">{_e(e)}</span>' for e in engines
     )
+
+
+def _verify_badge(row: dict) -> str:
+    status = (row.get("verification") or {}).get("status")
+    if status == "confirmed":
+        return '<span class="badge vok">verified</span>'
+    if status == "likely_false_positive":
+        return '<span class="badge vno">likely false</span>'
+    return ""
 
 
 def _enrichment_cell(row: dict) -> str:
@@ -108,7 +119,8 @@ def render_report(run: dict) -> str:
             parts.append(
                 f"<tr><td><b>{_e(r.get('site'))}</b></td>"
                 f"<td><a href='{_e(r.get('url'))}'>{_e(r.get('url'))}</a>"
-                f"<div class='dim'>username: {_e(r.get('username'))}</div></td>"
+                f"<div class='dim'>username: {_e(r.get('username'))} "
+                f"{_verify_badge(r)}</div></td>"
                 f"<td>{_engine_badges(r.get('engines') or [])}</td>"
                 f"<td>{_enrichment_cell(r)}</td></tr>"
             )

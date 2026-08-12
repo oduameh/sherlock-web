@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from recon.confidence import account_confidence
+
 
 def _avatar(row: dict) -> Optional[str]:
     enr = row.get("enrichment") or {}
@@ -26,17 +28,6 @@ def _avatar(row: dict) -> Optional[str]:
 def _display_name(row: dict) -> Optional[str]:
     enr = row.get("enrichment") or {}
     return enr.get("jsonld_name") or enr.get("og_title") or enr.get("title")
-
-
-def _account_confidence(row: dict) -> int:
-    conf = 45
-    if len(row.get("engines") or []) >= 2:
-        conf += 25
-    if _display_name(row) or _avatar(row):
-        conf += 20
-    if row.get("source") == "name":
-        conf -= 15  # name-derived candidates are speculative until confirmed
-    return max(5, min(100, conf))
 
 
 def build_graph(summary: dict) -> dict:
@@ -76,7 +67,8 @@ def build_graph(summary: dict) -> dict:
                 + (summary.get("name_accounts") or []))
     for row in all_rows:
         nid = f"acct:{row.get('site')}:{row.get('username')}"
-        conf = _account_confidence(row)
+        conf = account_confidence(row)
+        verification = (row.get("verification") or {}).get("status")
         enr = row.get("enrichment") or {}
         if row.get("source") == "name":
             rationale = (f"name-derived candidate '{row.get('candidate')}' "
@@ -90,6 +82,7 @@ def build_graph(summary: dict) -> dict:
             "label": row.get("username"), "sublabel": row.get("site"),
             "url": row.get("url"), "avatar": _avatar(row),
             "confidence": conf, "engines": row.get("engines") or [],
+            "verification": verification,
             "data": {
                 "site": row.get("site"), "url": row.get("url"),
                 "source": row.get("source"),
@@ -97,6 +90,7 @@ def build_graph(summary: dict) -> dict:
                 "from_name": row.get("from_name"),
                 "candidate": row.get("candidate"),
                 "display_name": _display_name(row),
+                "verification": verification,
                 "bio": enr.get("jsonld_description")
                        or enr.get("og_description"),
             },

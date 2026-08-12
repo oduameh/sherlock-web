@@ -17,6 +17,7 @@ from typing import Any, Callable, Optional
 import httpx
 
 from recon import safeweb
+from recon.verify import verify_username
 
 logger = logging.getLogger("recon.enrich")
 
@@ -121,25 +122,17 @@ async def _fetch_limited(client: httpx.AsyncClient, url: str) -> Optional[str]:
         return None
 
 
-async def enrich_one(client: httpx.AsyncClient, url: str) -> dict:
-    html = await _fetch_limited(client, url)
-    if not html:
-        return {}
-    try:
-        return _extract(html)
-    except Exception:
-        logger.exception("enrichment parse failed for %s", url)
-        return {}
-
-
 async def enrich_profiles(rows: list[dict],
                           on_enriched: Callable[[dict, dict], Any],
                           limit: int = MAX_ENRICH_PER_RUN) -> int:
-    """Enrich up to ``limit`` found-profile rows (mutates rows in place).
+    """Enrich + verify up to ``limit`` found-profile rows (mutates in place).
 
-    ``rows`` items need a ``url`` key; enrichment output is stored under
-    ``row["enrichment"]``. ``on_enriched(row, data)`` is awaited/called per
-    completed profile. Returns the number of profiles enriched.
+    ``rows`` items need a ``url`` key. Extracted metadata is stored under
+    ``row["enrichment"]`` and an advisory verification verdict under
+    ``row["verification"]`` (see :mod:`recon.verify`). ``on_enriched(row, data)``
+    is awaited/called once per fetched profile — including pages that yield no
+    metadata but a decisive verdict (e.g. a flagged soft-404). Returns the
+    number of profiles fetched.
     """
     seen_urls: set[str] = set()
     targets: list[dict] = []
@@ -160,16 +153,25 @@ async def enrich_profiles(rows: list[dict],
         async def work(row: dict) -> None:
             nonlocal count
             async with sem:
-                data = await enrich_one(client, row["url"])
+                html = await _fetch_limited(client, row["url"])
+            if html is None:
+                return
+            try:
+                data = _extract(html)
+            except Exception:
+                logger.exception("enrichment parse failed for %s", row["url"])
+                data = {}
+            row["verification"] = verify_username(
+                row.get("username"), row.get("url"), html, data)
             if data:
                 row["enrichment"] = data
-                count += 1
-                try:
-                    res = on_enriched(row, data)
-                    if asyncio.iscoroutine(res):
-                        await res
-                except Exception:
-                    logger.exception("on_enriched callback failed")
+            count += 1
+            try:
+                res = on_enriched(row, data)
+                if asyncio.iscoroutine(res):
+                    await res
+            except Exception:
+                logger.exception("on_enriched callback failed")
 
         await asyncio.gather(*(work(r) for r in targets), return_exceptions=True)
     return count

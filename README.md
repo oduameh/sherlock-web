@@ -237,6 +237,10 @@ New/changed endpoints:
 - `POST /api/investigate` — JSON `{name?, usernames?, email?, phone?,
   variants?, timeout?}` (at least one clue required) → `{investigation_id}`
 - `GET /api/investigate/{id}` — stored investigation (inputs, summary, status)
+- `POST /api/investigate/{id}/rerun` — clone an investigation's inputs into a
+  fresh run → `{investigation_id, inputs, rerun_of}`; stream the new id like any
+  investigation. Each run is its own history entry, so a subject becomes a
+  living case file you can re-scan and diff over time.
 - `GET /api/investigate/{id}/stream?nsfw=false` — SSE stream of the full
   pipeline (`meta_run`, `meta`, `candidates`, `found`, `merged`, `error`,
   `progress`, `engine_*`, `variants_planned`, `phase`, `enriched`, `email`,
@@ -259,6 +263,22 @@ unchanged.
 Graceful degradation: `phonenumbers` missing → phone pivot returns an
 "unavailable" result; `cytoscape.min.js` missing → the graph panel shows a
 fallback notice; everything else already degraded per-engine.
+
+### Accuracy: verification + unified confidence
+
+- **Profile verification** (`recon/verify.py`) — Sherlock/Maigret report a hit
+  from an HTTP signal, and some sites answer 200 for any path (false positives).
+  During enrichment, each fetched profile is cross-checked for the scanned
+  handle: found in the title/OG/JSON-LD/body → **confirmed**; a soft-404 served
+  with a 200 → **likely false positive**; otherwise **unconfirmed**. The verdict
+  is advisory (badged green/red in the UI, dossier, and report; it never
+  silently drops a result). Ordering catches the "user X not found" case that
+  echoes the handle.
+- **Unified confidence** (`recon/confidence.py`) — one source of truth for
+  account confidence (engine agreement + enrichment + verification + how the
+  handle was derived) and the correlation weights, so the identity graph,
+  dossier, and report agree. Verified accounts read green in the graph, flagged
+  ones red.
 
 ### Responsible use
 

@@ -371,6 +371,7 @@ async def run_pipeline(
             "from_name": row.get("from_name"),
             "candidate": row.get("candidate"),
             "enrichment": data,
+            "verification": row.get("verification"),
         })
 
     await enrich_profiles(all_rows, on_enriched)

@@ -11,9 +11,22 @@ import html
 import time
 from typing import Any, Optional
 
+from recon.confidence import account_confidence
+
 
 def _e(v: Any) -> str:
     return html.escape("" if v is None else str(v))
+
+
+_ACCT_HEADER = ("<tr><th>Platform</th><th>Profile</th><th>Engines</th>"
+                "<th>Conf.</th><th>Identity</th></tr>")
+
+_VERIFY_CHIP = {
+    "confirmed": "<span class='tag' style='color:var(--green);"
+                 "border-color:var(--green)'>verified</span>",
+    "likely_false_positive": "<span class='tag' style='color:var(--red);"
+                             "border-color:var(--red)'>likely false</span>",
+}
 
 
 _CSS = """
@@ -167,6 +180,8 @@ def _account_rows(rows: list[dict]) -> str:
         enr = r.get("enrichment") or {}
         name = enr.get("jsonld_name") or enr.get("og_title") or enr.get("title")
         engines = ", ".join(r.get("engines") or [])
+        conf = account_confidence(r)
+        vchip = _VERIFY_CHIP.get((r.get("verification") or {}).get("status"), "")
         tags = ""
         if r.get("source") == "variant":
             tags = f"<span class='tag'>variant of {_e(r.get('variant_of'))}</span>"
@@ -176,8 +191,9 @@ def _account_rows(rows: list[dict]) -> str:
         out.append(
             f"<tr><td><b>{_e(r.get('site'))}</b></td>"
             f"<td><a href='{_e(r.get('url'))}'>{_e(r.get('url'))}</a>"
-            f"<div class='dim'>{_e(r.get('username'))} {tags}</div></td>"
-            f"<td>{_e(engines)}</td><td>{_e(name) or '—'}</td></tr>"
+            f"<div class='dim'>{_e(r.get('username'))} {vchip}{tags}</div></td>"
+            f"<td>{_e(engines)}</td><td><b>{conf}%</b></td>"
+            f"<td>{_e(name) or '—'}</td></tr>"
         )
     return "".join(out)
 
@@ -269,8 +285,7 @@ def render_dossier(inv: dict, summary: dict) -> str:
     # -- confirmed accounts ------------------------------------------------------
     p.append(f"<h2>Confirmed accounts ({len(accounts)})</h2>")
     if accounts:
-        p.append("<table class='data'><tr><th>Platform</th><th>Profile</th>"
-                 "<th>Engines</th><th>Identity</th></tr>")
+        p.append("<table class='data'>" + _ACCT_HEADER)
         p.append(_account_rows(accounts))
         p.append("</table>")
     else:
@@ -278,8 +293,7 @@ def render_dossier(inv: dict, summary: dict) -> str:
 
     if variants:
         p.append(f"<h2>Username-variant matches ({len(variants)})</h2>")
-        p.append("<table class='data'><tr><th>Platform</th><th>Profile</th>"
-                 "<th>Engines</th><th>Identity</th></tr>")
+        p.append("<table class='data'>" + _ACCT_HEADER)
         p.append(_account_rows(variants))
         p.append("</table>")
 
@@ -292,8 +306,7 @@ def render_dossier(inv: dict, summary: dict) -> str:
             + _e(", ".join(candidates)) + "</p>"
         )
         if name_rows:
-            p.append("<table class='data'><tr><th>Platform</th><th>Profile</th>"
-                     "<th>Engines</th><th>Identity</th></tr>")
+            p.append("<table class='data'>" + _ACCT_HEADER)
             p.append(_account_rows(name_rows))
             p.append("</table>")
         else:
@@ -347,8 +360,9 @@ def render_dossier(inv: dict, summary: dict) -> str:
         "<ul class='tight'>"
         "<li>Username discovery: Sherlock and Maigret engines against public "
         "profile URLs; results merged and de-duplicated by site.</li>"
-        "<li>Name expansion: up to 20 ranked candidate handles generated from "
-        "the supplied name and checked against a curated high-value site list.</li>"
+        "<li>Name expansion: up to 24 ranked candidate handles (including "
+        "nickname forms, e.g. Robert &rarr; bob/rob) generated from the "
+        "supplied name and checked against a curated high-value site list.</li>"
         "<li>Email pivot: public Gravatar profile API and registration checks "
         "against public sign-up/password-reset endpoints (holehe).</li>"
         "<li>Phone intelligence: offline parsing (phonenumbers) — validity, "
@@ -356,6 +370,12 @@ def render_dossier(inv: dict, summary: dict) -> str:
         "checks are performed.</li>"
         "<li>Enrichment: public profile pages only (title, Open Graph, "
         "JSON-LD Person fields).</li>"
+        "<li>Verification: each fetched profile is cross-checked for the "
+        "scanned handle; a &lsquo;verified&rsquo; chip means the handle appears "
+        "on the page, &lsquo;likely false&rsquo; means the page reads like a "
+        "soft-404 served with a 200.</li>"
+        "<li>Account confidence (per-account %): engine agreement, enrichment, "
+        "verification, and how the handle was derived, combined into 0-100.</li>"
         "<li>Correlation: heuristic avatar-hash, display-name and bio-overlap "
         "signals combined into a 0-100 confidence score.</li>"
         "</ul>"
