@@ -32,6 +32,7 @@ from recon.permutations import generate_variants
 from recon.phone_pivot import phone_intel
 from recon.router import RunRouter, retry_delay
 from recon.validate import is_probably_email
+from recon import whatsmyname
 
 logger = logging.getLogger("recon.pipeline")
 
@@ -187,15 +188,22 @@ async def run_pipeline(
         else:
             loop.call_soon_threadsafe(_engine_lifecycle, kind, *args)
 
-    def _handle_found(engine, scanned_name, site, url, query_time, group):
+    def _handle_found(engine, scanned_name, site, url, query_time, group,
+                      category=None):
         key = (scanned_name, engines.normalize_site(site))
         row = rows.get(key)
         if row is not None:
+            changed = False
             if engine not in row["engines"]:
                 row["engines"].append(engine)
+                changed = True
+            if category and not row.get("category"):
+                row["category"] = category
+                changed = True
+            if changed:
                 emit("merged", {
                     "username": scanned_name, "site": row["site"],
-                    "engines": row["engines"],
+                    "engines": row["engines"], "category": row.get("category"),
                     "source": row["source"],
                     "variant_of": row.get("variant_of"),
                     "from_name": row.get("from_name"),
@@ -205,6 +213,7 @@ async def run_pipeline(
         row = {
             "username": scanned_name, "site": site, "url": url,
             "engines": [engine], "query_time": query_time,
+            "category": category,
             "source": group["kind"],
             "variant_of": group.get("variant_of"),
             "from_name": group.get("from_name"),
@@ -336,6 +345,64 @@ async def run_pipeline(
 
         await asyncio.gather(*(one(n, g) for n, g in items))
 
+    async def whatsmyname_worker(items, sites_list, concurrency=1):
+        if not sites_list:
+            return
+        total = len(sites_list)
+        by_name = {s["name"]: s for s in sites_list}
+        sem = asyncio.Semaphore(concurrency)
+
+        async def one(scanned_name, group):
+            async with sem:
+                _engine_lifecycle("engine_start", "whatsmyname", scanned_name,
+                                  total, group)
+                checked = 0
+
+                def on_result(result, _name=scanned_name, _g=group):
+                    nonlocal checked
+                    checked += 1
+                    router.observe("whatsmyname", result.site_name,
+                                   result.status, result.context or "",
+                                   result.query_time, username=_name)
+                    if result.status == whatsmyname.CLAIMED:
+                        _handle_found("whatsmyname", _name, result.site_name,
+                                      result.site_url_user, None, _g,
+                                      result.category)
+                    elif result.status == whatsmyname.UNKNOWN:
+                        _handle_error("whatsmyname", _name, result.site_name,
+                                      result.status, result.context or "", _g)
+                    _handle_progress("whatsmyname", _name, checked, total, _g)
+
+                try:
+                    await whatsmyname.whatsmyname_scan(
+                        scanned_name, sites_list, timeout, on_result,
+                        proxy=router.proxy)
+                except Exception as exc:
+                    _engine_lifecycle("engine_error", "whatsmyname",
+                                      f"{type(exc).__name__}: {exc}")
+                # Retry transient failures once, batched (like the other engines).
+                retry_recs = router.drain_transient("whatsmyname", scanned_name)
+                retry_sites = [by_name[r["site"]] for r in retry_recs
+                               if r["site"] in by_name]
+                if retry_sites:
+                    router.retries_done += len(retry_sites)
+                    for r in retry_recs:
+                        if r["site"] in by_name:
+                            emit("retry", dict(r))
+                    await asyncio.sleep(retry_delay())
+                    try:
+                        await whatsmyname.whatsmyname_scan(
+                            scanned_name, retry_sites, timeout, on_result,
+                            proxy=router.proxy)
+                    except Exception:
+                        logger.exception(
+                            "whatsmyname retry batch failed for %s",
+                            scanned_name)
+                _engine_lifecycle("engine_done", "whatsmyname", scanned_name,
+                                  group)
+
+        await asyncio.gather(*(one(n, g) for n, g in items))
+
     async def email_worker(addr):
         grav = await gravatar_lookup(addr)
         email_state["gravatar"] = grav
@@ -382,6 +449,13 @@ async def run_pipeline(
     mai_reduced = router.filter_sites(
         engines.maigret_variant_sites() if engines.maigret_available() else {},
         "maigret")
+    # WhatsMyName: a third engine over ~700 categorized sites. filter_sites
+    # wants a dict, so key the site defs by name, filter open circuits, unwrap.
+    wmn_all = list(router.filter_sites(
+        {s["name"]: s for s in whatsmyname.all_sites()}, "whatsmyname").values())
+    wmn_reduced = list(router.filter_sites(
+        {s["name"]: s for s in whatsmyname.variant_sites()},
+        "whatsmyname").values())
     router.announce_skipped()
 
     emit("meta", {
@@ -389,6 +463,7 @@ async def run_pipeline(
         "domain": pivot_domain, "variants": variants, "thorough": thorough,
         "timeout": timeout,
         "sherlock_sites": len(sher_data), "maigret_sites": len(mai_all),
+        "whatsmyname_sites": len(wmn_all),
         "candidate_sites": len(sher_reduced), "candidates": len(candidates),
     })
 
@@ -400,16 +475,18 @@ async def run_pipeline(
         phone_state = phone_intel(phone)
         emit("phone_intel", phone_state)
 
-    # Base username scans (dual engine, full site sets).
+    # Base username scans (tri-engine, full site sets).
     base_items = [(u, {"kind": "base"}) for u in usernames]
     if base_items:
         base_events = start_sherlock(base_items, sher_data)
         mai_base = asyncio.create_task(maigret_worker(base_items, mai_all))
+        wmn_base = asyncio.create_task(whatsmyname_worker(base_items, wmn_all))
     else:
         base_events = []
         mai_base = None
+        wmn_base = None
 
-    # Name-candidate scans (dual engine, curated high-value sites, fanned out).
+    # Name-candidate scans (tri-engine, curated high-value sites, fanned out).
     cand_items = [
         (c, {"kind": "name", "from_name": name, "candidate": c})
         for c in candidates
@@ -420,9 +497,13 @@ async def run_pipeline(
         mai_cand = asyncio.create_task(
             maigret_worker(cand_items, mai_reduced,
                            concurrency=NAME_MAIGRET_CONCURRENCY))
+        wmn_cand = asyncio.create_task(
+            whatsmyname_worker(cand_items, wmn_reduced,
+                               concurrency=NAME_MAIGRET_CONCURRENCY))
     else:
         cand_events = []
         mai_cand = None
+        wmn_cand = None
 
     email_task = asyncio.create_task(email_worker(email)) if email else None
     domain_task = (asyncio.create_task(domain_worker(pivot_domain))
@@ -432,6 +513,8 @@ async def run_pipeline(
     await wait_all(base_events)
     if mai_base is not None:
         await mai_base
+    if wmn_base is not None:
+        await wmn_base
 
     # Username variants (reduced high-value site list), like deep recon.
     if variants and usernames:
@@ -445,11 +528,14 @@ async def run_pipeline(
                        for v in vs]
             v_events = start_sherlock(v_items, sher_reduced)
             await maigret_worker(v_items, mai_reduced)
+            await whatsmyname_worker(v_items, wmn_reduced)
             await wait_all(v_events)
 
     await wait_all(cand_events)
     if mai_cand is not None:
         await mai_cand
+    if wmn_cand is not None:
+        await wmn_cand
 
     # Enrichment over everything found.
     all_rows = accounts + variant_rows + name_rows

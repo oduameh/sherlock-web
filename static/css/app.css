@@ -838,6 +838,7 @@ select { appearance: auto; }
 }
 .engine-badge.sherlock { color: var(--accent-strong); border-color: rgba(94, 160, 255, 0.4); background: var(--accent-soft); }
 .engine-badge.maigret { color: var(--purple); border-color: rgba(195, 155, 255, 0.4); background: var(--purple-soft); }
+.engine-badge.whatsmyname { color: #4cc3d9; border-color: rgba(76, 195, 217, 0.4); background: rgba(76, 195, 217, 0.12); }
 
 .variant-tag {
   display: inline-block;

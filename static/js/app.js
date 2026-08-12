@@ -1179,6 +1179,7 @@
       var bits = [];
       if (d.sherlock_sites) bits.push(d.sherlock_sites + " sherlock sites");
       if (d.maigret_sites) bits.push(d.maigret_sites + " maigret sites");
+      if (d.whatsmyname_sites) bits.push(d.whatsmyname_sites + " whatsmyname sites");
       if (d.candidates) bits.push(d.candidates + " name candidates × " + d.candidate_sites + " sites");
       if (d.email) bits.push("email pivot");
       if (d.phone) bits.push("phone intel");
