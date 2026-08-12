@@ -60,6 +60,8 @@
     confSliderVal: document.getElementById("confSliderVal"),
     graphFitBtn: document.getElementById("graphFitBtn"),
     graphLabelsBtn: document.getElementById("graphLabelsBtn"),
+    graphZoomInBtn: document.getElementById("graphZoomInBtn"),
+    graphZoomOutBtn: document.getElementById("graphZoomOutBtn"),
     nodePanel: document.getElementById("nodePanel"),
     nodePanelBody: document.getElementById("nodePanelBody"),
     nodePanelClose: document.getElementById("nodePanelClose"),
@@ -350,7 +352,11 @@
   document.addEventListener("keydown", function (e) {
     if (e.key !== "Escape") return;
     if (!els.modalWrap.hidden) { closeModal(); return; }
-    if (els.nodePanel.classList.contains("open")) { els.nodePanel.classList.remove("open"); return; }
+    if (els.nodePanel.classList.contains("open")) {
+      els.nodePanel.classList.remove("open");
+      if (cy) cy.elements().removeClass("hl dimmed");
+      return;
+    }
     if (els.alertsDrop.classList.contains("open")) {
       els.alertsDrop.classList.remove("open");
       els.bellBtn.setAttribute("aria-expanded", "false");
@@ -566,6 +572,7 @@
   function setRunning(running) {
     els.startBtn.disabled = running;
     els.stopBtn.style.display = running ? "block" : "none";
+    els.overallBar.classList.toggle("is-running", running);
     if (running) startElapsed(); else stopElapsed();
   }
 
@@ -1059,6 +1066,7 @@
   function setInvRunning(running) {
     els.invStartBtn.disabled = running;
     els.invStopBtn.style.display = running ? "block" : "none";
+    els.overallBar.classList.toggle("is-running", running);
     if (running) startElapsed(); else stopElapsed();
   }
 
@@ -1303,7 +1311,7 @@
     email: "#e0a338",
     phone: "#4cc3d9",
     registration: "#7d8a9c",
-    domain: "#a371f7",
+    domain: "#c39bff",
     ip: "#f778ba",
     nameserver: "#6e7681"
   };
@@ -1340,6 +1348,17 @@
     if (cy) cy.fit(null, 40);
   });
 
+  // Zoom around the graph's visual center so the framing stays stable.
+  function zoomGraph(factor) {
+    if (!cy) return;
+    cy.zoom({
+      level: cy.zoom() * factor,
+      renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 }
+    });
+  }
+  els.graphZoomInBtn.addEventListener("click", function () { zoomGraph(1.3); });
+  els.graphZoomOutBtn.addEventListener("click", function () { zoomGraph(1 / 1.3); });
+
   els.graphLabelsBtn.addEventListener("click", function () {
     graphLabelsOn = !graphLabelsOn;
     els.graphLabelsBtn.setAttribute("aria-pressed", String(graphLabelsOn));
@@ -1353,6 +1372,8 @@
 
   function showNodePanel(n) {
     var d = n.data();
+    // Tint the drawer (top border, type dot, avatar ring) to match the node.
+    els.nodePanel.style.setProperty("--np-accent", d.color || "#5ea0ff");
     var body = els.nodePanelBody;
     body.innerHTML = "";
     if (d.avatar) {
@@ -1416,6 +1437,7 @@
 
   els.nodePanelClose.addEventListener("click", function () {
     els.nodePanel.classList.remove("open");
+    if (cy) cy.elements().removeClass("hl dimmed");
   });
 
   function renderGraph(data) {
@@ -1457,15 +1479,27 @@
           "background-color": "data(color)",
           "width": "data(size)", "height": "data(size)",
           "label": "data(labelText)",
-          "color": "#e9eef5", "font-size": 9, "line-height": 1.3,
+          "color": "#eaf0f7", "font-size": 9, "line-height": 1.3,
+          "font-family": "ui-sans-serif, system-ui, sans-serif",
+          "min-zoomed-font-size": 7,
           "text-wrap": "wrap", "text-max-width": "110px",
           "text-valign": "bottom", "text-margin-y": 5,
-          "text-background-color": "#0b0e13", "text-background-opacity": 0.75,
-          "text-background-padding": 2, "text-background-shape": "roundrectangle",
-          "border-width": 1.5, "border-color": "rgba(255,255,255,.18)"
+          "text-background-color": "#090c11", "text-background-opacity": 0.78,
+          "text-background-padding": 3, "text-background-shape": "roundrectangle",
+          "border-width": 1.5, "border-color": "data(color)", "border-opacity": 0.55,
+          "background-opacity": 0.95,
+          "transition-property": "border-width, border-color, opacity",
+          "transition-duration": 120
         }},
+        // Contact identifiers read as tags; domains as hexagons; IPs as diamonds.
+        { selector: 'node[type="email"]', style: { "shape": "round-rectangle" } },
+        { selector: 'node[type="phone"]', style: { "shape": "round-rectangle" } },
+        { selector: 'node[type="registration"]', style: { "shape": "round-rectangle" } },
+        { selector: 'node[type="nameserver"]', style: { "shape": "round-rectangle" } },
+        { selector: 'node[type="domain"]', style: { "shape": "hexagon" } },
+        { selector: 'node[type="ip"]', style: { "shape": "diamond" } },
         { selector: 'node[type="person"]', style: {
-          "border-width": 2.5, "border-color": "#e9eef5",
+          "border-width": 3, "border-color": "#eaf0f7", "border-opacity": 1,
           "font-size": 12, "font-weight": "bold"
         }},
         { selector: "node[avatar]", style: {
@@ -1475,15 +1509,21 @@
         }},
         { selector: "edge", style: {
           "width": "mapData(confidence, 0, 100, 1, 4.5)",
-          "line-color": "#334052", "curve-style": "bezier",
-          "label": "data(confidence)", "font-size": 8, "color": "#7d8a9c",
+          "line-color": "#3a4658", "curve-style": "bezier",
+          "opacity": 0.85,
+          "label": "data(confidence)", "font-size": 8, "color": "#8a97a8",
+          "min-zoomed-font-size": 8,
+          "font-family": "ui-monospace, monospace",
           "text-rotation": "autorotate",
-          "text-background-color": "#0b0e13", "text-background-opacity": 0.7,
+          "text-background-color": "#090c11", "text-background-opacity": 0.7,
           "text-background-padding": 1
         }},
         { selector: "edge[confidence >= 60]", style: { "line-color": "#4cc38a" } },
-        { selector: "edge[confidence < 40]", style: { "line-style": "dashed" } },
-        { selector: "node:selected", style: { "border-color": "#fff", "border-width": 3 } }
+        { selector: "edge[confidence < 40]", style: { "line-style": "dashed", "opacity": 0.6 } },
+        { selector: "node:selected", style: { "border-color": "#ffffff", "border-width": 3, "border-opacity": 1 } },
+        { selector: "node.hl", style: { "border-color": "#ffffff", "border-width": 3, "border-opacity": 1 } },
+        { selector: "edge.hl", style: { "line-color": "#8dbcff", "opacity": 1, "width": 3 } },
+        { selector: ".dimmed", style: { "opacity": 0.12 } }
       ],
       layout: {
         name: "cose", animate: true, animationDuration: 800,
@@ -1497,9 +1537,23 @@
     requestAnimationFrame(function () {
       if (cy) { cy.resize(); cy.fit(undefined, 40); }
     });
-    cy.on("tap", "node", function (evt) { showNodePanel(evt.target); });
+    // Selecting a node focuses its neighborhood: highlight the node + its
+    // links, dim everything else. Tapping the background clears the focus.
+    cy.on("tap", "node", function (evt) {
+      var n = evt.target;
+      var hood = n.closedNeighborhood();
+      cy.elements().addClass("dimmed").removeClass("hl");
+      hood.removeClass("dimmed");
+      hood.nodes().addClass("hl");
+      hood.connectedEdges().removeClass("dimmed");
+      n.connectedEdges().addClass("hl");
+      showNodePanel(n);
+    });
     cy.on("tap", function (evt) {
-      if (evt.target === cy) els.nodePanel.classList.remove("open");
+      if (evt.target === cy) {
+        cy.elements().removeClass("hl dimmed");
+        els.nodePanel.classList.remove("open");
+      }
     });
     applyEdgeFilter();
     if (!graphLabelsOn) {

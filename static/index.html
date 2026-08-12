@@ -198,9 +198,12 @@
     <!-- Results -->
     <section id="resultsWrap" aria-label="Results">
       <div id="overallBar" class="status-header">
-        <div class="status-stats">
-          <span class="stat"><span class="stat-k">elapsed</span><span class="stat-v" id="elapsedTime">0:00</span></span>
-          <span class="stat"><span class="stat-k">found</span><span class="stat-v" id="runFound">0</span></span>
+        <div class="sh-top">
+          <span class="sh-live"><span class="sh-live-dot" aria-hidden="true"></span>Live</span>
+          <div class="status-stats">
+            <span class="stat"><span class="stat-k">elapsed</span><span class="stat-v" id="elapsedTime">0:00</span></span>
+            <span class="stat"><span class="stat-k">found</span><span class="stat-v" id="runFound">0</span></span>
+          </div>
         </div>
         <div class="progress-track"><div class="progress-fill" id="overallFill"></div></div>
         <div id="overallText">Starting&hellip;</div>
@@ -230,7 +233,23 @@
         <div id="graphWrap">
           <div id="cy"></div>
           <div id="graphFallback">Graph library unavailable (static/vendor/cytoscape.min.js missing).</div>
+          <div class="graph-legend" aria-label="Graph legend">
+            <div class="legend-title">Entities</div>
+            <div class="legend-item"><span class="legend-swatch sw-circle sw-person" aria-hidden="true"></span>Person</div>
+            <div class="legend-item"><span class="legend-swatch sw-circle sw-account" aria-hidden="true"></span>Account</div>
+            <div class="legend-item"><span class="legend-swatch sw-round sw-email" aria-hidden="true"></span>Email</div>
+            <div class="legend-item"><span class="legend-swatch sw-round sw-phone" aria-hidden="true"></span>Phone</div>
+            <div class="legend-item"><span class="legend-swatch sw-hex sw-domain" aria-hidden="true"></span>Domain</div>
+            <div class="legend-title">Account signal</div>
+            <div class="legend-item"><span class="legend-swatch sw-circle sw-good" aria-hidden="true"></span>Confirmed &middot; multi-engine</div>
+            <div class="legend-item"><span class="legend-swatch sw-circle sw-name" aria-hidden="true"></span>Name-derived</div>
+            <div class="legend-item"><span class="legend-swatch sw-circle sw-flag" aria-hidden="true"></span>Likely false positive</div>
+          </div>
           <div id="graphToolbar">
+            <span class="graph-zoom">
+              <button id="graphZoomOutBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Zoom out">&minus;</button>
+              <button id="graphZoomInBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Zoom in">+</button>
+            </span>
             <button id="graphFitBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Fit graph to view">Fit</button>
             <button id="graphLabelsBtn" class="btn btn-ghost btn-sm" type="button" aria-pressed="true" aria-label="Toggle node labels">Labels</button>
             <span class="toolbar-sep" aria-hidden="true"></span>
