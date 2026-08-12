@@ -1051,6 +1051,10 @@ select { appearance: auto; }
   z-index: var(--z-modal);
   animation: fade-in 0.15s ease;
 }
+/* The JS toggles the `hidden` attribute to show/hide the modal; the `display:
+   grid` above would otherwise override [hidden]'s display:none and leave the
+   confirm dialog visible on load. */
+.modal-wrap[hidden] { display: none; }
 .modal {
   background: var(--bg-1);
   border: 1px solid var(--border-input);

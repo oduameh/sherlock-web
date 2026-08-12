@@ -47,6 +47,7 @@
     invUsernames: document.getElementById("invUsernames"),
     invEmail: document.getElementById("invEmail"),
     invPhone: document.getElementById("invPhone"),
+    invDomain: document.getElementById("invDomain"),
     invVariants: document.getElementById("invVariants"),
     invTimeout: document.getElementById("invTimeout"),
     invNsfw: document.getElementById("invNsfw"),
@@ -875,6 +876,45 @@
     c.rows.appendChild(dl);
   }
 
+  function renderDomainIntel(d) {
+    if (!d || !d.domain) return;
+    var c = invSection("domain", "Domain intelligence", d.domain);
+    c.status.textContent = "done";
+    c.found.style.display = "none";
+    c.rows.innerHTML = "";
+    var dns = d.dns || {}, rdap = d.rdap || {};
+    var dl = document.createElement("dl");
+    dl.className = "phone-grid";
+    function addRow(k, v) {
+      if (v === null || v === undefined || v === "" ||
+          (Array.isArray(v) && !v.length)) return;
+      var dt = document.createElement("dt"); dt.textContent = k;
+      var dd = document.createElement("dd");
+      dd.textContent = Array.isArray(v) ? v.join(", ") : String(v);
+      dl.appendChild(dt); dl.appendChild(dd);
+    }
+    if (d.error) { addRow("Error", d.error); c.rows.appendChild(dl); return; }
+    addRow("Registrar", rdap.registrar);
+    addRow("Registered", rdap.registered);
+    addRow("Expires", rdap.expires);
+    addRow("Nameservers", (rdap.nameservers && rdap.nameservers.length)
+                          ? rdap.nameservers : dns.NS);
+    addRow("A", dns.A);
+    addRow("AAAA", dns.AAAA);
+    addRow("MX", dns.MX);
+    addRow("TXT", (dns.TXT || []).slice(0, 6));
+    addRow("Subdomains", d.subdomain_count);
+    c.rows.appendChild(dl);
+    if (d.subdomains && d.subdomains.length) {
+      var sub = document.createElement("div");
+      sub.className = "dim";
+      sub.style.padding = "6px 16px";
+      sub.textContent = d.subdomains.slice(0, 40).join(", ") +
+        (d.subdomains.length > 40 ? " …" : "");
+      c.rows.appendChild(sub);
+    }
+  }
+
   function renderCorrelation(clusters) {
     var c = invSection("correlation", "Correlation", "clusters");
     c.status.textContent = "done";
@@ -941,6 +981,9 @@
   function enableInvestigationActions(id, inputs) {
     currentInvId = id;
     if (inputs) currentInvInputs = inputs;
+    // Reveal the action bar even for runs with no account rows (domain- or
+    // phone-only investigations still have a graph, dossier and re-run).
+    els.exportBar.style.display = "flex";
     els.rerunBtn.style.display = "";
     els.dossierBtn.style.display = "";
     els.graphBtn.style.display = "";
@@ -975,11 +1018,12 @@
       usernames: els.invUsernames.value.trim(),
       email: els.invEmail.value.trim(),
       phone: els.invPhone.value.trim(),
+      domain: els.invDomain.value.trim(),
       variants: els.invVariants.checked,
       timeout: parseInt(els.invTimeout.value || "10", 10)
     };
-    if (!payload.name && !payload.usernames && !payload.email && !payload.phone) {
-      toast("Give at least one clue: name, username, email, or phone", "error");
+    if (!payload.name && !payload.usernames && !payload.email && !payload.phone && !payload.domain) {
+      toast("Give at least one clue: name, username, email, phone, or domain", "error");
       return;
     }
 
@@ -1031,6 +1075,7 @@
       if (d.candidates) bits.push(d.candidates + " name candidates × " + d.candidate_sites + " sites");
       if (d.email) bits.push("email pivot");
       if (d.phone) bits.push("phone intel");
+      if (d.domain) bits.push("domain: " + d.domain);
       els.overallText.textContent = "Investigation #" + invId + ": " + bits.join(" · ");
     });
     invEs.addEventListener("candidates", function (e) {
@@ -1068,6 +1113,9 @@
     });
     invEs.addEventListener("phone_intel", function (e) {
       renderPhoneIntel(JSON.parse(e.data));
+    });
+    invEs.addEventListener("domain_intel", function (e) {
+      renderDomainIntel(JSON.parse(e.data));
     });
     invEs.addEventListener("correlation", function (e) {
       renderCorrelation(JSON.parse(e.data).clusters);
@@ -1144,7 +1192,10 @@
     account: "#5ea0ff",
     email: "#e0a338",
     phone: "#4cc3d9",
-    registration: "#7d8a9c"
+    registration: "#7d8a9c",
+    domain: "#a371f7",
+    ip: "#f778ba",
+    nameserver: "#6e7681"
   };
 
   function nodeColor(n) {
@@ -1266,16 +1317,19 @@
     }
     var elements = [];
     data.nodes.forEach(function (n) {
-      elements.push({
-        data: {
-          id: n.id, type: n.type, label: n.label, sublabel: n.sublabel || "",
-          url: n.url || "", avatar: n.avatar || "",
-          confidence: n.confidence, engines: n.engines || [],
-          data: n.data || {},
-          color: nodeColor(n), size: nodeSize(n),
-          labelText: n.label + (n.sublabel ? "\n" + n.sublabel : "")
-        }
-      });
+      var nd = {
+        id: n.id, type: n.type, label: n.label, sublabel: n.sublabel || "",
+        url: n.url || "",
+        confidence: n.confidence, engines: n.engines || [],
+        data: n.data || {},
+        color: nodeColor(n), size: nodeSize(n),
+        labelText: n.label + (n.sublabel ? "\n" + n.sublabel : "")
+      };
+      // Only set `avatar` when there is a real URL. An empty string still
+      // matches the `node[avatar]` style rule, and cytoscape then throws
+      // parsing "" as a background-image — which silently killed the graph.
+      if (n.avatar) nd.avatar = n.avatar;
+      elements.push({ data: nd });
     });
     data.edges.forEach(function (e) {
       elements.push({ data: {
@@ -1326,6 +1380,12 @@
         nodeRepulsion: 8000, idealEdgeLength: 110, gravity: 0.4,
         padding: 40
       }
+    });
+    // Re-fit once painted and again when the animated layout settles — the
+    // panel may still be sizing when cytoscape initializes.
+    cy.on("layoutstop", function () { cy.fit(undefined, 40); });
+    requestAnimationFrame(function () {
+      if (cy) { cy.resize(); cy.fit(undefined, 40); }
     });
     cy.on("tap", "node", function (evt) { showNodePanel(evt.target); });
     cy.on("tap", function (evt) {
@@ -1660,6 +1720,7 @@
       });
     }
     if (summary.phone) renderPhoneIntel(summary.phone);
+    if (summary.domain) renderDomainIntel(summary.domain);
     renderCorrelation(summary.correlation || []);
     Object.keys(invCards).forEach(function (k) {
       invCards[k].status.textContent = "loaded · " + run.ts;
