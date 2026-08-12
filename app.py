@@ -364,21 +364,26 @@ def _run_scan(usernames: list[str], site_data: dict, timeout: int,
             results_raw = sherlock(username, site_data, notify,
                                    timeout=timeout, proxy=router.proxy)
 
-            # Smart retries: re-check this pass's transient failures once,
-            # sequentially, after a jittered delay. 429/WAF-class failures
-            # are left to the circuit breaker across runs.
-            for rec in router.drain_transient("sherlock", username):
-                if rec["site"] not in site_data:
-                    continue
-                router.retries_done += 1
-                _emit_ts("retry", rec)
+            # Smart retries: re-check this pass's transient failures ONCE, all
+            # together in a single concurrent re-scan after one short delay.
+            # (Doing them one-at-a-time with a sleep each stacked up to minutes
+            # of delay on a full run.) 429/WAF-class failures are left to the
+            # circuit breaker across runs.
+            retry_recs = router.drain_transient("sherlock", username)
+            retry_sites = {rec["site"]: site_data[rec["site"]]
+                           for rec in retry_recs if rec["site"] in site_data}
+            if retry_sites:
+                router.retries_done += len(retry_sites)
+                for rec in retry_recs:
+                    if rec["site"] in retry_sites:
+                        _emit_ts("retry", rec)
                 time.sleep(recon_router.retry_delay())
                 try:
-                    sherlock(username, {rec["site"]: site_data[rec["site"]]},
-                             notify, timeout=timeout, proxy=router.proxy)
+                    sherlock(username, retry_sites, notify,
+                             timeout=timeout, proxy=router.proxy)
                 except Exception:
                     logging.getLogger("app").exception(
-                        "retry failed for %s on %s", username, rec["site"])
+                        "retry batch failed for %s", username)
 
             found_rows = []
             for site_name, info in results_raw.items():
