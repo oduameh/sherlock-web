@@ -12,7 +12,7 @@ import difflib
 import io
 import logging
 import re
-from typing import Any, Optional
+from typing import Optional
 
 from recon import safeweb
 from recon.confidence import (

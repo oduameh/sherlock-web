@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from recon import safeweb
 

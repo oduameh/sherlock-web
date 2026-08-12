@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Tests (pytest)
+        run: pytest -q
+
+      - name: Boot smoke test (/, /api/sites return 200)
+        run: |
+          uvicorn app:app --host 127.0.0.1 --port 8000 &
+          server_pid=$!
+          trap 'kill $server_pid 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8000/api/sites >/dev/null; then break; fi
+            sleep 1
+          done
+          sites=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/api/sites)
+          root=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/)
+          echo "GET /api/sites -> $sites"
+          echo "GET / -> $root"
+          test "$sites" = "200"
+          test "$root" = "200"
