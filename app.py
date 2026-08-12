@@ -824,7 +824,20 @@ if RECON_AVAILABLE:
             bits.append(inputs["email"])
         if inputs.get("phone"):
             bits.append(inputs["phone"])
+        if inputs.get("domain"):
+            bits.append(inputs["domain"])
         return ", ".join(bits)
+
+    @app.get("/api/domain")
+    async def domain_lookup(domain: str = Query(...)) -> JSONResponse:
+        """Standalone domain/DNS/RDAP/subdomain pivot (public data, no keys)."""
+        from recon.domain_pivot import domain_intel, looks_like_domain
+
+        domain = domain.strip().lower()
+        if not looks_like_domain(domain):
+            return JSONResponse(
+                {"error": f"'{domain}' is not a valid domain"}, status_code=400)
+        return JSONResponse(await domain_intel(domain))
 
     def _get_investigation(inv_id: int):
         with db_connect(DB_PATH) as conn:
@@ -877,14 +890,15 @@ if RECON_AVAILABLE:
             "usernames": usernames,
             "email": str(body.get("email") or "").strip(),
             "phone": str(body.get("phone") or "").strip(),
+            "domain": str(body.get("domain") or "").strip().lower(),
             "variants": bool(body.get("variants")),
             "timeout": max(1, min(120, int(body.get("timeout") or 10))),
         }
         if not (inputs["name"] or usernames or inputs["email"]
-                or inputs["phone"]):
+                or inputs["phone"] or inputs["domain"]):
             return JSONResponse(
                 {"error": "provide at least one of: name, usernames, email,"
-                          " phone"},
+                          " phone, domain"},
                 status_code=400,
             )
         if inputs["email"] and not is_probably_email(inputs["email"]):
@@ -964,6 +978,7 @@ if RECON_AVAILABLE:
                 summary = await run_pipeline(
                     name=inputs["name"], usernames=inputs["usernames"],
                     email=inputs["email"], phone=inputs["phone"],
+                    domain=inputs.get("domain", ""),
                     variants=inputs["variants"], timeout=inputs["timeout"],
                     sher_data=sher_data, emit=emit, loop=loop,
                 )

@@ -208,6 +208,7 @@ def render_dossier(inv: dict, summary: dict) -> str:
     name_rows = summary.get("name_accounts") or []
     email_state = summary.get("email") or {}
     phone = summary.get("phone") or {}
+    domain = summary.get("domain") or {}
     candidates = summary.get("candidates") or []
 
     score = footprint_score(summary)
@@ -353,6 +354,35 @@ def render_dossier(inv: dict, summary: dict) -> str:
         if phone.get("note"):
             p.append(f"<div class='notebox'>{_e(phone['note'])}</div>")
 
+    # -- domain / infrastructure ------------------------------------------------------
+    if domain and domain.get("domain") and not domain.get("error"):
+        rdap = domain.get("rdap") or {}
+        dns = domain.get("dns") or {}
+        subs = domain.get("subdomains") or []
+        p.append(f"<h2>Domain intelligence — {_e(domain['domain'])}</h2>")
+        p.append("<table class='data'>")
+        for label, val in [
+            ("Registrar", rdap.get("registrar")),
+            ("Registered", rdap.get("registered")),
+            ("Expires", rdap.get("expires")),
+            ("Nameservers", ", ".join(rdap.get("nameservers")
+                                      or dns.get("NS") or [])),
+            ("A records", ", ".join(dns.get("A") or [])),
+            ("AAAA records", ", ".join(dns.get("AAAA") or [])),
+            ("MX", ", ".join(dns.get("MX") or [])),
+        ]:
+            if val:
+                p.append(f"<tr><td>{label}</td><td>{_e(val)}</td></tr>")
+        p.append("</table>")
+        if dns.get("TXT"):
+            p.append("<p class='dim' style='margin-top:6px'>TXT: "
+                     + "; ".join(_e(t) for t in dns["TXT"][:10]) + "</p>")
+        if subs:
+            p.append(f"<h2 style='border:none;text-transform:none;font-size:12px;"
+                     f"margin:12px 0 4px'>Subdomains ({len(subs)}, via CT logs)</h2>")
+            p.append("<p class='dim'>" + _e(", ".join(subs[:60]))
+                     + ("…" if len(subs) > 60 else "") + "</p>")
+
     # -- methodology / limitations -----------------------------------------------------
     p.append("<h2>Methodology</h2>")
     p.append(
@@ -367,6 +397,9 @@ def render_dossier(inv: dict, summary: dict) -> str:
         "<li>Phone intelligence: offline parsing (phonenumbers) — validity, "
         "region, carrier, line type, timezones. No messaging-app presence "
         "checks are performed.</li>"
+        "<li>Domain intelligence: DNS records over DNS-over-HTTPS, registration "
+        "data via RDAP, and subdomains from public Certificate Transparency "
+        "logs (crt.sh). Public data, no API keys.</li>"
         "<li>Enrichment: public profile pages only (title, Open Graph, "
         "JSON-LD Person fields).</li>"
         "<li>Verification: each fetched profile is cross-checked for the "
