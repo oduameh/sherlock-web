@@ -101,21 +101,25 @@ def _sherlock_worker(items: list, site_data: dict, timeout: int,
 def _retry_transient(router: Optional[RunRouter], engine: str,
                      scanned_name: str, site_data: dict, timeout: int,
                      emit_ts: Callable, notify) -> None:
-    """Retry this pass's transient failures once each (sync; sherlock only)."""
+    """Retry this pass's transient failures once — all in a single concurrent
+    re-scan after one short delay (sync; sherlock only)."""
     if router is None:
         return
-    for rec in router.drain_transient(engine, scanned_name):
-        if rec["site"] not in site_data:
-            continue
-        router.retries_done += 1
-        emit_ts("retry", rec)
-        time.sleep(retry_delay())
-        try:
-            sherlock(scanned_name, {rec["site"]: site_data[rec["site"]]},
-                     notify, timeout=timeout, proxy=router.proxy)
-        except Exception:
-            logger.exception("retry failed for %s on %s",
-                             scanned_name, rec["site"])
+    retry_recs = router.drain_transient(engine, scanned_name)
+    retry_sites = {rec["site"]: site_data[rec["site"]]
+                   for rec in retry_recs if rec["site"] in site_data}
+    if not retry_sites:
+        return
+    router.retries_done += len(retry_sites)
+    for rec in retry_recs:
+        if rec["site"] in retry_sites:
+            emit_ts("retry", rec)
+    time.sleep(retry_delay())
+    try:
+        sherlock(scanned_name, retry_sites, notify, timeout=timeout,
+                 proxy=router.proxy)
+    except Exception:
+        logger.exception("retry batch failed for %s", scanned_name)
 
 
 def _shard(items: list, n: int) -> list[list]:
@@ -309,20 +313,24 @@ async def run_pipeline(
                 except Exception as exc:
                     _engine_lifecycle("engine_error", "maigret",
                                       f"{type(exc).__name__}: {exc}")
-                # Retry this pass's transient failures once each.
-                for rec in router.drain_transient("maigret", scanned_name):
-                    if rec["site"] not in site_dict:
-                        continue
-                    router.retries_done += 1
-                    emit("retry", dict(rec))
+                # Retry this pass's transient failures once — all together in a
+                # single concurrent re-scan after one short delay.
+                retry_recs = router.drain_transient("maigret", scanned_name)
+                retry_sites = {rec["site"]: site_dict[rec["site"]]
+                               for rec in retry_recs if rec["site"] in site_dict}
+                if retry_sites:
+                    router.retries_done += len(retry_sites)
+                    for rec in retry_recs:
+                        if rec["site"] in retry_sites:
+                            emit("retry", dict(rec))
                     await asyncio.sleep(retry_delay())
                     try:
                         await engines.maigret_scan(
-                            scanned_name, {rec["site"]: site_dict[rec["site"]]},
-                            timeout, on_result, proxy=router.proxy)
+                            scanned_name, retry_sites, timeout, on_result,
+                            proxy=router.proxy)
                     except Exception:
-                        logger.exception("maigret retry failed for %s on %s",
-                                         scanned_name, rec["site"])
+                        logger.exception("maigret retry batch failed for %s",
+                                         scanned_name)
                 _engine_lifecycle("engine_done", "maigret", scanned_name,
                                   group)
 

@@ -155,8 +155,10 @@ BASE_COOLDOWN_S = 15 * 60      # 15 min
 MAX_COOLDOWN_S = 4 * 3600      # 4 h
 
 RETRY_CAP = 40                 # total in-run retries across all sites
-RETRY_DELAY_MIN_S = 5.0
-RETRY_DELAY_MAX_S = 15.0
+# One short jittered pause before a single batched re-scan of all transient
+# failures (callers retry them concurrently in one pass, not one-at-a-time).
+RETRY_DELAY_MIN_S = 2.0
+RETRY_DELAY_MAX_S = 5.0
 
 PROXY_BAN_RATE = 0.70
 PROXY_BAN_MIN_USES = 10
