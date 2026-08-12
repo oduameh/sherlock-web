@@ -5,478 +5,325 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sherlock Web — OSINT Investigations</title>
 <link rel="manifest" href="/manifest.webmanifest">
-<meta name="theme-color" content="#0d1117">
+<meta name="theme-color" content="#0b0e13">
 <link rel="icon" type="image/png" href="/static/icons/icon-192.png">
 <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
-<style>
-  :root {
-    --bg: #0d1117;
-    --bg2: #161b22;
-    --bg3: #1c2330;
-    --border: #2d333b;
-    --text: #e6edf3;
-    --dim: #8b949e;
-    --accent: #58a6ff;
-    --green: #3fb950;
-    --red: #f85149;
-    --amber: #d29922;
-    --teal: #39c5cf;
-    --purple: #bc8cff;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    background: var(--bg); color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    min-height: 100vh;
-  }
-  header {
-    padding: 14px 28px; border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; gap: 18px;
-    background: linear-gradient(180deg, #11161d, var(--bg));
-    position: sticky; top: 0; z-index: 40;
-  }
-  header h1 { font-size: 19px; font-weight: 700; letter-spacing: .3px; white-space: nowrap; }
-  header h1 .magnify { color: var(--accent); }
-  header span.tag { color: var(--dim); font-size: 12.5px; }
-
-  /* ---- app tabs ---- */
-  .app-tabs { display: flex; gap: 4px; margin-left: 14px; }
-  .app-tab {
-    background: none; border: none; color: var(--dim); font-size: 14px;
-    font-weight: 600; padding: 8px 14px; cursor: pointer; border-radius: 7px;
-    border-bottom: 2px solid transparent;
-  }
-  .app-tab:hover { color: var(--text); }
-  .app-tab.active { color: var(--text); border-bottom-color: var(--accent); border-radius: 7px 7px 0 0; }
-
-  /* ---- alerts bell ---- */
-  #bellWrap { margin-left: auto; position: relative; }
-  #bellBtn {
-    background: var(--bg3); border: 1px solid var(--border); color: var(--text);
-    border-radius: 7px; padding: 7px 11px; font-size: 14px; cursor: pointer; position: relative;
-  }
-  #bellBtn:hover { border-color: var(--accent); }
-  #alertBadge {
-    position: absolute; top: -6px; right: -6px; background: var(--red); color: #fff;
-    font-size: 10.5px; font-weight: 700; border-radius: 10px; padding: 1px 6px; display: none;
-  }
-  #alertsDrop {
-    display: none; position: absolute; right: 0; top: 42px; width: 360px;
-    background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
-    box-shadow: 0 12px 32px rgba(0,0,0,.5); z-index: 60; overflow: hidden;
-  }
-  #alertsDrop.open { display: block; }
-  #alertsDrop .drop-head {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 10px 14px; border-bottom: 1px solid var(--border);
-    font-size: 13px; font-weight: 600;
-  }
-  #alertsDrop .drop-head button { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 12px; }
-  #alertsList { max-height: 320px; overflow-y: auto; }
-  .alert-item { padding: 9px 14px; border-bottom: 1px solid rgba(45,51,59,.5); font-size: 13px; }
-  .alert-item:last-child { border-bottom: none; }
-  .alert-item .a-time { color: var(--dim); font-size: 11px; margin-top: 2px; }
-  .alert-item.unseen { border-left: 3px solid var(--accent); }
-  .alert-item .a-kind { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; margin-right: 6px; }
-  .alert-item .a-kind.new_account, .alert-item .a-kind.new_holehe_hit { color: var(--green); }
-  .alert-item .a-kind.account_gone, .alert-item .a-kind.holehe_hit_gone { color: var(--red); }
-
-  main { display: none; padding: 20px 28px; }
-  main.active { display: flex; gap: 20px; align-items: flex-start; }
-  main.page { display: none; }
-  main.page.active { display: block; }
-  .panel {
-    background: var(--bg2); border: 1px solid var(--border);
-    border-radius: 10px; padding: 18px;
-  }
-  /* ---- left: controls ---- */
-  #controls { width: 340px; flex-shrink: 0; position: sticky; top: 76px; }
-  label { display: block; font-size: 12px; color: var(--dim); margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .6px; }
-  label:first-child { margin-top: 0; }
-  textarea, input[type=number], input[type=text], select {
-    width: 100%; background: var(--bg); color: var(--text);
-    border: 1px solid var(--border); border-radius: 6px;
-    padding: 9px 11px; font-size: 14px; font-family: inherit;
-  }
-  textarea { resize: vertical; min-height: 74px; }
-  textarea:focus, input:focus, select:focus { outline: none; border-color: var(--accent); }
-  .row { display: flex; gap: 12px; align-items: center; }
-  .row > div { flex: 1; }
-  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: 14px; color: var(--text); }
-  .checkbox-row input { accent-color: var(--accent); width: 16px; height: 16px; }
-  .hint { font-size: 12px; color: var(--dim); margin-top: 4px; }
-
-  /* site picker */
-  #sitePickerBtn {
-    width: 100%; text-align: left; background: var(--bg); color: var(--text);
-    border: 1px solid var(--border); border-radius: 6px; padding: 9px 11px;
-    font-size: 14px; cursor: pointer; display: flex; justify-content: space-between; align-items: center;
-  }
-  #sitePickerBtn:hover { border-color: var(--accent); }
-  #sitePicker {
-    display: none; margin-top: 6px; border: 1px solid var(--border); border-radius: 8px;
-    background: var(--bg3); max-height: 260px; overflow: hidden; flex-direction: column;
-  }
-  #sitePicker.open { display: flex; }
-  #sitePicker .picker-head { padding: 8px; border-bottom: 1px solid var(--border); }
-  #siteList { overflow-y: auto; max-height: 200px; }
-  .site-item { display: flex; align-items: center; gap: 8px; padding: 5px 10px; font-size: 13px; cursor: pointer; }
-  .site-item:hover { background: rgba(88,166,255,.08); }
-  .site-item input { accent-color: var(--accent); }
-  .site-item .nsfw-tag { margin-left: auto; font-size: 10px; color: var(--amber); border: 1px solid var(--amber); border-radius: 4px; padding: 0 4px; }
-  .picker-actions { display: flex; gap: 8px; padding: 8px; border-top: 1px solid var(--border); }
-  .picker-actions button {
-    flex: 1; background: none; border: 1px solid var(--border); color: var(--dim);
-    border-radius: 5px; padding: 4px; font-size: 12px; cursor: pointer;
-  }
-  .picker-actions button:hover { color: var(--text); border-color: var(--accent); }
-
-  /* buttons */
-  .btn {
-    border: none; border-radius: 7px; padding: 10px 18px; font-size: 14px;
-    font-weight: 600; cursor: pointer; transition: filter .15s;
-  }
-  .btn:hover { filter: brightness(1.15); }
-  .btn:disabled { opacity: .45; cursor: not-allowed; }
-  #startBtn { background: var(--accent); color: #08101d; width: 100%; margin-top: 16px; }
-  #stopBtn { background: var(--red); color: #fff; width: 100%; margin-top: 8px; display: none; }
-  .btn-ghost { background: var(--bg3); color: var(--text); border: 1px solid var(--border); font-size: 12px; padding: 6px 12px; }
-  .btn-ghost:hover { border-color: var(--accent); }
-
-  /* ---- right: results ---- */
-  #resultsWrap { flex: 1; min-width: 0; }
-  #overallBar { display: none; margin-bottom: 14px; }
-  .progress-track { background: var(--bg3); border-radius: 6px; height: 8px; overflow: hidden; }
-  .progress-fill { background: linear-gradient(90deg, var(--accent), #79c0ff); height: 100%; width: 0%; transition: width .25s; }
-  #overallText { font-size: 12px; color: var(--dim); margin-top: 6px; }
-
-  .user-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; overflow: hidden; }
-  .user-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
-  .user-head h2 { font-size: 16px; }
-  .badge { font-size: 12px; font-weight: 600; border-radius: 20px; padding: 2px 10px; }
-  .badge.found { background: rgba(63,185,80,.15); color: var(--green); border: 1px solid rgba(63,185,80,.4); }
-  .badge.scanning { background: rgba(88,166,255,.12); color: var(--accent); border: 1px solid rgba(88,166,255,.4); }
-  .badge.err { background: rgba(248,81,73,.12); color: var(--red); border: 1px solid rgba(248,81,73,.35); }
-  .user-head .mini-progress { flex: 1; min-width: 120px; }
-  .result-rows { max-height: 420px; overflow-y: auto; }
-  .rrow { display: flex; align-items: center; gap: 10px; padding: 7px 16px; font-size: 13.5px; border-bottom: 1px solid rgba(45,51,59,.5); }
-  .rrow:last-child { border-bottom: none; }
-  .rrow .site { font-weight: 600; min-width: 160px; }
-  .rrow a { color: var(--accent); text-decoration: none; word-break: break-all; }
-  .rrow a:hover { text-decoration: underline; }
-  .rrow .qt { margin-left: auto; color: var(--dim); font-size: 11px; white-space: nowrap; }
-  .rrow.error { opacity: .45; }
-  .rrow.error .status { color: var(--red); font-size: 12px; }
-  .empty-state { color: var(--dim); text-align: center; padding: 60px 20px; font-size: 14px; }
-  #exportBar { display: none; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; align-items: center; }
-  #exportBar select { width: auto; padding: 6px 8px; font-size: 12px; }
-
-  /* ---- mode tabs ---- */
-  .mode-tabs { display: flex; gap: 6px; margin-bottom: 16px; }
-  .mode-tab {
-    flex: 1; background: var(--bg3); color: var(--dim); border: 1px solid var(--border);
-    border-radius: 7px; padding: 8px 0; font-size: 13px; font-weight: 600; cursor: pointer;
-  }
-  .mode-tab.active { color: var(--text); border-color: var(--accent); background: rgba(88,166,255,.1); }
-
-  /* ---- recon / investigation results ---- */
-  .engine-badge {
-    font-size: 10px; font-weight: 700; border-radius: 8px; padding: 1px 6px;
-    border: 1px solid; white-space: nowrap;
-  }
-  .engine-badge.sherlock { color: var(--accent); border-color: rgba(88,166,255,.4); }
-  .engine-badge.maigret { color: var(--purple); border-color: rgba(188,140,255,.4); }
-  .rrow .badges { display: flex; gap: 4px; }
-  .rrow .enrich { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
-  .rrow .enrich img { width: 28px; height: 28px; border-radius: 50%; background: var(--bg3); object-fit: cover; }
-  .rrow .enrich .e-name { font-weight: 600; font-size: 12.5px; }
-  .rrow .enrich .e-bio { color: var(--dim); font-size: 11.5px; }
-  .rrow .rmain { flex: 1; min-width: 0; }
-  .section-head {
-    font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--dim);
-    margin: 20px 0 8px;
-  }
-  .variant-tag { font-size: 10px; color: var(--amber); border: 1px solid rgba(210,153,34,.4); border-radius: 4px; padding: 0 4px; margin-left: 6px; }
-  .verify-badge { font-size: 10px; border-radius: 4px; padding: 0 5px; margin-left: 6px; border: 1px solid; vertical-align: middle; white-space: nowrap; }
-  .verify-badge.confirmed { color: var(--green); border-color: rgba(63,185,80,.5); }
-  .verify-badge.unconfirmed { color: var(--dim); border-color: rgba(139,148,158,.4); }
-  .verify-badge.false { color: var(--red); border-color: rgba(248,81,73,.5); }
-  .rrow.fp { opacity: .55; }
-  .conf-track { background: var(--bg3); border-radius: 5px; height: 8px; width: 160px; overflow: hidden; display: inline-block; vertical-align: middle; }
-  .conf-fill { background: linear-gradient(90deg, var(--green), #79c0ff); height: 100%; }
-  .cluster-card { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; font-size: 13px; }
-  .cluster-card ul { margin: 8px 0 4px 18px; }
-  .cluster-card .rationale { color: var(--dim); font-size: 12px; }
-  .email-hit { color: var(--green); }
-  .email-miss { color: var(--dim); }
-
-  /* phone card */
-  .phone-grid { display: grid; grid-template-columns: 140px 1fr; gap: 4px 12px; padding: 12px 16px; font-size: 13px; }
-  .phone-grid dt { color: var(--dim); }
-  .phone-grid dd { word-break: break-all; }
-  .phone-valid { color: var(--green); font-weight: 700; }
-  .phone-invalid { color: var(--amber); font-weight: 700; }
-
-  /* ---- graph panel ---- */
-  #graphPanel { display: none; margin-bottom: 16px; position: relative; }
-  #graphWrap { position: relative; height: 520px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: radial-gradient(ellipse at center, #10151d 0%, #0d1117 100%); }
-  #cy { width: 100%; height: 100%; }
-  #graphToolbar {
-    position: absolute; left: 12px; bottom: 12px; z-index: 10;
-    background: rgba(22,27,34,.9); border: 1px solid var(--border); border-radius: 8px;
-    padding: 8px 12px; font-size: 12px; color: var(--dim); display: flex; gap: 10px; align-items: center;
-  }
-  #graphToolbar input[type=range] { accent-color: var(--accent); width: 140px; }
-  #nodePanel {
-    position: absolute; right: 12px; top: 12px; bottom: 12px; width: 290px; z-index: 10;
-    background: rgba(22,27,34,.95); border: 1px solid var(--border); border-radius: 10px;
-    padding: 14px; overflow-y: auto; display: none; font-size: 13px;
-  }
-  #nodePanel.open { display: block; }
-  #nodePanel h3 { font-size: 15px; margin-bottom: 2px; word-break: break-all; }
-  #nodePanel .np-type { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .8px; margin-bottom: 10px; }
-  #nodePanel .np-row { margin-bottom: 8px; }
-  #nodePanel .np-row .k { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
-  #nodePanel img { width: 56px; height: 56px; border-radius: 50%; object-fit: cover; margin-bottom: 10px; background: var(--bg3); }
-  #nodePanel a { color: var(--accent); word-break: break-all; text-decoration: none; }
-  #nodePanel .np-close { position: absolute; top: 8px; right: 10px; background: none; border: none; color: var(--dim); font-size: 16px; cursor: pointer; }
-  #graphFallback { padding: 40px; text-align: center; color: var(--dim); font-size: 13px; display: none; }
-
-  /* ---- watchlist page ---- */
-  .page-grid { display: grid; grid-template-columns: 360px 1fr; gap: 20px; align-items: start; }
-  .watch-item { padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; background: var(--bg3); }
-  .watch-item .w-label { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 8px; }
-  .watch-item .w-meta { color: var(--dim); font-size: 12px; margin: 6px 0 10px; }
-  .watch-item .w-actions { display: flex; gap: 8px; align-items: center; }
-  .watch-item .w-actions select { width: auto; padding: 4px 6px; font-size: 12px; }
-  .w-toggle { font-size: 11px; font-weight: 700; border-radius: 12px; padding: 2px 10px; border: 1px solid; cursor: pointer; background: none; }
-  .w-toggle.on { color: var(--green); border-color: rgba(63,185,80,.5); }
-  .w-toggle.off { color: var(--dim); border-color: var(--border); }
-  .w-del { background: none; border: none; color: var(--red); cursor: pointer; font-size: 12px; margin-left: auto; }
-  #allAlertsList .alert-item { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; background: var(--bg3); }
-  #allAlertsList .alert-item.seen { opacity: .55; }
-
-  /* ---- history page ---- */
-  #historyPage .hist-item { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; cursor: pointer; background: var(--bg2); }
-  #historyPage .hist-item:hover { border-color: var(--accent); }
-  .hist-item .h-user { font-weight: 600; }
-  .hist-item .h-meta { color: var(--dim); font-size: 11.5px; margin-top: 2px; }
-  .hist-item .h-found { color: var(--green); }
-  .hist-item .h-kind { color: var(--accent); font-size: 10px; border: 1px solid rgba(88,166,255,.4); border-radius: 4px; padding: 0 4px; margin-left: 6px; }
-  .hist-item .h-actions { margin-left: auto; display: flex; gap: 6px; }
-  .hist-item .h-actions a, .hist-item .h-actions button {
-    font-size: 11px; color: var(--dim); border: 1px solid var(--border); border-radius: 5px;
-    padding: 3px 8px; text-decoration: none; background: none; cursor: pointer;
-  }
-  .hist-item .h-actions a:hover, .hist-item .h-actions button:hover { color: var(--text); border-color: var(--accent); }
-
-  #toast {
-    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
-    background: var(--red); color: #fff; padding: 10px 18px; border-radius: 8px;
-    font-size: 14px; display: none; z-index: 50;
-  }
-  @media (max-width: 1000px) {
-    main.active { flex-direction: column; }
-    #controls { width: 100%; position: static; }
-    .page-grid { grid-template-columns: 1fr; }
-    header span.tag { display: none; }
-  }
-</style>
+<link rel="stylesheet" href="/static/css/app.css">
 </head>
 <body>
-<header>
-  <h1><span class="magnify">&#9906;</span> Sherlock Web</h1>
-  <span class="tag">one clue in &rarr; full identity investigation</span>
-  <nav class="app-tabs">
-    <button class="app-tab active" data-tab="investigate" type="button">Investigate</button>
-    <button class="app-tab" data-tab="watchlist" type="button">Watchlist</button>
-    <button class="app-tab" data-tab="history" type="button">History</button>
-  </nav>
-  <div id="bellWrap">
-    <button id="bellBtn" type="button" title="Alerts">&#128276;<span id="alertBadge">0</span></button>
-    <div id="alertsDrop">
-      <div class="drop-head"><span>Alerts</span><button id="markSeenBtn" type="button">Mark all seen</button></div>
-      <div id="alertsList"><div class="alert-item"><span class="a-time">No alerts yet.</span></div></div>
-    </div>
+
+<!-- Mobile nav scaffolding -->
+<button id="menuBtn" class="icon-btn menu-btn" type="button" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">
+  <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+    <line x1="3" y1="5.5" x2="17" y2="5.5"/><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="14.5" x2="17" y2="14.5"/>
+  </svg>
+</button>
+<div id="sidebarOverlay" class="sidebar-overlay" hidden></div>
+
+<!-- ============ SIDEBAR ============ -->
+<aside id="sidebar" class="sidebar" aria-label="Primary">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="10.5" cy="10.5" r="6.5"/><line x1="15.2" y1="15.2" x2="21" y2="21"/>
+      </svg>
+    </span>
+    <span class="brand-text">
+      <strong>Sherlock Web</strong>
+      <small>OSINT investigations</small>
+    </span>
   </div>
-</header>
 
-<!-- ============ INVESTIGATE ============ -->
-<main id="tabInvestigate" class="active">
-  <section id="controls" class="panel">
-    <div class="mode-tabs">
-      <button id="tabInv" class="mode-tab active" type="button">Investigation</button>
-      <button id="tabQuick" class="mode-tab" type="button">Quick scan</button>
+  <nav class="side-nav" role="tablist" aria-label="Sections">
+    <button class="app-tab active" data-tab="investigate" type="button" role="tab" aria-selected="true" aria-controls="tabInvestigate">
+      <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+        <circle cx="9" cy="9" r="5.5"/><line x1="13" y1="13" x2="17.5" y2="17.5"/>
+      </svg>
+      <span>Investigate</span>
+    </button>
+    <button class="app-tab" data-tab="watchlist" type="button" role="tab" aria-selected="false" aria-controls="tabWatchlist">
+      <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M2 10s3-5.5 8-5.5S18 10 18 10s-3 5.5-8 5.5S2 10 2 10z"/><circle cx="10" cy="10" r="2.4"/>
+      </svg>
+      <span>Watchlist</span>
+    </button>
+    <button class="app-tab" data-tab="history" type="button" role="tab" aria-selected="false" aria-controls="tabHistory">
+      <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="10" cy="10" r="7.5"/><polyline points="10 5.5 10 10 13 12"/>
+      </svg>
+      <span>History</span>
+    </button>
+  </nav>
+
+  <div class="side-foot">
+    <span class="side-foot-hint">One clue in — a name, username, email, or phone — full identity investigation out.</span>
+  </div>
+</aside>
+
+<div class="shell">
+  <!-- ============ TOP BAR ============ -->
+  <header class="topbar">
+    <h1 class="topbar-title">Sherlock Web <span class="tag">one clue in &rarr; full identity investigation</span></h1>
+    <span id="statusPill" class="status-pill" role="status">
+      <span class="status-dot" aria-hidden="true"></span><span id="statusPillText">connecting</span>
+    </span>
+    <div id="bellWrap">
+      <button id="bellBtn" class="icon-btn" type="button" aria-label="Alerts" aria-haspopup="true" aria-expanded="false" aria-controls="alertsDrop">
+        <svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10 2.5a5 5 0 0 0-5 5v3l-1.6 2.8a.6.6 0 0 0 .52.9h12.16a.6.6 0 0 0 .52-.9L15 10.5v-3a5 5 0 0 0-5-5z"/>
+          <path d="M8 17a2 2 0 0 0 4 0"/>
+        </svg>
+        <span id="alertBadge" class="badge-count">0</span>
+      </button>
+      <div id="alertsDrop" class="dropdown" role="menu" aria-label="Alerts">
+        <div class="drop-head"><span>Alerts</span><button id="markSeenBtn" type="button">Mark all seen</button></div>
+        <div id="alertsList"><div class="alert-item"><span class="a-time">No alerts yet.</span></div></div>
+      </div>
     </div>
+  </header>
 
-    <div id="invForm">
-      <label for="invName">Full name</label>
-      <input type="text" id="invName" placeholder="Jane Q Public" spellcheck="false">
-      <div class="hint">Generates up to 24 candidate handles (incl. nicknames — Robert → bob/rob), scanned on high-value sites.</div>
+  <div class="content">
+  <!-- ============ INVESTIGATE ============ -->
+  <main id="tabInvestigate" class="active" role="tabpanel" aria-label="Investigate">
+    <section id="controls" class="panel" aria-label="Investigation controls">
+      <div class="mode-tabs" role="tablist" aria-label="Scan mode">
+        <button id="tabInv" class="mode-tab active" type="button" role="tab" aria-selected="true">Investigation</button>
+        <button id="tabQuick" class="mode-tab" type="button" role="tab" aria-selected="false">Quick scan</button>
+      </div>
 
-      <label for="invUsernames">Usernames</label>
-      <textarea id="invUsernames" placeholder="alice, bob&#10;or one per line" spellcheck="false"></textarea>
-
-      <label for="invEmail">Email</label>
-      <input type="text" id="invEmail" placeholder="name@example.com" spellcheck="false">
-      <div class="hint">Gravatar profile + registered-account checks (slow).</div>
-
-      <label for="invPhone">Phone</label>
-      <input type="text" id="invPhone" placeholder="+14155552671" spellcheck="false">
-      <div class="hint">E.164 preferred. Offline intel only: validity, region, carrier.</div>
-
-      <label for="invDomain">Domain</label>
-      <input type="text" id="invDomain" placeholder="example.com" spellcheck="false">
-      <div class="hint">DNS, RDAP registration, and subdomains (CT logs). Auto-derived from the email if left blank.</div>
-
-      <div class="row">
-        <div>
-          <label for="invTimeout">Timeout (s/site)</label>
-          <input type="number" id="invTimeout" value="10" min="1" max="120">
+      <div id="invForm">
+        <div class="field">
+          <label for="invName">Full name</label>
+          <input type="text" id="invName" placeholder="Jane Q Public" spellcheck="false" autocomplete="off">
+          <div class="hint">Generates up to 24 candidate handles (incl. nicknames — Robert &rarr; bob/rob), scanned on high-value sites.</div>
         </div>
-        <div>
-          <label>&nbsp;</label>
-          <div class="checkbox-row" style="margin-top:0">
-            <input type="checkbox" id="invVariants" checked>
-            <span>Scan username variants</span>
+
+        <div class="field">
+          <label for="invUsernames">Usernames</label>
+          <textarea id="invUsernames" placeholder="alice, bob&#10;or one per line" spellcheck="false"></textarea>
+        </div>
+
+        <div class="field">
+          <label for="invEmail">Email</label>
+          <input type="text" id="invEmail" placeholder="name@example.com" spellcheck="false" autocomplete="off">
+          <div class="hint">Gravatar profile + registered-account checks (slow).</div>
+        </div>
+
+        <div class="field">
+          <label for="invPhone">Phone</label>
+          <input type="text" id="invPhone" placeholder="+14155552671" spellcheck="false" autocomplete="off">
+          <div class="hint">E.164 preferred. Offline intel only: validity, region, carrier.</div>
+        </div>
+
+        <div class="field">
+          <label for="invDomain">Domain</label>
+          <input type="text" id="invDomain" placeholder="example.com" spellcheck="false" autocomplete="off">
+          <div class="hint">DNS, RDAP registration, and subdomains (CT logs). Auto-derived from the email if left blank.</div>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <label for="invTimeout">Timeout (s/site)</label>
+            <input type="number" id="invTimeout" value="10" min="1" max="120">
+          </div>
+          <div class="field">
+            <label class="label-spacer" aria-hidden="true">&nbsp;</label>
+            <div class="checkbox-row">
+              <input type="checkbox" id="invVariants" checked>
+              <label for="invVariants" class="check-label">Scan username variants</label>
+            </div>
+          </div>
+        </div>
+
+        <div class="checkbox-row">
+          <input type="checkbox" id="invNsfw">
+          <label for="invNsfw" class="check-label">Include NSFW sites</label>
+        </div>
+
+        <button id="invStartBtn" class="btn btn-success btn-block" type="button">Start investigation</button>
+        <button id="invStopBtn" class="btn btn-danger btn-block" type="button" style="display:none">Stop</button>
+      </div>
+
+      <div id="quickForm" style="display:none">
+        <div class="field">
+          <label for="usernames">Usernames</label>
+          <textarea id="usernames" placeholder="alice, bob&#10;or one per line" spellcheck="false"></textarea>
+          <div class="hint">Fast Sherlock-only scan. Comma- or newline-separated.</div>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <label for="timeout">Timeout (s/site)</label>
+            <input type="number" id="timeout" value="10" min="1" max="120">
+          </div>
+          <div class="field">
+            <label class="label-spacer" aria-hidden="true">&nbsp;</label>
+            <div class="checkbox-row">
+              <input type="checkbox" id="nsfw">
+              <label for="nsfw" class="check-label">Include NSFW sites</label>
+            </div>
+          </div>
+        </div>
+
+        <div class="field">
+          <label id="sitePickerBtnLabel">Sites</label>
+          <button id="sitePickerBtn" type="button" aria-haspopup="true" aria-expanded="false" aria-labelledby="sitePickerBtnLabel sitePickerLabel">
+            <span id="sitePickerLabel">All sites</span>
+            <svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="2.5 4.5 6 8 9.5 4.5"/></svg>
+          </button>
+          <div id="sitePicker" class="dropdown-panel">
+            <div class="picker-head">
+              <input type="text" id="siteFilter" placeholder="Filter sites&hellip;" aria-label="Filter sites">
+            </div>
+            <div id="siteList"></div>
+            <div class="picker-actions">
+              <button id="selectAllFiltered" type="button">Select filtered</button>
+              <button id="clearSites" type="button">Clear (all sites)</button>
+            </div>
+          </div>
+          <div class="hint">Empty selection = scan every site.</div>
+        </div>
+
+        <button id="startBtn" class="btn btn-primary btn-block" type="button">Start search</button>
+        <button id="stopBtn" class="btn btn-danger btn-block" type="button" style="display:none">Stop</button>
+      </div>
+    </section>
+
+    <!-- Results -->
+    <section id="resultsWrap" aria-label="Results">
+      <div id="overallBar" class="status-header">
+        <div class="status-stats">
+          <span class="stat"><span class="stat-k">elapsed</span><span class="stat-v" id="elapsedTime">0:00</span></span>
+          <span class="stat"><span class="stat-k">found</span><span class="stat-v" id="runFound">0</span></span>
+        </div>
+        <div class="progress-track"><div class="progress-fill" id="overallFill"></div></div>
+        <div id="overallText">Starting&hellip;</div>
+      </div>
+
+      <div id="exportBar" class="action-bar">
+        <button class="btn btn-ghost" id="rerunBtn" type="button" style="display:none">&#8635; Re-run</button>
+        <button class="btn btn-ghost" id="dossierBtn" type="button" style="display:none">&#8681; Dossier</button>
+        <button class="btn btn-ghost" id="graphBtn" type="button" style="display:none">&#9673; Graph</button>
+        <span class="action-sep" aria-hidden="true"></span>
+        <label class="inline-label" for="watchInterval">Watch</label>
+        <select id="watchInterval" title="Watch interval">
+          <option value="6">every 6h</option>
+          <option value="12">every 12h</option>
+          <option value="24" selected>every 24h</option>
+          <option value="48">every 48h</option>
+          <option value="168">weekly</option>
+        </select>
+        <button class="btn btn-ghost" id="watchBtn" type="button" style="display:none">&#128064; Watch this subject</button>
+        <span class="action-sep" aria-hidden="true"></span>
+        <button class="btn btn-ghost" id="csvBtn" type="button">&#8681; CSV</button>
+        <button class="btn btn-ghost" id="jsonBtn" type="button">&#8681; JSON</button>
+        <button class="btn btn-ghost" id="clearBtn" type="button">Clear results</button>
+      </div>
+
+      <div id="graphPanel">
+        <div id="graphWrap">
+          <div id="cy"></div>
+          <div id="graphFallback">Graph library unavailable (static/vendor/cytoscape.min.js missing).</div>
+          <div id="graphToolbar">
+            <button id="graphFitBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Fit graph to view">Fit</button>
+            <button id="graphLabelsBtn" class="btn btn-ghost btn-sm" type="button" aria-pressed="true" aria-label="Toggle node labels">Labels</button>
+            <span class="toolbar-sep" aria-hidden="true"></span>
+            <label for="confSlider">min edge confidence</label>
+            <input type="range" id="confSlider" min="0" max="100" value="0" step="5">
+            <span id="confSliderVal">0%</span>
+          </div>
+          <div id="nodePanel" role="complementary" aria-label="Node details">
+            <button class="np-close icon-btn" id="nodePanelClose" type="button" aria-label="Close node details">&times;</button>
+            <div id="nodePanelBody"></div>
           </div>
         </div>
       </div>
 
-      <div class="checkbox-row">
-        <input type="checkbox" id="invNsfw">
-        <span>Include NSFW sites</span>
-      </div>
-
-      <button id="invStartBtn" class="btn" style="background:var(--green);color:#06130a;width:100%;margin-top:16px">Start investigation</button>
-      <button id="invStopBtn" class="btn" style="background:var(--red);color:#fff;width:100%;margin-top:8px;display:none">Stop</button>
-    </div>
-
-    <div id="quickForm" style="display:none">
-    <label for="usernames">Usernames</label>
-    <textarea id="usernames" placeholder="alice, bob&#10;or one per line" spellcheck="false"></textarea>
-    <div class="hint">Fast Sherlock-only scan. Comma- or newline-separated.</div>
-
-    <div class="row">
-      <div>
-        <label for="timeout">Timeout (s/site)</label>
-        <input type="number" id="timeout" value="10" min="1" max="120">
-      </div>
-      <div>
-        <label>&nbsp;</label>
-        <div class="checkbox-row" style="margin-top:0">
-          <input type="checkbox" id="nsfw">
-          <span>Include NSFW sites</span>
+      <div id="results" aria-live="polite"><div class="empty-state">
+        <div class="empty-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><line x1="15.2" y1="15.2" x2="21" y2="21"/></svg>
         </div>
-      </div>
-    </div>
-
-    <label>Sites</label>
-    <button id="sitePickerBtn" type="button"><span id="sitePickerLabel">All sites</span><span>&#9662;</span></button>
-    <div id="sitePicker">
-      <div class="picker-head">
-        <input type="text" id="siteFilter" placeholder="Filter sites&hellip;">
-      </div>
-      <div id="siteList"></div>
-      <div class="picker-actions">
-        <button id="selectAllFiltered" type="button">Select filtered</button>
-        <button id="clearSites" type="button">Clear (all sites)</button>
-      </div>
-    </div>
-    <div class="hint">Empty selection = scan every site.</div>
-
-    <button id="startBtn" class="btn">Start search</button>
-    <button id="stopBtn" class="btn">Stop</button>
-    </div>
-  </section>
-
-  <!-- Results -->
-  <section id="resultsWrap">
-    <div id="overallBar">
-      <div class="progress-track"><div class="progress-fill" id="overallFill"></div></div>
-      <div id="overallText">Starting&hellip;</div>
-    </div>
-    <div id="exportBar">
-      <button class="btn btn-ghost" id="rerunBtn" style="display:none">&#8635; Re-run</button>
-      <button class="btn btn-ghost" id="dossierBtn" style="display:none">&#8681; Dossier</button>
-      <button class="btn btn-ghost" id="graphBtn" style="display:none">&#9673; Graph</button>
-      <select id="watchInterval" title="Watch interval">
-        <option value="6">every 6h</option>
-        <option value="12">every 12h</option>
-        <option value="24" selected>every 24h</option>
-        <option value="48">every 48h</option>
-        <option value="168">weekly</option>
-      </select>
-      <button class="btn btn-ghost" id="watchBtn" style="display:none">&#128064; Watch this subject</button>
-      <button class="btn btn-ghost" id="csvBtn">&#8681; CSV</button>
-      <button class="btn btn-ghost" id="jsonBtn">&#8681; JSON</button>
-      <button class="btn btn-ghost" id="clearBtn">Clear results</button>
-    </div>
-
-    <div id="graphPanel">
-      <div id="graphWrap">
-        <div id="cy"></div>
-        <div id="graphFallback">Graph library unavailable (static/vendor/cytoscape.min.js missing).</div>
-        <div id="graphToolbar">
-          <span>min edge confidence</span>
-          <input type="range" id="confSlider" min="0" max="100" value="0" step="5">
-          <span id="confSliderVal">0%</span>
-        </div>
-        <div id="nodePanel">
-          <button class="np-close" id="nodePanelClose" type="button">&times;</button>
-          <div id="nodePanelBody"></div>
-        </div>
-      </div>
-    </div>
-
-    <div id="results"><div class="empty-state">One clue in — a name, username, email, or phone — and hit <b>Start investigation</b>.<br>Accounts, email exposure, phone intel, correlations and an identity graph stream in live.</div></div>
-  </section>
-</main>
-
-<!-- ============ WATCHLIST ============ -->
-<main id="tabWatchlist" class="page">
-  <h2 style="font-size:17px;margin-bottom:14px">Watchlist <span style="color:var(--dim);font-size:12.5px;font-weight:400">— continuous monitoring with change alerts</span></h2>
-  <div class="page-grid">
-    <section class="panel">
-      <label for="watchLabel">Label</label>
-      <input type="text" id="watchLabel" placeholder="e.g. ACME corp exec" spellcheck="false">
-      <label for="watchName">Full name</label>
-      <input type="text" id="watchName" placeholder="optional" spellcheck="false">
-      <label for="watchUsernames">Usernames</label>
-      <textarea id="watchUsernames" placeholder="alice, bob" spellcheck="false" style="min-height:56px"></textarea>
-      <label for="watchEmail">Email</label>
-      <input type="text" id="watchEmail" placeholder="optional" spellcheck="false">
-      <label for="watchNewInterval">Check interval</label>
-      <select id="watchNewInterval">
-        <option value="6">every 6 hours</option>
-        <option value="12">every 12 hours</option>
-        <option value="24" selected>every 24 hours</option>
-        <option value="48">every 48 hours</option>
-        <option value="168">weekly</option>
-      </select>
-      <div class="hint">Light scans only: high-value sites, no enrichment. The first run sets the baseline silently.</div>
-      <button id="watchCreateBtn" class="btn" style="background:var(--accent);color:#08101d;width:100%;margin-top:16px">Add watch</button>
+        <p>One clue in — a name, username, email, or phone — and hit <b>Start investigation</b>.</p>
+        <p class="empty-sub">Accounts, email exposure, phone intel, correlations and an identity graph stream in live.</p>
+      </div></div>
     </section>
-    <section>
-      <div class="panel" style="margin-bottom:16px">
-        <h3 style="font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim);margin-bottom:10px">Watched subjects</h3>
-        <div id="watchList"><div class="hint">No watches yet.</div></div>
-      </div>
-      <div class="panel">
-        <h3 style="font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim);margin-bottom:10px">All alerts</h3>
-        <div id="allAlertsList"><div class="hint">No alerts yet.</div></div>
-      </div>
-    </section>
+  </main>
+
+  <!-- ============ WATCHLIST ============ -->
+  <main id="tabWatchlist" class="page" role="tabpanel" aria-label="Watchlist">
+    <header class="page-head">
+      <h2>Watchlist</h2>
+      <p class="page-sub">Continuous monitoring with change alerts.</p>
+    </header>
+    <div class="page-grid">
+      <section class="panel" aria-label="Add a watch">
+        <h3 class="panel-title">New watch</h3>
+        <div class="field">
+          <label for="watchLabel">Label</label>
+          <input type="text" id="watchLabel" placeholder="e.g. ACME corp exec" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="watchName">Full name</label>
+          <input type="text" id="watchName" placeholder="optional" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="watchUsernames">Usernames</label>
+          <textarea id="watchUsernames" placeholder="alice, bob" spellcheck="false" style="min-height:56px"></textarea>
+        </div>
+        <div class="field">
+          <label for="watchEmail">Email</label>
+          <input type="text" id="watchEmail" placeholder="optional" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="watchNewInterval">Check interval</label>
+          <select id="watchNewInterval">
+            <option value="6">every 6 hours</option>
+            <option value="12">every 12 hours</option>
+            <option value="24" selected>every 24 hours</option>
+            <option value="48">every 48 hours</option>
+            <option value="168">weekly</option>
+          </select>
+          <div class="hint">Light scans only: high-value sites, no enrichment. The first run sets the baseline silently.</div>
+        </div>
+        <button id="watchCreateBtn" class="btn btn-primary btn-block" type="button">Add watch</button>
+      </section>
+      <section>
+        <div class="panel" style="margin-bottom:16px">
+          <h3 class="panel-title">Watched subjects</h3>
+          <div id="watchList"><div class="hint">No watches yet.</div></div>
+        </div>
+        <div class="panel">
+          <h3 class="panel-title">All alerts</h3>
+          <div id="allAlertsList"><div class="hint">No alerts yet.</div></div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <!-- ============ HISTORY ============ -->
+  <main id="tabHistory" class="page" role="tabpanel" aria-label="History">
+    <header class="page-head">
+      <h2>History</h2>
+      <p class="page-sub">Click a run to reload it.</p>
+    </header>
+    <div id="historyPage"><div class="hint">No runs yet.</div></div>
+  </main>
   </div>
-</main>
+</div>
 
-<!-- ============ HISTORY ============ -->
-<main id="tabHistory" class="page">
-  <h2 style="font-size:17px;margin-bottom:14px">History <span style="color:var(--dim);font-size:12.5px;font-weight:400">— click a run to reload it</span></h2>
-  <div id="historyPage"><div class="hint">No runs yet.</div></div>
-</main>
+<!-- Confirm modal -->
+<div id="modalWrap" class="modal-wrap" hidden>
+  <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="modalTitle" aria-describedby="modalBody">
+    <h3 id="modalTitle">Confirm</h3>
+    <p id="modalBody"></p>
+    <div class="modal-actions">
+      <button id="modalCancel" class="btn btn-ghost" type="button">Cancel</button>
+      <button id="modalConfirm" class="btn btn-danger" type="button">Delete</button>
+    </div>
+  </div>
+</div>
 
-<div id="toast"></div>
+<div id="toastWrap" aria-live="polite"></div>
 
 <script src="/static/vendor/cytoscape.min.js"></script>
 <script>
@@ -494,1560 +341,6 @@ if ("serviceWorker" in navigator) {
   }
 }
 </script>
-<script>
-(function () {
-  "use strict";
-
-  var els = {
-    usernames: document.getElementById("usernames"),
-    timeout: document.getElementById("timeout"),
-    nsfw: document.getElementById("nsfw"),
-    sitePickerBtn: document.getElementById("sitePickerBtn"),
-    sitePickerLabel: document.getElementById("sitePickerLabel"),
-    sitePicker: document.getElementById("sitePicker"),
-    siteFilter: document.getElementById("siteFilter"),
-    siteList: document.getElementById("siteList"),
-    selectAllFiltered: document.getElementById("selectAllFiltered"),
-    clearSites: document.getElementById("clearSites"),
-    startBtn: document.getElementById("startBtn"),
-    stopBtn: document.getElementById("stopBtn"),
-    overallBar: document.getElementById("overallBar"),
-    overallFill: document.getElementById("overallFill"),
-    overallText: document.getElementById("overallText"),
-    exportBar: document.getElementById("exportBar"),
-    results: document.getElementById("results"),
-    csvBtn: document.getElementById("csvBtn"),
-    jsonBtn: document.getElementById("jsonBtn"),
-    rerunBtn: document.getElementById("rerunBtn"),
-    dossierBtn: document.getElementById("dossierBtn"),
-    graphBtn: document.getElementById("graphBtn"),
-    watchBtn: document.getElementById("watchBtn"),
-    watchInterval: document.getElementById("watchInterval"),
-    clearBtn: document.getElementById("clearBtn"),
-    toast: document.getElementById("toast"),
-    tabQuick: document.getElementById("tabQuick"),
-    tabInv: document.getElementById("tabInv"),
-    quickForm: document.getElementById("quickForm"),
-    invForm: document.getElementById("invForm"),
-    invName: document.getElementById("invName"),
-    invUsernames: document.getElementById("invUsernames"),
-    invEmail: document.getElementById("invEmail"),
-    invPhone: document.getElementById("invPhone"),
-    invDomain: document.getElementById("invDomain"),
-    invVariants: document.getElementById("invVariants"),
-    invTimeout: document.getElementById("invTimeout"),
-    invNsfw: document.getElementById("invNsfw"),
-    invStartBtn: document.getElementById("invStartBtn"),
-    invStopBtn: document.getElementById("invStopBtn"),
-    graphPanel: document.getElementById("graphPanel"),
-    graphFallback: document.getElementById("graphFallback"),
-    cy: document.getElementById("cy"),
-    confSlider: document.getElementById("confSlider"),
-    confSliderVal: document.getElementById("confSliderVal"),
-    nodePanel: document.getElementById("nodePanel"),
-    nodePanelBody: document.getElementById("nodePanelBody"),
-    nodePanelClose: document.getElementById("nodePanelClose"),
-    bellBtn: document.getElementById("bellBtn"),
-    alertBadge: document.getElementById("alertBadge"),
-    alertsDrop: document.getElementById("alertsDrop"),
-    alertsList: document.getElementById("alertsList"),
-    markSeenBtn: document.getElementById("markSeenBtn"),
-    watchLabel: document.getElementById("watchLabel"),
-    watchName: document.getElementById("watchName"),
-    watchUsernames: document.getElementById("watchUsernames"),
-    watchEmail: document.getElementById("watchEmail"),
-    watchNewInterval: document.getElementById("watchNewInterval"),
-    watchCreateBtn: document.getElementById("watchCreateBtn"),
-    watchList: document.getElementById("watchList"),
-    allAlertsList: document.getElementById("allAlertsList"),
-    historyPage: document.getElementById("historyPage")
-  };
-
-  var allSites = [];          // [{name, nsfw}]
-  var selectedSites = {};     // name -> true
-  var currentRun = [];        // collected results of the live/loaded run (for export)
-  var es = null;              // active quick-scan EventSource
-  var invEs = null;           // active investigation EventSource
-  var cards = {};             // username -> DOM refs (quick scan)
-  var invRows = {};           // "username|normsite" -> {el, badgesEl, data}
-  var invCards = {};          // section key -> card refs
-  var currentInvId = null;    // investigation id (live or loaded)
-  var currentInvInputs = null;
-
-  /* ---------- toast ---------- */
-  var toastTimer = null;
-  function toast(msg) {
-    els.toast.textContent = msg;
-    els.toast.style.display = "block";
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { els.toast.style.display = "none"; }, 4000);
-  }
-
-  /* ---------- app tabs ---------- */
-  var tabEls = {
-    investigate: document.getElementById("tabInvestigate"),
-    watchlist: document.getElementById("tabWatchlist"),
-    history: document.getElementById("tabHistory")
-  };
-  document.querySelectorAll(".app-tab").forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      var tab = btn.getAttribute("data-tab");
-      document.querySelectorAll(".app-tab").forEach(function (b) { b.classList.remove("active"); });
-      btn.classList.add("active");
-      Object.keys(tabEls).forEach(function (k) {
-        tabEls[k].classList.toggle("active", k === tab);
-      });
-      if (tab === "watchlist") { loadWatchlist(); loadAllAlerts(); }
-      if (tab === "history") { loadHistory(); }
-    });
-  });
-  function switchTab(tab) {
-    document.querySelector('.app-tab[data-tab="' + tab + '"]').click();
-  }
-
-  /* ---------- site picker ---------- */
-  function updatePickerLabel() {
-    var n = Object.keys(selectedSites).length;
-    els.sitePickerLabel.textContent = n === 0 ? "All sites" : n + " site" + (n > 1 ? "s" : "") + " selected";
-  }
-
-  function renderSiteList(filter) {
-    filter = (filter || "").toLowerCase();
-    els.siteList.innerHTML = "";
-    allSites.forEach(function (s) {
-      if (filter && s.name.toLowerCase().indexOf(filter) === -1) return;
-      var row = document.createElement("label");
-      row.className = "site-item";
-      var cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.checked = !!selectedSites[s.name];
-      cb.addEventListener("change", function () {
-        if (cb.checked) selectedSites[s.name] = true; else delete selectedSites[s.name];
-        updatePickerLabel();
-      });
-      row.appendChild(cb);
-      row.appendChild(document.createTextNode(s.name));
-      if (s.nsfw) {
-        var tag = document.createElement("span");
-        tag.className = "nsfw-tag";
-        tag.textContent = "nsfw";
-        row.appendChild(tag);
-      }
-      els.siteList.appendChild(row);
-    });
-  }
-
-  els.sitePickerBtn.addEventListener("click", function () {
-    els.sitePicker.classList.toggle("open");
-  });
-  document.addEventListener("click", function (e) {
-    if (!els.sitePicker.contains(e.target) && e.target !== els.sitePickerBtn && !els.sitePickerBtn.contains(e.target)) {
-      els.sitePicker.classList.remove("open");
-    }
-  });
-  els.siteFilter.addEventListener("input", function () { renderSiteList(els.siteFilter.value); });
-  els.selectAllFiltered.addEventListener("click", function () {
-    var filter = els.siteFilter.value.toLowerCase();
-    allSites.forEach(function (s) {
-      if (!filter || s.name.toLowerCase().indexOf(filter) !== -1) selectedSites[s.name] = true;
-    });
-    renderSiteList(filter);
-    updatePickerLabel();
-  });
-  els.clearSites.addEventListener("click", function () {
-    selectedSites = {};
-    renderSiteList(els.siteFilter.value);
-    updatePickerLabel();
-  });
-
-  fetch("/api/sites").then(function (r) { return r.json(); }).then(function (sites) {
-    allSites = sites;
-    renderSiteList("");
-  }).catch(function () { toast("Failed to load site list"); });
-
-  /* ---------- mode sub-tabs (Investigate) ---------- */
-  els.tabQuick.addEventListener("click", function () {
-    els.tabQuick.classList.add("active");
-    els.tabInv.classList.remove("active");
-    els.quickForm.style.display = "";
-    els.invForm.style.display = "none";
-  });
-  els.tabInv.addEventListener("click", function () {
-    els.tabInv.classList.add("active");
-    els.tabQuick.classList.remove("active");
-    els.invForm.style.display = "";
-    els.quickForm.style.display = "none";
-  });
-
-  /* ---------- shared helpers ---------- */
-  function normSite(n) { return String(n).toLowerCase().replace(/[^a-z0-9]/g, ""); }
-
-  function clearResults() {
-    els.results.innerHTML = "";
-    cards = {};
-    invRows = {};
-    invCards = {};
-    currentRun = [];
-    currentInvId = null;
-    currentInvInputs = null;
-    els.exportBar.style.display = "none";
-    els.rerunBtn.style.display = "none";
-    els.dossierBtn.style.display = "none";
-    els.graphBtn.style.display = "none";
-    els.watchBtn.style.display = "none";
-    els.graphPanel.style.display = "none";
-  }
-
-  function resetInvestigationUI() {
-    clearResults();
-    holeheCounts = { hits: 0, checked: 0 };
-    els.overallBar.style.display = "block";
-    els.overallFill.style.width = "0%";
-  }
-
-  /* ---------- quick-scan result cards ---------- */
-  function getCard(username) {
-    if (cards[username]) return cards[username];
-    var card = document.createElement("div");
-    card.className = "user-card";
-    card.innerHTML =
-      '<div class="user-head">' +
-        "<h2></h2>" +
-        '<span class="badge scanning">scanning</span>' +
-        '<span class="badge found">0 found</span>' +
-        '<span class="badge err" style="display:none">0 errors</span>' +
-        '<div class="mini-progress progress-track"><div class="progress-fill"></div></div>' +
-      "</div>" +
-      '<div class="result-rows"></div>';
-    card.querySelector("h2").textContent = username;
-    els.results.appendChild(card);
-    var refs = {
-      root: card,
-      scanning: card.querySelector(".badge.scanning"),
-      found: card.querySelector(".badge.found"),
-      err: card.querySelector(".badge.err"),
-      fill: card.querySelector(".progress-fill"),
-      rows: card.querySelector(".result-rows"),
-      foundCount: 0,
-      errCount: 0
-    };
-    cards[username] = refs;
-    return refs;
-  }
-
-  function addFoundRow(username, site, url, queryTime, silent) {
-    var c = getCard(username);
-    var row = document.createElement("div");
-    row.className = "rrow";
-    var siteSpan = document.createElement("span");
-    siteSpan.className = "site";
-    siteSpan.textContent = site;
-    var a = document.createElement("a");
-    a.href = url;
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-    a.textContent = url;
-    row.appendChild(siteSpan);
-    row.appendChild(a);
-    if (queryTime != null) {
-      var qt = document.createElement("span");
-      qt.className = "qt";
-      qt.textContent = Number(queryTime).toFixed(2) + "s";
-      row.appendChild(qt);
-    }
-    c.rows.appendChild(row);
-    c.foundCount++;
-    c.found.textContent = c.foundCount + " found";
-    if (!silent) currentRun.push({ username: username, site: site, url: url, status: "found" });
-  }
-
-  function addErrorRow(username, site, status, context) {
-    var c = getCard(username);
-    var row = document.createElement("div");
-    row.className = "rrow error";
-    var siteSpan = document.createElement("span");
-    siteSpan.className = "site";
-    siteSpan.textContent = site;
-    var st = document.createElement("span");
-    st.className = "status";
-    st.textContent = status + (context ? " — " + context : "");
-    row.appendChild(siteSpan);
-    row.appendChild(st);
-    c.rows.appendChild(row);
-    c.errCount++;
-    c.err.style.display = "";
-    c.err.textContent = c.errCount + " error" + (c.errCount > 1 ? "s" : "");
-    currentRun.push({ username: username, site: site, url: "", status: status, context: context || "" });
-  }
-
-  /* ---------- overall progress (quick scan) ---------- */
-  var totalUsers = 0, doneUsers = 0, totalSitesPerUser = 0, checkedCurrent = 0;
-  function updateOverall() {
-    var per = totalSitesPerUser || 1;
-    var pct = totalUsers ? ((doneUsers * per + checkedCurrent) / (totalUsers * per)) * 100 : 0;
-    els.overallFill.style.width = Math.min(100, pct).toFixed(1) + "%";
-    els.overallText.textContent = "User " + Math.min(doneUsers + 1, totalUsers) + " of " + totalUsers +
-      " — " + checkedCurrent + "/" + totalSitesPerUser + " sites checked";
-  }
-
-  /* ---------- quick scan ---------- */
-  function setRunning(running) {
-    els.startBtn.disabled = running;
-    els.stopBtn.style.display = running ? "block" : "none";
-  }
-
-  function stopStream() {
-    if (es) { es.close(); es = null; }
-    setRunning(false);
-    Object.keys(cards).forEach(function (u) {
-      if (cards[u].scanning.textContent === "scanning") cards[u].scanning.textContent = "stopped";
-    });
-  }
-
-  els.stopBtn.addEventListener("click", function () {
-    stopStream();
-    els.overallText.textContent = "Stopped.";
-  });
-
-  els.startBtn.addEventListener("click", function () {
-    var raw = els.usernames.value.trim();
-    if (!raw) { toast("Enter at least one username"); return; }
-
-    stopStream();
-    stopInvestigation();
-    resetInvestigationUI();
-    els.overallText.textContent = "Starting…";
-
-    var params = new URLSearchParams();
-    params.set("usernames", raw);
-    params.set("timeout", els.timeout.value || "10");
-    params.set("nsfw", els.nsfw.checked ? "true" : "false");
-    var sel = Object.keys(selectedSites);
-    if (sel.length) params.set("sites", sel.join(","));
-
-    es = new EventSource("/api/search/stream?" + params.toString());
-    setRunning(true);
-
-    es.addEventListener("meta", function (e) {
-      var d = JSON.parse(e.data);
-      totalUsers = d.usernames.length;
-      totalSitesPerUser = d.sites_total;
-      doneUsers = 0; checkedCurrent = 0;
-      updateOverall();
-    });
-
-    es.addEventListener("user_start", function (e) {
-      var d = JSON.parse(e.data);
-      checkedCurrent = 0;
-      var c = getCard(d.username);
-      c.scanning.textContent = "scanning";
-      updateOverall();
-    });
-
-    es.addEventListener("found", function (e) {
-      var d = JSON.parse(e.data);
-      addFoundRow(d.username, d.site, d.url, d.query_time);
-      els.exportBar.style.display = "flex";
-    });
-
-    es.addEventListener("error", function (e) {
-      var d = JSON.parse(e.data);
-      addErrorRow(d.username, d.site, d.status, d.context);
-    });
-
-    es.addEventListener("progress", function (e) {
-      var d = JSON.parse(e.data);
-      checkedCurrent = d.checked;
-      totalSitesPerUser = d.total;
-      var c = getCard(d.username);
-      c.fill.style.width = ((d.checked / d.total) * 100).toFixed(1) + "%";
-      updateOverall();
-    });
-
-    es.addEventListener("user_done", function (e) {
-      var d = JSON.parse(e.data);
-      doneUsers++;
-      var c = getCard(d.username);
-      c.scanning.textContent = "done";
-      c.fill.style.width = "100%";
-      updateOverall();
-      loadHistory();
-    });
-
-    es.addEventListener("fatal", function (e) {
-      var d = JSON.parse(e.data);
-      toast("Scan failed: " + d.message);
-      stopStream();
-    });
-
-    es.addEventListener("done", function () {
-      els.overallText.textContent = "All scans complete.";
-      if (es) { es.close(); es = null; }
-      setRunning(false);
-      loadHistory();
-    });
-
-    es.onerror = function () {
-      if (es && es.readyState === EventSource.CLOSED) {
-        setRunning(false);
-      }
-    };
-  });
-
-  /* ---------- investigation sections ---------- */
-  function sectionKeyFor(d) {
-    if (d.source === "name") return "name:" + (d.from_name || "");
-    if (d.source === "variant" || d.variant_of) return "variants:" + d.variant_of;
-    return "base:" + d.username;
-  }
-
-  function invSection(key, title, badgeText) {
-    if (invCards[key]) return invCards[key];
-    var head = document.createElement("div");
-    head.className = "section-head";
-    head.textContent = title;
-    els.results.appendChild(head);
-    var card = document.createElement("div");
-    card.className = "user-card";
-    card.innerHTML =
-      '<div class="user-head"><h2></h2><span class="badge scanning">running</span>' +
-      '<span class="badge found">0 found</span>' +
-      '<span class="dim" style="font-size:11px;margin-left:auto"></span></div>' +
-      '<div class="result-rows"></div>';
-    card.querySelector("h2").textContent = badgeText || title;
-    els.results.appendChild(card);
-    var refs = {
-      head: head, root: card,
-      status: card.querySelector(".badge.scanning"),
-      found: card.querySelector(".badge.found"),
-      note: card.querySelector(".user-head .dim"),
-      rows: card.querySelector(".result-rows"),
-      foundCount: 0
-    };
-    invCards[key] = refs;
-    return refs;
-  }
-
-  function sectionFor(d) {
-    if (d.source === "name") {
-      return invSection("name:" + (d.from_name || ""),
-        "Name candidates — " + (d.from_name || ""), "name candidates");
-    }
-    if (d.source === "variant" || d.variant_of) {
-      return invSection("variants:" + d.variant_of,
-        "Variants of " + d.variant_of, d.variant_of);
-    }
-    return invSection("base:" + d.username, "Username: " + d.username, d.username);
-  }
-
-  function engineBadges(container, engines) {
-    container.innerHTML = "";
-    (engines || []).forEach(function (e) {
-      var b = document.createElement("span");
-      b.className = "engine-badge " + e;
-      b.textContent = e;
-      container.appendChild(b);
-    });
-  }
-
-  function addInvFoundRow(d) {
-    var key = d.username + "|" + normSite(d.site);
-    var c = sectionFor(d);
-    if (invRows[key]) return; // duplicate event, ignore
-
-    var row = document.createElement("div");
-    row.className = "rrow";
-    var siteSpan = document.createElement("span");
-    siteSpan.className = "site";
-    siteSpan.textContent = d.site;
-    if (d.source === "variant" || d.variant_of) {
-      var vt = document.createElement("span");
-      vt.className = "variant-tag";
-      vt.textContent = d.username;
-      siteSpan.appendChild(vt);
-    } else if (d.source === "name") {
-      var nt = document.createElement("span");
-      nt.className = "variant-tag";
-      nt.textContent = d.candidate || d.username;
-      siteSpan.appendChild(nt);
-    }
-    var main = document.createElement("div");
-    main.className = "rmain";
-    var a = document.createElement("a");
-    a.href = d.url; a.target = "_blank"; a.rel = "noopener noreferrer";
-    a.textContent = d.url;
-    var badges = document.createElement("span");
-    badges.className = "badges";
-    badges.style.marginLeft = "8px";
-    engineBadges(badges, d.engines);
-    main.appendChild(a);
-    main.appendChild(badges);
-    row.appendChild(siteSpan);
-    row.appendChild(main);
-    c.rows.appendChild(row);
-    c.foundCount++;
-    c.found.textContent = c.foundCount + " found";
-
-    var entry = { username: d.username, site: d.site, url: d.url,
-                  status: "found", engines: (d.engines || []).slice(),
-                  source: d.source || "base",
-                  variant_of: d.variant_of || "",
-                  from_name: d.from_name || "",
-                  candidate: d.candidate || "",
-                  verification: "",
-                  display_name: "", bio: "", avatar: "" };
-    invRows[key] = { el: row, badgesEl: badges, data: entry };
-    currentRun.push(entry);
-    els.exportBar.style.display = "flex";
-  }
-
-  function mergeInvRow(d) {
-    var key = d.username + "|" + normSite(d.site);
-    var r = invRows[key];
-    if (!r) return;
-    r.data.engines = d.engines.slice();
-    engineBadges(r.badgesEl, d.engines);
-  }
-
-  var VERIFY_LABELS = {
-    confirmed: { cls: "confirmed", text: "✓ verified" },
-    unconfirmed: { cls: "unconfirmed", text: "? unconfirmed" },
-    likely_false_positive: { cls: "false", text: "⚠ likely false" }
-  };
-
-  function setVerifyBadge(r, v) {
-    if (!v || !v.status) return;
-    var meta = VERIFY_LABELS[v.status];
-    if (!meta) return;
-    r.data.verification = v.status;
-    r.el.classList.toggle("fp", v.status === "likely_false_positive");
-    var badge = r.el.querySelector(".verify-badge");
-    if (!badge) {
-      badge = document.createElement("span");
-      badge.className = "verify-badge";
-      var main = r.el.querySelector(".rmain");
-      var enrich = main.querySelector(".enrich");
-      main.insertBefore(badge, enrich || null);
-    }
-    badge.className = "verify-badge " + meta.cls;
-    badge.textContent = meta.text;
-    if (v.signals && v.signals.length) badge.title = v.signals.join("; ");
-  }
-
-  function enrichInvRow(d) {
-    var key = d.username + "|" + normSite(d.site);
-    var r = invRows[key];
-    if (!r) return;
-    if (d.verification) setVerifyBadge(r, d.verification);
-    var enr = d.enrichment || {};
-    var img = enr.jsonld_image || enr.og_image;
-    var name = enr.jsonld_name || enr.og_title || enr.title;
-    var bio = enr.jsonld_description || enr.og_description;
-    if (img) r.data.avatar = img;
-    if (name) r.data.display_name = name;
-    if (bio) r.data.bio = bio;
-    if (!img && !name && !bio) return;
-    var div = document.createElement("div");
-    div.className = "enrich";
-    if (img) {
-      var im = document.createElement("img");
-      im.src = img; im.alt = ""; im.loading = "lazy";
-      im.onerror = function () { im.style.display = "none"; };
-      div.appendChild(im);
-    }
-    var txt = document.createElement("div");
-    if (name) {
-      var n = document.createElement("div");
-      n.className = "e-name"; n.textContent = name;
-      txt.appendChild(n);
-    }
-    if (bio) {
-      var b = document.createElement("div");
-      b.className = "e-bio";
-      b.textContent = bio.length > 140 ? bio.slice(0, 137) + "…" : bio;
-      txt.appendChild(b);
-    }
-    div.appendChild(txt);
-    r.el.querySelector(".rmain").appendChild(div);
-  }
-
-  function addInvErrorRow(d) {
-    var c = sectionFor(d);
-    var row = document.createElement("div");
-    row.className = "rrow error";
-    var s = document.createElement("span");
-    s.className = "site"; s.textContent = d.site;
-    var st = document.createElement("span");
-    st.className = "status";
-    st.textContent = "[" + d.engine + "] " + d.status + (d.context ? " — " + d.context : "");
-    row.appendChild(s); row.appendChild(st);
-    c.rows.appendChild(row);
-  }
-
-  function renderGravatar(email, profile) {
-    var c = invSection("email", "Email pivot", email);
-    var row = document.createElement("div");
-    row.className = "rrow";
-    var main = document.createElement("div");
-    main.className = "rmain";
-    if (!profile) {
-      main.innerHTML = '<span class="dim">Gravatar: no public profile</span>';
-    } else {
-      var div = document.createElement("div");
-      div.className = "enrich";
-      if (profile.avatar_url) {
-        var im = document.createElement("img");
-        im.src = profile.avatar_url; im.alt = "";
-        im.onerror = function () { im.style.display = "none"; };
-        div.appendChild(im);
-      }
-      var txt = document.createElement("div");
-      var n = document.createElement("div");
-      n.className = "e-name";
-      n.textContent = profile.display_name || profile.full_name || "Gravatar profile";
-      txt.appendChild(n);
-      if (profile.about) {
-        var b = document.createElement("div");
-        b.className = "e-bio"; b.textContent = profile.about;
-        txt.appendChild(b);
-      }
-      if (profile.profile_url) {
-        var a = document.createElement("a");
-        a.href = profile.profile_url; a.target = "_blank";
-        a.rel = "noopener noreferrer"; a.textContent = profile.profile_url;
-        txt.appendChild(a);
-      }
-      (profile.accounts || []).forEach(function (acc) {
-        if (!acc.url) return;
-        var la = document.createElement("a");
-        la.href = acc.url; la.target = "_blank"; la.rel = "noopener noreferrer";
-        la.style.marginRight = "8px";
-        la.textContent = acc.name || acc.domain;
-        txt.appendChild(la);
-      });
-      div.appendChild(txt);
-      main.appendChild(div);
-    }
-    row.appendChild(main);
-    c.rows.appendChild(row);
-  }
-
-  var holeheCounts = { hits: 0, checked: 0 };
-  function addHoleheRow(d) {
-    var c = invSection("email", "Email pivot", d.email || "email");
-    holeheCounts.checked++;
-    if (d.exists) holeheCounts.hits++;
-    c.note.textContent = holeheCounts.hits + " hits / " + holeheCounts.checked + " checks";
-    if (!d.exists && !d.error) return;  // keep the list to positives + errors
-    var row = document.createElement("div");
-    row.className = "rrow";
-    var s = document.createElement("span");
-    s.className = "site " + (d.exists ? "email-hit" : "email-miss");
-    s.textContent = d.site || "?";
-    var st = document.createElement("span");
-    st.className = d.exists ? "email-hit" : "email-miss";
-    st.textContent = d.exists ? ("registered" + (d.domain ? " — " + d.domain : ""))
-                              : (d.error ? "error: " + d.error : (d.rate_limit ? "rate limited" : ""));
-    row.appendChild(s); row.appendChild(st);
-    c.rows.appendChild(row);
-  }
-
-  function renderPhoneIntel(p) {
-    var c = invSection("phone", "Phone intelligence", "phone");
-    c.status.textContent = "done";
-    c.found.style.display = "none";
-    var dl = document.createElement("dl");
-    dl.className = "phone-grid";
-    function addRow(k, v, cls) {
-      if (v === null || v === undefined || v === "") return;
-      var dt = document.createElement("dt"); dt.textContent = k;
-      var dd = document.createElement("dd"); dd.textContent = String(v);
-      if (cls) dd.className = cls;
-      dl.appendChild(dt); dl.appendChild(dd);
-    }
-    if (p.error) {
-      addRow("Error", p.error, "phone-invalid");
-    } else {
-      addRow("Valid", p.valid ? "yes" : (p.possible ? "possible, not valid" : "no"),
-             p.valid ? "phone-valid" : "phone-invalid");
-      addRow("E.164", p.e164);
-      addRow("International", p.international);
-      addRow("Country", p.country);
-      addRow("Region", p.region);
-      addRow("Location", p.location);
-      addRow("Carrier", p.carrier);
-      addRow("Line type", p.line_type);
-      addRow("Timezones", (p.timezones || []).join(", "));
-      addRow("Note", p.note);
-    }
-    c.rows.appendChild(dl);
-  }
-
-  function renderDomainIntel(d) {
-    if (!d || !d.domain) return;
-    var c = invSection("domain", "Domain intelligence", d.domain);
-    c.status.textContent = "done";
-    c.found.style.display = "none";
-    c.rows.innerHTML = "";
-    var dns = d.dns || {}, rdap = d.rdap || {};
-    var dl = document.createElement("dl");
-    dl.className = "phone-grid";
-    function addRow(k, v) {
-      if (v === null || v === undefined || v === "" ||
-          (Array.isArray(v) && !v.length)) return;
-      var dt = document.createElement("dt"); dt.textContent = k;
-      var dd = document.createElement("dd");
-      dd.textContent = Array.isArray(v) ? v.join(", ") : String(v);
-      dl.appendChild(dt); dl.appendChild(dd);
-    }
-    if (d.error) { addRow("Error", d.error); c.rows.appendChild(dl); return; }
-    addRow("Registrar", rdap.registrar);
-    addRow("Registered", rdap.registered);
-    addRow("Expires", rdap.expires);
-    addRow("Nameservers", (rdap.nameservers && rdap.nameservers.length)
-                          ? rdap.nameservers : dns.NS);
-    addRow("A", dns.A);
-    addRow("AAAA", dns.AAAA);
-    addRow("MX", dns.MX);
-    addRow("TXT", (dns.TXT || []).slice(0, 6));
-    addRow("Subdomains", d.subdomain_count);
-    c.rows.appendChild(dl);
-    if (d.subdomains && d.subdomains.length) {
-      var sub = document.createElement("div");
-      sub.className = "dim";
-      sub.style.padding = "6px 16px";
-      sub.textContent = d.subdomains.slice(0, 40).join(", ") +
-        (d.subdomains.length > 40 ? " …" : "");
-      c.rows.appendChild(sub);
-    }
-  }
-
-  function renderCorrelation(clusters) {
-    var c = invSection("correlation", "Correlation", "clusters");
-    c.status.textContent = "done";
-    c.found.style.display = "none";
-    if (!clusters || !clusters.length) {
-      c.rows.innerHTML = '<div class="rrow"><span class="dim">No cross-account correlations found.</span></div>';
-      return;
-    }
-    clusters.forEach(function (cl) {
-      var card = document.createElement("div");
-      card.className = "cluster-card";
-      var top = document.createElement("div");
-      var track = document.createElement("span");
-      track.className = "conf-track";
-      var fill = document.createElement("span");
-      fill.className = "conf-fill";
-      fill.style.width = Math.min(100, cl.confidence) + "%";
-      track.appendChild(fill);
-      top.appendChild(track);
-      var lbl = document.createElement("b");
-      lbl.textContent = " " + cl.confidence + "% confidence";
-      top.appendChild(lbl);
-      card.appendChild(top);
-      var ul = document.createElement("ul");
-      (cl.members || []).forEach(function (m) {
-        var li = document.createElement("li");
-        var a = document.createElement("a");
-        a.href = m.url; a.target = "_blank"; a.rel = "noopener noreferrer";
-        a.textContent = m.site + " — " + m.url;
-        li.appendChild(a);
-        ul.appendChild(li);
-      });
-      card.appendChild(ul);
-      (cl.links || []).forEach(function (l) {
-        var r = document.createElement("div");
-        r.className = "rationale";
-        r.textContent = "↔ " + l.rationale;
-        card.appendChild(r);
-      });
-      c.rows.appendChild(card);
-    });
-  }
-
-  /* ---------- investigation run ---------- */
-  function setInvRunning(running) {
-    els.invStartBtn.disabled = running;
-    els.invStopBtn.style.display = running ? "block" : "none";
-  }
-
-  function stopInvestigation() {
-    if (invEs) { invEs.close(); invEs = null; }
-    setInvRunning(false);
-  }
-
-  els.invStopBtn.addEventListener("click", function () {
-    stopInvestigation();
-    els.overallText.textContent = "Stopped.";
-    Object.keys(invCards).forEach(function (k) {
-      if (invCards[k].status.textContent === "running") invCards[k].status.textContent = "stopped";
-    });
-  });
-
-  function enableInvestigationActions(id, inputs) {
-    currentInvId = id;
-    if (inputs) currentInvInputs = inputs;
-    // Reveal the action bar even for runs with no account rows (domain- or
-    // phone-only investigations still have a graph, dossier and re-run).
-    els.exportBar.style.display = "flex";
-    els.rerunBtn.style.display = "";
-    els.dossierBtn.style.display = "";
-    els.graphBtn.style.display = "";
-    els.watchBtn.style.display = "";
-  }
-
-  function startRerun(sourceId) {
-    if (!sourceId) { toast("No investigation to re-run"); return; }
-    els.overallText.textContent = "Re-running investigation…";
-    fetch("/api/investigate/" + sourceId + "/rerun", { method: "POST" })
-      .then(function (r) { return r.json(); })
-      .then(function (resp) {
-        if (resp.error) { toast(resp.error); return; }
-        switchTab("investigate");
-        stopStream();
-        stopInvestigation();
-        resetInvestigationUI();
-        if (resp.inputs) {
-          currentInvInputs = {
-            name: resp.inputs.name || "",
-            usernames: resp.inputs.usernames || [],
-            email: resp.inputs.email || ""
-          };
-        }
-        openInvestigationStream(resp.investigation_id, {});
-      }).catch(function () { toast("Re-run failed"); });
-  }
-
-  els.invStartBtn.addEventListener("click", function () {
-    var payload = {
-      name: els.invName.value.trim(),
-      usernames: els.invUsernames.value.trim(),
-      email: els.invEmail.value.trim(),
-      phone: els.invPhone.value.trim(),
-      domain: els.invDomain.value.trim(),
-      variants: els.invVariants.checked,
-      timeout: parseInt(els.invTimeout.value || "10", 10)
-    };
-    if (!payload.name && !payload.usernames && !payload.email && !payload.phone && !payload.domain) {
-      toast("Give at least one clue: name, username, email, phone, or domain");
-      return;
-    }
-
-    stopStream();
-    stopInvestigation();
-    resetInvestigationUI();
-    els.overallText.textContent = "Creating investigation…";
-
-    fetch("/api/investigate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    }).then(function (r) {
-      return r.json().catch(function () {
-        return { error: "server returned HTTP " + r.status };
-      });
-    }).then(function (resp) {
-      if (resp.error) {
-        toast(resp.error);
-        els.overallText.textContent = "Could not start: " + resp.error;
-        return;
-      }
-      var invId = resp.investigation_id;
-      currentInvInputs = {
-        name: payload.name || "",
-        usernames: payload.usernames ? payload.usernames.split(/[,\n]+/).map(function (s) { return s.trim(); }).filter(Boolean) : [],
-        email: payload.email || ""
-      };
-      openInvestigationStream(invId, payload);
-    }).catch(function () {
-      var msg = "Can't reach the server — is it still running? Reload the page and try again.";
-      toast(msg);
-      els.overallText.textContent = msg;
-    });
-  });
-
-  function openInvestigationStream(invId, payload) {
-    var params = new URLSearchParams();
-    params.set("nsfw", els.invNsfw.checked ? "true" : "false");
-    invEs = new EventSource("/api/investigate/" + invId + "/stream?" + params.toString());
-    setInvRunning(true);
-    els.overallText.textContent = "Investigation #" + invId + " running…";
-
-    invEs.addEventListener("meta", function (e) {
-      var d = JSON.parse(e.data);
-      var bits = [];
-      if (d.sherlock_sites) bits.push(d.sherlock_sites + " sherlock sites");
-      if (d.maigret_sites) bits.push(d.maigret_sites + " maigret sites");
-      if (d.candidates) bits.push(d.candidates + " name candidates × " + d.candidate_sites + " sites");
-      if (d.email) bits.push("email pivot");
-      if (d.phone) bits.push("phone intel");
-      if (d.domain) bits.push("domain: " + d.domain);
-      els.overallText.textContent = "Investigation #" + invId + ": " + bits.join(" · ");
-    });
-    invEs.addEventListener("candidates", function (e) {
-      var d = JSON.parse(e.data);
-      var c = sectionFor({ source: "name", from_name: d.name, username: d.name });
-      c.note.textContent = d.candidates.length + " candidates: " + d.candidates.slice(0, 8).join(", ") + (d.candidates.length > 8 ? "…" : "");
-    });
-    invEs.addEventListener("found", function (e) { addInvFoundRow(JSON.parse(e.data)); });
-    invEs.addEventListener("merged", function (e) { mergeInvRow(JSON.parse(e.data)); });
-    invEs.addEventListener("error", function (e) { addInvErrorRow(JSON.parse(e.data)); });
-    invEs.addEventListener("progress", function (e) {
-      var d = JSON.parse(e.data);
-      var c = invCards[sectionKeyFor(d)];
-      if (c) c.note.textContent = d.engine + " " + d.checked + "/" + d.total;
-    });
-    invEs.addEventListener("engine_done", function (e) {
-      var d = JSON.parse(e.data);
-      var c = invCards[sectionKeyFor(d)];
-      if (c) c.status.textContent = "scanning";
-    });
-    invEs.addEventListener("engine_error", function (e) {
-      var d = JSON.parse(e.data);
-      toast(d.engine + " engine error: " + d.message);
-    });
-    invEs.addEventListener("phase", function (e) {
-      var d = JSON.parse(e.data);
-      if (d.phase === "enriching")
-        els.overallText.textContent = "Enriching up to " + d.targets + " profiles…";
-    });
-    invEs.addEventListener("enriched", function (e) { enrichInvRow(JSON.parse(e.data)); });
-    invEs.addEventListener("email", function (e) {
-      var d = JSON.parse(e.data);
-      if (d.source === "gravatar") renderGravatar(d.email, d.profile);
-      else if (d.source === "holehe") addHoleheRow(d);
-    });
-    invEs.addEventListener("phone_intel", function (e) {
-      renderPhoneIntel(JSON.parse(e.data));
-    });
-    invEs.addEventListener("domain_intel", function (e) {
-      renderDomainIntel(JSON.parse(e.data));
-    });
-    invEs.addEventListener("correlation", function (e) {
-      renderCorrelation(JSON.parse(e.data).clusters);
-    });
-    invEs.addEventListener("saved", function (e) {
-      var d = JSON.parse(e.data);
-      enableInvestigationActions(d.investigation_id);
-    });
-    invEs.addEventListener("fatal", function (e) {
-      toast("Investigation failed: " + JSON.parse(e.data).message);
-      stopInvestigation();
-    });
-    invEs.addEventListener("done", function (e) {
-      var d = JSON.parse(e.data);
-      els.overallText.textContent = "Investigation complete — " + d.found + " accounts, " +
-        d.variant_hits + " variant hits, " + d.name_hits + " candidate hits, " +
-        d.clusters + " clusters, " + d.email_hits + " email hits.";
-      els.overallFill.style.width = "100%";
-      Object.keys(invCards).forEach(function (k) {
-        invCards[k].status.textContent = "done";
-      });
-      enableInvestigationActions(invId);
-      stopInvestigation();
-      loadHistory();
-    });
-    invEs.onerror = function () {
-      if (invEs && invEs.readyState === EventSource.CLOSED) setInvRunning(false);
-    };
-  }
-
-  els.rerunBtn.addEventListener("click", function () {
-    startRerun(currentInvId);
-  });
-
-  els.dossierBtn.addEventListener("click", function () {
-    if (currentInvId) window.open("/api/investigate/" + currentInvId + "/report", "_blank");
-  });
-
-  els.watchBtn.addEventListener("click", function () {
-    if (!currentInvInputs) { toast("No investigation inputs to watch"); return; }
-    var inputs = {};
-    if (currentInvInputs.name) inputs.name = currentInvInputs.name;
-    if (currentInvInputs.usernames && currentInvInputs.usernames.length) inputs.usernames = currentInvInputs.usernames;
-    if (currentInvInputs.email) inputs.email = currentInvInputs.email;
-    if (!inputs.name && !inputs.usernames && !inputs.email) {
-      toast("Nothing watchable (phone-only investigations can't be monitored)");
-      return;
-    }
-    var label = currentInvInputs.name ||
-      (currentInvInputs.usernames || []).join(", ") || currentInvInputs.email;
-    fetch("/api/watchlist", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        label: label,
-        inputs: inputs,
-        interval_hours: parseInt(els.watchInterval.value, 10)
-      })
-    }).then(function (r) { return r.json(); }).then(function (resp) {
-      if (resp.error) { toast(resp.error); return; }
-      toast("Watch created — monitoring “" + resp.label + "” " +
-            els.watchInterval.options[els.watchInterval.selectedIndex].text);
-      loadWatchlist();
-    }).catch(function () { toast("Failed to create watch"); });
-  });
-
-  /* ---------- identity graph ---------- */
-  var cy = null;
-  var graphData = null;
-
-  var NODE_COLORS = {
-    person: "#58a6ff",
-    account: "#58a6ff",
-    email: "#d29922",
-    phone: "#39c5cf",
-    registration: "#8b949e",
-    domain: "#a371f7",
-    ip: "#f778ba",
-    nameserver: "#6e7681"
-  };
-
-  function nodeColor(n) {
-    if (n.type === "account") {
-      var v = n.verification || (n.data || {}).verification;
-      if (v === "likely_false_positive") return "#f85149";  // flagged red
-      if (v === "confirmed") return "#3fb950";               // verified green
-      if ((n.engines || []).length >= 2) return "#3fb950";
-      if ((n.data || {}).source === "name") return "#d29922";
-    }
-    return NODE_COLORS[n.type] || "#8b949e";
-  }
-
-  function nodeSize(n) {
-    if (n.type === "person") return 46;
-    if (n.type === "email" || n.type === "phone") return 30;
-    return 16 + Math.round((n.confidence || 40) * 0.22);
-  }
-
-  function applyEdgeFilter() {
-    if (!cy) return;
-    var min = parseInt(els.confSlider.value, 10);
-    els.confSliderVal.textContent = min + "%";
-    cy.edges().forEach(function (e) {
-      e.style("display", (e.data("confidence") || 0) >= min ? "element" : "none");
-    });
-  }
-
-  els.confSlider.addEventListener("input", applyEdgeFilter);
-
-  function showNodePanel(n) {
-    var d = n.data();
-    var body = els.nodePanelBody;
-    body.innerHTML = "";
-    if (d.avatar) {
-      var img = document.createElement("img");
-      img.src = d.avatar; img.alt = "";
-      img.onerror = function () { img.style.display = "none"; };
-      body.appendChild(img);
-    }
-    var h = document.createElement("h3");
-    h.textContent = d.label || d.id;
-    body.appendChild(h);
-    var t = document.createElement("div");
-    t.className = "np-type";
-    t.textContent = d.type + (d.sublabel ? " · " + d.sublabel : "") +
-      " · confidence " + (d.confidence != null ? d.confidence + "%" : "—");
-    body.appendChild(t);
-
-    function addField(k, v, isLink) {
-      if (v === null || v === undefined || v === "") return;
-      var row = document.createElement("div");
-      row.className = "np-row";
-      var key = document.createElement("div");
-      key.className = "k"; key.textContent = k;
-      var val = document.createElement("div");
-      if (isLink) {
-        var a = document.createElement("a");
-        a.href = v; a.target = "_blank"; a.rel = "noopener noreferrer";
-        a.textContent = v;
-        val.appendChild(a);
-      } else {
-        val.textContent = typeof v === "object" ? JSON.stringify(v) : String(v);
-      }
-      row.appendChild(key); row.appendChild(val);
-      body.appendChild(row);
-    }
-
-    addField("profile", d.url, true);
-    addField("engines", (d.engines || []).join(", "));
-    var data = d.data || {};
-    Object.keys(data).forEach(function (k) {
-      if (data[k] === null || data[k] === undefined || data[k] === "") return;
-      if (k === "gravatar" && typeof data[k] === "object") {
-        var g = data[k] || {};
-        addField("gravatar name", g.display_name || g.full_name);
-        addField("gravatar", g.profile_url, true);
-        addField("gravatar bio", g.about);
-        addField("location", g.location);
-        return;
-      }
-      addField(k.replace(/_/g, " "), data[k]);
-    });
-    // incident edges
-    var inc = n.connectedEdges().map(function (e) {
-      return (e.data("source") === n.id() ? "→ " : "← ") +
-        (e.data("source") === n.id() ? e.target().data("label") : e.source().data("label")) +
-        " (" + e.data("confidence") + "%: " + (e.data("rationale") || "") + ")";
-    });
-    if (inc.length) addField("links", inc.join("\n"));
-    els.nodePanel.classList.add("open");
-  }
-
-  els.nodePanelClose.addEventListener("click", function () {
-    els.nodePanel.classList.remove("open");
-  });
-
-  function renderGraph(data) {
-    graphData = data;
-    els.graphPanel.style.display = "block";
-    if (typeof cytoscape === "undefined") {
-      els.graphFallback.style.display = "block";
-      return;
-    }
-    var elements = [];
-    data.nodes.forEach(function (n) {
-      var nd = {
-        id: n.id, type: n.type, label: n.label, sublabel: n.sublabel || "",
-        url: n.url || "",
-        confidence: n.confidence, engines: n.engines || [],
-        data: n.data || {},
-        color: nodeColor(n), size: nodeSize(n),
-        labelText: n.label + (n.sublabel ? "\n" + n.sublabel : "")
-      };
-      // Only set `avatar` when there is a real URL. An empty string still
-      // matches the `node[avatar]` style rule, and cytoscape then throws
-      // parsing "" as a background-image — which silently killed the graph.
-      if (n.avatar) nd.avatar = n.avatar;
-      elements.push({ data: nd });
-    });
-    data.edges.forEach(function (e) {
-      elements.push({ data: {
-        id: e.id, source: e.source, target: e.target,
-        confidence: e.confidence, rationale: e.rationale
-      }});
-    });
-    if (cy) { cy.destroy(); cy = null; }
-    cy = cytoscape({
-      container: els.cy,
-      elements: elements,
-      wheelSensitivity: 0.3,
-      style: [
-        { selector: "node", style: {
-          "background-color": "data(color)",
-          "width": "data(size)", "height": "data(size)",
-          "label": "data(labelText)",
-          "color": "#e6edf3", "font-size": 9, "line-height": 1.3,
-          "text-wrap": "wrap", "text-max-width": "110px",
-          "text-valign": "bottom", "text-margin-y": 5,
-          "text-background-color": "#0d1117", "text-background-opacity": 0.75,
-          "text-background-padding": 2, "text-background-shape": "roundrectangle",
-          "border-width": 1.5, "border-color": "rgba(255,255,255,.18)"
-        }},
-        { selector: 'node[type="person"]', style: {
-          "border-width": 2.5, "border-color": "#e6edf3",
-          "font-size": 12, "font-weight": "bold"
-        }},
-        { selector: "node[avatar]", style: {
-          "background-image": "data(avatar)",
-          "background-fit": "cover", "background-clip": "node",
-          "background-image-crossorigin": "anonymous"
-        }},
-        { selector: "edge", style: {
-          "width": "mapData(confidence, 0, 100, 1, 4.5)",
-          "line-color": "#3d444d", "curve-style": "bezier",
-          "label": "data(confidence)", "font-size": 8, "color": "#8b949e",
-          "text-rotation": "autorotate",
-          "text-background-color": "#0d1117", "text-background-opacity": 0.7,
-          "text-background-padding": 1
-        }},
-        { selector: "edge[confidence >= 60]", style: { "line-color": "#3fb950" } },
-        { selector: "edge[confidence < 40]", style: { "line-style": "dashed" } },
-        { selector: "node:selected", style: { "border-color": "#fff", "border-width": 3 } }
-      ],
-      layout: {
-        name: "cose", animate: true, animationDuration: 800,
-        nodeRepulsion: 8000, idealEdgeLength: 110, gravity: 0.4,
-        padding: 40
-      }
-    });
-    // The panel may still be sizing when cytoscape initializes, which leaves
-    // the layout framed to a stale (often zero-height) viewport and the nodes
-    // off-screen. Re-read the size and re-fit once painted, and again when the
-    // animated layout settles.
-    cy.on("layoutstop", function () { cy.fit(undefined, 40); });
-    requestAnimationFrame(function () {
-      if (cy) { cy.resize(); cy.fit(undefined, 40); }
-    });
-    cy.on("tap", "node", function (evt) { showNodePanel(evt.target); });
-    cy.on("tap", function (evt) {
-      if (evt.target === cy) els.nodePanel.classList.remove("open");
-    });
-    applyEdgeFilter();
-    els.graphPanel.scrollIntoView({ behavior: "smooth" });
-  }
-
-  els.graphBtn.addEventListener("click", function () {
-    if (!currentInvId) { toast("No investigation selected"); return; }
-    if (els.graphPanel.style.display === "block") {
-      els.graphPanel.style.display = "none";
-      return;
-    }
-    fetch("/api/investigate/" + currentInvId + "/graph")
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        if (data.error) { toast(data.error); return; }
-        renderGraph(data);
-      })
-      .catch(function () { toast("Failed to load graph"); });
-  });
-
-  /* ---------- export ---------- */
-  function download(filename, text, mime) {
-    var blob = new Blob([text], { type: mime });
-    var a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(a.href);
-  }
-
-  els.csvBtn.addEventListener("click", function () {
-    if (!currentRun.length) { toast("Nothing to export"); return; }
-    var lines = ["username,site,url,status,engines,source,variant_of,from_name,candidate,display_name,bio"];
-    currentRun.forEach(function (r) {
-      lines.push([r.username, r.site, r.url, r.status,
-                  (r.engines || []).join("|"), r.source || "",
-                  r.variant_of || "", r.from_name || "", r.candidate || "",
-                  r.display_name || "", r.bio || ""].map(function (v) {
-        v = String(v == null ? "" : v);
-        return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
-      }).join(","));
-    });
-    download("sherlock-results.csv", lines.join("\n"), "text/csv");
-  });
-
-  els.jsonBtn.addEventListener("click", function () {
-    if (!currentRun.length) { toast("Nothing to export"); return; }
-    download("sherlock-results.json", JSON.stringify(currentRun, null, 2), "application/json");
-  });
-
-  els.clearBtn.addEventListener("click", function () {
-    stopStream();
-    stopInvestigation();
-    clearResults();
-    els.overallBar.style.display = "none";
-    els.results.innerHTML = '<div class="empty-state">One clue in — a name, username, email, or phone — and hit <b>Start investigation</b>.<br>Accounts, email exposure, phone intel, correlations and an identity graph stream in live.</div>';
-  });
-
-  /* ---------- watchlist ---------- */
-  function loadWatchlist() {
-    fetch("/api/watchlist").then(function (r) { return r.json(); }).then(function (watches) {
-      if (!watches.length) {
-        els.watchList.innerHTML = '<div class="hint">No watches yet.</div>';
-        return;
-      }
-      els.watchList.innerHTML = "";
-      watches.forEach(function (w) {
-        var item = document.createElement("div");
-        item.className = "watch-item";
-        var head = document.createElement("div");
-        head.className = "w-label";
-        head.textContent = w.label;
-        var tog = document.createElement("button");
-        tog.className = "w-toggle " + (w.enabled ? "on" : "off");
-        tog.textContent = w.enabled ? "on" : "paused";
-        tog.addEventListener("click", function () {
-          fetch("/api/watchlist/" + w.id + "/toggle", { method: "POST" })
-            .then(function () { loadWatchlist(); });
-        });
-        head.appendChild(tog);
-        item.appendChild(head);
-        var meta = document.createElement("div");
-        meta.className = "w-meta";
-        var inp = [];
-        if (w.inputs.name) inp.push("name: " + w.inputs.name);
-        if ((w.inputs.usernames || []).length) inp.push("users: " + w.inputs.usernames.join(", "));
-        if (w.inputs.email) inp.push("email: " + w.inputs.email);
-        meta.textContent = inp.join(" · ") +
-          " — every " + w.interval_hours + "h · last run: " +
-          (w.last_run_at || "never") + " · " + w.alerts + " alert(s)";
-        item.appendChild(meta);
-        var actions = document.createElement("div");
-        actions.className = "w-actions";
-        var del = document.createElement("button");
-        del.className = "w-del";
-        del.textContent = "delete";
-        del.addEventListener("click", function () {
-          fetch("/api/watchlist/" + w.id, { method: "DELETE" })
-            .then(function () { loadWatchlist(); });
-        });
-        actions.appendChild(del);
-        item.appendChild(actions);
-        els.watchList.appendChild(item);
-      });
-    }).catch(function () { /* best-effort */ });
-  }
-
-  els.watchCreateBtn.addEventListener("click", function () {
-    var inputs = {};
-    if (els.watchName.value.trim()) inputs.name = els.watchName.value.trim();
-    var us = els.watchUsernames.value.split(/[,\n]+/).map(function (s) { return s.trim(); }).filter(Boolean);
-    if (us.length) inputs.usernames = us;
-    if (els.watchEmail.value.trim()) inputs.email = els.watchEmail.value.trim();
-    if (!inputs.name && !inputs.usernames && !inputs.email) {
-      toast("A watch needs a name, username, or email");
-      return;
-    }
-    fetch("/api/watchlist", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        label: els.watchLabel.value.trim(),
-        inputs: inputs,
-        interval_hours: parseInt(els.watchNewInterval.value, 10)
-      })
-    }).then(function (r) { return r.json(); }).then(function (resp) {
-      if (resp.error) { toast(resp.error); return; }
-      els.watchLabel.value = ""; els.watchName.value = "";
-      els.watchUsernames.value = ""; els.watchEmail.value = "";
-      loadWatchlist();
-    }).catch(function () { toast("Failed to create watch"); });
-  });
-
-  /* ---------- alerts ---------- */
-  function renderAlertItem(a) {
-    var item = document.createElement("div");
-    item.className = "alert-item" + (a.seen ? " seen" : " unseen");
-    var msg = document.createElement("div");
-    var kind = document.createElement("span");
-    kind.className = "a-kind " + a.kind;
-    kind.textContent = a.kind.replace(/_/g, " ");
-    msg.appendChild(kind);
-    msg.appendChild(document.createTextNode(a.message));
-    item.appendChild(msg);
-    var time = document.createElement("div");
-    time.className = "a-time";
-    time.textContent = a.created_at + (a.watch_label ? " · " + a.watch_label : "");
-    item.appendChild(time);
-    return item;
-  }
-
-  function pollAlerts() {
-    fetch("/api/alerts?unseen=1").then(function (r) { return r.json(); }).then(function (alerts) {
-      if (alerts.length) {
-        els.alertBadge.style.display = "";
-        els.alertBadge.textContent = alerts.length;
-      } else {
-        els.alertBadge.style.display = "none";
-      }
-      if (!alerts.length) {
-        els.alertsList.innerHTML = '<div class="alert-item"><span class="a-time">No unseen alerts.</span></div>';
-        return;
-      }
-      els.alertsList.innerHTML = "";
-      alerts.forEach(function (a) { els.alertsList.appendChild(renderAlertItem(a)); });
-    }).catch(function () { /* best-effort */ });
-  }
-
-  function loadAllAlerts() {
-    fetch("/api/alerts").then(function (r) { return r.json(); }).then(function (alerts) {
-      if (!alerts.length) {
-        els.allAlertsList.innerHTML = '<div class="hint">No alerts yet.</div>';
-        return;
-      }
-      els.allAlertsList.innerHTML = "";
-      alerts.forEach(function (a) { els.allAlertsList.appendChild(renderAlertItem(a)); });
-    }).catch(function () { /* best-effort */ });
-  }
-
-  els.bellBtn.addEventListener("click", function (e) {
-    e.stopPropagation();
-    els.alertsDrop.classList.toggle("open");
-  });
-  document.addEventListener("click", function (e) {
-    if (!els.alertsDrop.contains(e.target) && e.target !== els.bellBtn) {
-      els.alertsDrop.classList.remove("open");
-    }
-  });
-  els.markSeenBtn.addEventListener("click", function () {
-    fetch("/api/alerts/mark_seen", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}"
-    }).then(function () { pollAlerts(); loadAllAlerts(); });
-  });
-
-  /* ---------- history ---------- */
-  function loadHistory() {
-    fetch("/api/history").then(function (r) { return r.json(); }).then(function (runs) {
-      if (!runs.length) {
-        els.historyPage.innerHTML = '<div class="hint">No runs yet.</div>';
-        return;
-      }
-      els.historyPage.innerHTML = "";
-      runs.forEach(function (run) {
-        var item = document.createElement("div");
-        item.className = "hist-item";
-        var main = document.createElement("div");
-        var u = document.createElement("div");
-        u.className = "h-user";
-        u.textContent = run.username;
-        if (run.kind && run.kind !== "sherlock") {
-          var kb = document.createElement("span");
-          kb.className = "h-kind";
-          kb.textContent = run.kind;
-          u.appendChild(kb);
-        }
-        var m = document.createElement("div");
-        m.className = "h-meta";
-        m.textContent = run.ts + " · ";
-        var f = document.createElement("span");
-        f.className = "h-found";
-        f.textContent = run.found + "/" + run.total + " found";
-        m.appendChild(f);
-        main.appendChild(u);
-        main.appendChild(m);
-        item.appendChild(main);
-        if (run.kind === "investigation" && run.investigation_id) {
-          var actions = document.createElement("div");
-          actions.className = "h-actions";
-          var rep = document.createElement("a");
-          rep.textContent = "dossier";
-          rep.href = "/api/investigate/" + run.investigation_id + "/report";
-          rep.target = "_blank";
-          rep.addEventListener("click", function (e) { e.stopPropagation(); });
-          var gr = document.createElement("button");
-          gr.textContent = "graph";
-          gr.addEventListener("click", function (e) {
-            e.stopPropagation();
-            switchTab("investigate");
-            resetInvestigationUI();
-            els.overallBar.style.display = "none";
-            enableInvestigationActions(run.investigation_id);
-            els.graphBtn.click();
-          });
-          var rr = document.createElement("button");
-          rr.textContent = "re-run";
-          rr.addEventListener("click", function (e) {
-            e.stopPropagation();
-            startRerun(run.investigation_id);
-          });
-          actions.appendChild(rep);
-          actions.appendChild(gr);
-          actions.appendChild(rr);
-          item.appendChild(actions);
-        }
-        item.addEventListener("click", function () { loadRun(run.id); });
-        els.historyPage.appendChild(item);
-      });
-    }).catch(function () { /* history is best-effort */ });
-  }
-
-  function renderSummaryReadOnly(summary, run) {
-    function restore(r, extra) {
-      addInvFoundRow(Object.assign({ username: r.username, site: r.site,
-                                     url: r.url, engines: r.engines }, extra));
-      if (r.enrichment || r.verification)
-        enrichInvRow({ username: r.username, site: r.site,
-                       enrichment: r.enrichment || {},
-                       verification: r.verification });
-    }
-    (summary.accounts || []).forEach(function (r) {
-      restore(r, { source: "base", variant_of: null, from_name: null,
-                   candidate: null });
-    });
-    (summary.variants || []).forEach(function (r) {
-      restore(r, { source: "variant", variant_of: r.variant_of });
-    });
-    (summary.name_accounts || []).forEach(function (r) {
-      restore(r, { source: "name", from_name: r.from_name,
-                   candidate: r.candidate });
-    });
-    var params = summary.params || {};
-    var em = summary.email || {};
-    if (em.gravatar || (em.holehe || []).length) {
-      var addr = params.email || run.username;
-      renderGravatar(addr, em.gravatar);
-      (em.holehe || []).forEach(function (h) {
-        addHoleheRow({ email: addr, site: h.site, domain: h.domain,
-                       exists: h.exists, error: h.error,
-                       rate_limit: h.rate_limit });
-      });
-    }
-    if (summary.phone) renderPhoneIntel(summary.phone);
-    if (summary.domain) renderDomainIntel(summary.domain);
-    renderCorrelation(summary.correlation || []);
-    Object.keys(invCards).forEach(function (k) {
-      invCards[k].status.textContent = "loaded · " + run.ts;
-    });
-  }
-
-  function loadRun(id) {
-    fetch("/api/history/" + id).then(function (r) { return r.json(); }).then(function (run) {
-      if (run.error) { toast("Run not found"); return; }
-      switchTab("investigate");
-      stopStream();
-      stopInvestigation();
-      resetInvestigationUI();
-      els.overallBar.style.display = "none";
-
-      if (run.kind === "investigation" && run.results && !Array.isArray(run.results)) {
-        renderSummaryReadOnly(run.results, run);
-        if (run.results.params) {
-          currentInvInputs = {
-            name: run.results.params.name || "",
-            usernames: run.results.params.usernames || [],
-            email: run.results.params.email || ""
-          };
-        }
-        // Prefer the linked investigation id (graph/dossier need it).
-        fetch("/api/investigate/" + (run.investigation_id || 0))
-          .then(function (r) { return r.json(); })
-          .then(function (inv) {
-            if (!inv.error) enableInvestigationActions(inv.id);
-          }).catch(function () {});
-        els.exportBar.style.display = "flex";
-        els.results.scrollIntoView({ behavior: "smooth" });
-        return;
-      }
-
-      if (run.kind === "recon" && run.results && !Array.isArray(run.results)) {
-        // Legacy deep-recon run: reuse the same renderer.
-        renderSummaryReadOnly({
-          accounts: run.results.accounts || [],
-          variants: run.results.variants || [],
-          name_accounts: [],
-          email: run.results.email || {},
-          phone: null,
-          correlation: run.results.correlation || [],
-          params: run.results.params || {}
-        }, run);
-        els.exportBar.style.display = "flex";
-        els.results.scrollIntoView({ behavior: "smooth" });
-        return;
-      }
-
-      var c = getCard(run.username);
-      c.scanning.textContent = "loaded · " + run.ts;
-      c.fill.style.width = "100%";
-      (run.results || []).forEach(function (r) {
-        addFoundRow(run.username, r.site, r.url, null);
-      });
-      if (!run.results || !run.results.length) {
-        c.rows.innerHTML = '<div class="rrow error"><span class="status">No accounts found in this run.</span></div>';
-      }
-      els.exportBar.style.display = "flex";
-      els.results.scrollIntoView({ behavior: "smooth" });
-    }).catch(function () { toast("Failed to load run"); });
-  }
-
-  /* ---------- init ---------- */
-  loadHistory();
-  loadWatchlist();
-  pollAlerts();
-  setInterval(pollAlerts, 30000);
-})();
-</script>
+<script src="/static/js/app.js"></script>
 </body>
 </html>
