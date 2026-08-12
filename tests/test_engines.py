@@ -1,3 +1,6 @@
+import pytest
+
+from recon import engines
 from recon.engines import _match_names, normalize_site
 
 
@@ -25,3 +28,14 @@ def test_match_names_uses_aliases():
 
 def test_match_names_skips_missing():
     assert _match_names(["GitHub"], ["Nonexistent Site"]) == []
+
+
+def test_maigret_all_sites_thorough_scans_more_than_default():
+    if not engines.maigret_available():
+        pytest.skip("maigret not installed")
+    full = len(engines.load_maigret_db().sites)
+    default = engines.maigret_all_sites()          # capped by rank
+    thorough = engines.maigret_all_sites(None)     # entire database
+    assert len(thorough) > len(default)            # thorough scans more
+    assert len(thorough) >= 0.9 * full             # ~the whole database
+    assert len(default) < 0.6 * full               # default is a real subset

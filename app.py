@@ -942,6 +942,7 @@ if RECON_AVAILABLE:
             "phone": str(body.get("phone") or "").strip(),
             "domain": str(body.get("domain") or "").strip().lower(),
             "variants": bool(body.get("variants")),
+            "thorough": bool(body.get("thorough")),
             "timeout": max(1, min(120, int(body.get("timeout") or 10))),
         }
         if not (inputs["name"] or usernames or inputs["email"]
@@ -1029,7 +1030,9 @@ if RECON_AVAILABLE:
                     name=inputs["name"], usernames=inputs["usernames"],
                     email=inputs["email"], phone=inputs["phone"],
                     domain=inputs.get("domain", ""),
-                    variants=inputs["variants"], timeout=inputs["timeout"],
+                    variants=inputs["variants"],
+                    thorough=inputs.get("thorough", False),
+                    timeout=inputs["timeout"],
                     sher_data=sher_data, emit=emit, loop=loop,
                     db_path=DB_PATH,
                 )
