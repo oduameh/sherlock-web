@@ -206,10 +206,16 @@ databases.
 
 New capabilities:
 
-- **Dual-engine username search** — runs Sherlock (sync, in a thread) and
+- **Tri-engine username search** — runs Sherlock (sync, in a thread),
   [Maigret](https://github.com/soxoj/maigret) (async, ~3200-site database,
-  top ~1200 by rank) at the same time. Results are tagged with their engine
-  and merged when both engines find the same site (the row lists both).
+  top ~1200 by rank, or all in Thorough mode), and
+  [WhatsMyName](https://github.com/WebBreacher/WhatsMyName)
+  (`recon/whatsmyname.py`, ~685 categorized sites) at the same time. Results are
+  tagged with their engine and merged when engines agree on a site — a match
+  confirmed by more engines scores higher confidence, and WhatsMyName adds a
+  category (social / coding / gaming …) per account. The WhatsMyName dataset is
+  vendored at `recon/data/wmn-data.json`, © Micah Hoffman & contributors,
+  licensed [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
 - **Username permutations** (`recon/permutations.py`) — separator swaps,
   reversed word order, vowel-stripped forms, and common affixes
   (`the`, `real`, `1`, `01`, `123`, `_official`, `tv`, `hq`, …), capped at 24.
