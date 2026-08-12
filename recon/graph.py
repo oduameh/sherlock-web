@@ -142,6 +142,42 @@ def build_graph(summary: dict) -> dict:
         })
         add_edge("person", "phone", 100, "input phone")
 
+    # --- domain / infrastructure nodes ---------------------------------------
+    domain_state = summary.get("domain")
+    if domain_state and domain_state.get("domain") and not domain_state.get("error"):
+        dom = domain_state["domain"]
+        dom_id = f"domain:{dom}"
+        rdap = domain_state.get("rdap") or {}
+        dns = domain_state.get("dns") or {}
+        add_node({
+            "id": dom_id, "type": "domain", "label": dom,
+            "sublabel": rdap.get("registrar"), "confidence": 100,
+            "data": {
+                "registrar": rdap.get("registrar"),
+                "registered": rdap.get("registered"),
+                "expires": rdap.get("expires"),
+                "subdomains": domain_state.get("subdomain_count"),
+                "mx": ", ".join(dns.get("MX") or []) or None,
+            },
+        })
+        # Attach the domain to the email node when it was derived from one,
+        # otherwise to the person.
+        if "email" in node_ids:
+            add_edge("email", dom_id, 90, "email domain")
+        else:
+            add_edge("person", dom_id, 90, "subject domain")
+        # A-record IPs and nameservers as their own infrastructure nodes.
+        for ip in (dns.get("A") or [])[:3]:
+            ip_id = f"ip:{ip}"
+            add_node({"id": ip_id, "type": "ip", "label": ip,
+                      "confidence": 80, "data": {"ip": ip}})
+            add_edge(dom_id, ip_id, 80, "A record")
+        for ns in (rdap.get("nameservers") or dns.get("NS") or [])[:4]:
+            ns_id = f"ns:{ns}"
+            add_node({"id": ns_id, "type": "nameserver", "label": ns,
+                      "confidence": 70, "data": {"nameserver": ns}})
+            add_edge(dom_id, ns_id, 70, "nameserver")
+
     # --- correlation edges between accounts ----------------------------------
     for cluster in summary.get("correlation") or []:
         members = cluster.get("members") or []

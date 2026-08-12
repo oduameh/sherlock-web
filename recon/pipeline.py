@@ -25,6 +25,7 @@ from recon import engines
 from recon.correlate import correlate
 from recon.email_pivot import gravatar_lookup, holehe_available, holehe_scan
 from recon.enrich import enrich_profiles
+from recon.domain_pivot import domain_from_email, domain_intel
 from recon.names import generate_name_candidates
 from recon.permutations import generate_variants
 from recon.phone_pivot import phone_intel
@@ -99,6 +100,7 @@ async def run_pipeline(
     usernames: Optional[list[str]] = None,
     email: str = "",
     phone: str = "",
+    domain: str = "",
     variants: bool = False,
     timeout: int = 10,
     sher_data: dict,
@@ -114,12 +116,16 @@ async def run_pipeline(
     name = (name or "").strip()
     email = (email or "").strip()
     phone = (phone or "").strip()
+    domain = (domain or "").strip()
 
     # Only pivot on a well-formed address; a malformed one would waste a
     # rate-limited holehe run and draw a misleading email node.
     if email and not is_probably_email(email):
         logger.info("skipping email pivot: %r is not a valid email", email)
         email = ""
+
+    # Infrastructure pivot: an explicit domain, else the email's domain.
+    pivot_domain = domain or (domain_from_email(email) or "")
 
     # --- shared run state (mutated on the event loop only) -----------------
     rows: dict[tuple[str, str], dict] = {}
@@ -128,6 +134,7 @@ async def run_pipeline(
     name_rows: list[dict] = []
     email_state: dict = {"gravatar": None, "holehe": []}
     phone_state: dict = {}
+    domain_state: dict = {}
 
     def emit_threadsafe(kind: str, *args) -> None:
         """Route worker-thread callbacks onto the event loop."""
@@ -283,6 +290,12 @@ async def run_pipeline(
         emit("email_done", {"email": addr, "holehe_hits": hits,
                             "gravatar": bool(grav)})
 
+    async def domain_worker(dom):
+        data = await domain_intel(dom)
+        domain_state.clear()
+        domain_state.update(data)
+        emit("domain_intel", data)
+
     # --- plan --------------------------------------------------------------
     candidates = generate_name_candidates(name) if name else []
     mai_all = (
@@ -295,7 +308,7 @@ async def run_pipeline(
 
     emit("meta", {
         "name": name, "usernames": usernames, "email": email, "phone": phone,
-        "variants": variants, "timeout": timeout,
+        "domain": pivot_domain, "variants": variants, "timeout": timeout,
         "sherlock_sites": len(sher_data), "maigret_sites": len(mai_all),
         "candidate_sites": len(sher_reduced), "candidates": len(candidates),
     })
@@ -333,6 +346,8 @@ async def run_pipeline(
         mai_cand = None
 
     email_task = asyncio.create_task(email_worker(email)) if email else None
+    domain_task = (asyncio.create_task(domain_worker(pivot_domain))
+                   if pivot_domain else None)
 
     # --- phases ------------------------------------------------------------
     await wait_all(base_events)
@@ -378,14 +393,17 @@ async def run_pipeline(
     clusters = await correlate(all_rows)
     emit("correlation", {"clusters": clusters})
 
-    # Wait for the email pivot before persisting.
+    # Wait for the email + domain pivots before persisting.
     if email_task is not None:
         await email_task
+    if domain_task is not None:
+        await domain_task
 
     summary = {
         "params": {
             "name": name, "usernames": usernames, "email": email,
-            "phone": phone, "variants": variants, "timeout": timeout,
+            "phone": phone, "domain": pivot_domain,
+            "variants": variants, "timeout": timeout,
         },
         "candidates": candidates,
         "accounts": accounts,
@@ -393,6 +411,7 @@ async def run_pipeline(
         "name_accounts": name_rows,
         "email": email_state,
         "phone": phone_state or None,
+        "domain": domain_state or None,
         "correlation": clusters,
     }
     emit("done", {
@@ -402,5 +421,6 @@ async def run_pipeline(
         "clusters": len(clusters),
         "email_hits": sum(1 for h in email_state["holehe"] if h.get("exists")),
         "phone": bool(phone_state),
+        "domain": bool(domain_state),
     })
     return summary
