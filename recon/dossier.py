@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from recon.confidence import account_confidence
+from recon.exposure import exposure_summary, footprint_score
 
 
 def _e(v: Any) -> str:
@@ -76,38 +77,6 @@ font-size:11.5px;color:var(--dim)}
   a{color:var(--ink)}
 }
 """
-
-
-def footprint_score(summary: dict) -> dict:
-    """Digital-footprint score 0-100. Documented heuristic:
-
-      accounts found        4 pts each, capped at 40
-      email registrations   5 pts each, capped at 25  (holehe positives)
-      gravatar profile      10 pts flat
-      enriched profiles     2 pts each, capped at 15  (name/avatar extracted)
-      valid phone number    10 pts flat
-    """
-    accounts = summary.get("accounts") or []
-    variants = summary.get("variants") or []
-    name_rows = summary.get("name_accounts") or []
-    email = summary.get("email") or {}
-    phone = summary.get("phone") or {}
-
-    n_accts = len(accounts) + len(variants) + len(name_rows)
-    holehe_hits = sum(1 for h in (email.get("holehe") or []) if h.get("exists"))
-    enriched = sum(
-        1 for r in accounts + variants + name_rows
-        if (r.get("enrichment") or {}).get("jsonld_name")
-        or (r.get("enrichment") or {}).get("og_image")
-    )
-    parts = {
-        f"accounts found ({n_accts} × 4, cap 40)": min(40, n_accts * 4),
-        f"email registrations ({holehe_hits} × 5, cap 25)": min(25, holehe_hits * 5),
-        "gravatar profile present": 10 if email.get("gravatar") else 0,
-        f"enriched profiles ({enriched} × 2, cap 15)": min(15, enriched * 2),
-        "valid phone number": 10 if phone.get("valid") else 0,
-    }
-    return {"score": min(100, sum(parts.values())), "parts": parts}
 
 
 def _exec_summary(inv: dict, summary: dict, score: dict) -> str:
@@ -198,8 +167,95 @@ def _account_rows(rows: list[dict]) -> str:
     return "".join(out)
 
 
-def render_dossier(inv: dict, summary: dict) -> str:
-    """inv: investigations row dict {id, created_at}; summary: stored JSON."""
+_TIMELINE_KIND = {
+    "opened": "Investigation opened",
+    "scan": "Scan run",
+    "account_created": "Account created",
+    "alert": "Watchlist alert",
+}
+
+
+def _exposure_section(summary: dict) -> str:
+    """Category breakdown, identity signals, and top accounts."""
+    exp = exposure_summary(summary)
+    out = [f"<h2>Exposure profile — {_e(exp['band'])}</h2>"]
+    if exp["factors"]:
+        out.append("<ul class='tight'>")
+        out.extend(f"<li>{_e(f)}</li>" for f in exp["factors"])
+        out.append("</ul>")
+    if exp["categories"]:
+        out.append("<table class='data'><tr><th>Category</th>"
+                   "<th>Accounts</th></tr>")
+        for cat, n in exp["categories"].items():
+            out.append(f"<tr><td>{_e(cat.capitalize())}</td><td>{n}</td></tr>")
+        out.append("</table>")
+    if exp["top_accounts"]:
+        out.append("<h2 style='border:none;text-transform:none;font-size:12px;"
+                   "margin:12px 0 4px'>Highest-confidence accounts</h2>")
+        out.append("<table class='data'><tr><th>Platform</th><th>Handle</th>"
+                   "<th>Category</th><th>Conf.</th></tr>")
+        for a in exp["top_accounts"]:
+            out.append(
+                f"<tr><td><b>{_e(a['site'])}</b></td>"
+                f"<td>{_e(a['username'])}</td>"
+                f"<td>{_e((a['category'] or '').capitalize())}</td>"
+                f"<td><b>{a['confidence']}%</b></td></tr>"
+            )
+        out.append("</table>")
+    return "".join(out)
+
+
+def _timeline_section(timeline: list[dict]) -> str:
+    """Chronological milestone table."""
+    out = [f"<h2>Subject timeline ({len(timeline)} events)</h2>"]
+    out.append("<table class='data'><tr><th>When</th><th>Event</th>"
+               "<th>Detail</th></tr>")
+    for ev in timeline:
+        when = ev.get("date") if ev.get("dated") else "—"
+        kind = _TIMELINE_KIND.get(ev.get("kind"), ev.get("kind") or "")
+        title = ev.get("title") or kind
+        out.append(
+            f"<tr><td>{_e(when)}</td>"
+            f"<td><b>{_e(title)}</b><div class='dim'>{_e(kind)}</div></td>"
+            f"<td class='dim'>{_e(ev.get('detail'))}</td></tr>"
+        )
+    out.append("</table>")
+    out.append("<p class='dim'>Undated events (—) had no public timestamp and "
+               "sort last. Account-creation dates come from public platform "
+               "APIs (e.g. GitHub) where available.</p>")
+    return "".join(out)
+
+
+def _connections_section(connections: list[dict]) -> str:
+    """Links to other investigations sharing identifiers with this one."""
+    out = [f"<h2>Cross-case connections ({len(connections)})</h2>"]
+    out.append(
+        "<p class='dim'>Other stored investigations that share an identifier "
+        "with this subject. Shared handles alone are weak (username reuse); "
+        "shared emails, phones, and domains are strong.</p>"
+    )
+    out.append("<table class='data'><tr><th>Case</th><th>Strength</th>"
+               "<th>Shared</th></tr>")
+    for c in connections:
+        out.append(
+            f"<tr><td>#{_e(c.get('investigation_id'))} "
+            f"{_e(c.get('label'))}</td>"
+            f"<td><b>{c.get('strength')}%</b></td>"
+            f"<td>{_e(c.get('summary'))}</td></tr>"
+        )
+    out.append("</table>")
+    return "".join(out)
+
+
+def render_dossier(inv: dict, summary: dict, *,
+                   timeline: list | None = None,
+                   connections: list | None = None) -> str:
+    """inv: investigations row dict {id, created_at}; summary: stored JSON.
+
+    ``timeline`` and ``connections`` are optional pre-computed analysis blocks
+    (from :mod:`recon.timeline` and :mod:`recon.connections`); when supplied
+    they render as extra sections. Omitting them keeps the classic report.
+    """
     from recon.graph import build_graph
 
     params = summary.get("params") or {}
@@ -265,6 +321,17 @@ def render_dossier(inv: dict, summary: dict) -> str:
         "profile (cap 15), 10 for a valid phone number. Higher = larger public "
         "footprint.</p>"
     )
+
+    # -- exposure profile ------------------------------------------------------
+    p.append(_exposure_section(summary))
+
+    # -- timeline (optional) ---------------------------------------------------
+    if timeline:
+        p.append(_timeline_section(timeline))
+
+    # -- cross-case connections (optional) -------------------------------------
+    if connections:
+        p.append(_connections_section(connections))
 
     # -- identity graph data -----------------------------------------------------
     p.append(f"<h2>Identity graph ({len(graph['nodes'])} nodes, "
