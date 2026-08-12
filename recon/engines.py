@@ -101,13 +101,20 @@ def maigret_variant_sites() -> dict[str, Any]:
     return {s.name: s for s in db.sites if s.name in wanted}
 
 
-def maigret_all_sites(limit: int = 1200) -> dict[str, Any]:
-    """Top sites by rank (bounded for runtime)."""
+# Default cap on the base username scan (top N by rank). A "thorough" run
+# passes limit=None to scan maigret's entire database (~3200 sites).
+DEFAULT_MAIGRET_LIMIT = 1200
+
+
+def maigret_all_sites(limit: Optional[int] = DEFAULT_MAIGRET_LIMIT
+                      ) -> dict[str, Any]:
+    """Top ``limit`` sites by rank, or the whole database when ``limit`` is None."""
     db = load_maigret_db()
+    top = len(db.sites) if limit is None else limit
     try:
-        return db.ranked_sites_dict(top=limit)
+        return db.ranked_sites_dict(top=top)
     except Exception:
-        return {s.name: s for s in db.sites[:limit]}
+        return {s.name: s for s in db.sites[:top]}
 
 
 class _MaigretNotify:

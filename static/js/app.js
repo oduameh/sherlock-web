@@ -49,6 +49,7 @@
     invPhone: document.getElementById("invPhone"),
     invDomain: document.getElementById("invDomain"),
     invVariants: document.getElementById("invVariants"),
+    invThorough: document.getElementById("invThorough"),
     invTimeout: document.getElementById("invTimeout"),
     invNsfw: document.getElementById("invNsfw"),
     invStartBtn: document.getElementById("invStartBtn"),
@@ -1125,6 +1126,7 @@
       phone: els.invPhone.value.trim(),
       domain: els.invDomain.value.trim(),
       variants: els.invVariants.checked,
+      thorough: els.invThorough.checked,
       timeout: parseInt(els.invTimeout.value || "10", 10)
     };
     if (!payload.name && !payload.usernames && !payload.email && !payload.phone && !payload.domain) {

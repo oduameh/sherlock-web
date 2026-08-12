@@ -336,6 +336,43 @@ Graceful degradation: `phonenumbers` missing → phone pivot returns an
 "unavailable" result; `cytoscape.min.js` missing → the graph panel shows a
 fallback notice; everything else already degraded per-engine.
 
+### Investigation intelligence: exposure, timeline, connections
+
+An analysis layer over the stored investigation data — three pure-function
+cores (no paid APIs, no secrets) that also enrich the dossier report:
+
+- **Exposure profile** (`recon/exposure.py`) — the digital-footprint score
+  (now the single source of truth, imported by the dossier) plus a structured
+  breakdown: qualitative band (minimal → extensive), platform-category counts
+  (development / social / professional / creative / media / …), identity
+  signals (real name exposed, avatar, Gravatar, valid phone, owned domain),
+  the highest-confidence accounts, and human-readable exposure factors.
+- **Subject timeline** (`recon/timeline.py`) — a chronology built from the
+  investigation-opened time, each scan run against it, matching watchlist
+  alert events, and **public account-creation dates** (GitHub's keyless
+  `api.github.com/users/{login}` `created_at`, fetched through the SSRF-guarded
+  `recon/safeweb.py`). Assembly/parse/account-event helpers are pure; the
+  GitHub enrichment is best-effort and never raises.
+- **Cross-investigation connections** (`recon/connections.py`) — link analysis
+  across saved cases: "this email / phone / domain / account also appears in
+  case #N". Overlaps are weighted (email/phone strong, reused handle weak) into
+  a 0-100 strength and ranked.
+
+New endpoints (all additive; `404` for a missing investigation, otherwise a
+well-formed `200` even before the investigation has run):
+
+- `GET /api/investigate/{id}/exposure` — `{investigation_id, status, exposure}`
+- `GET /api/investigate/{id}/timeline` — `{investigation_id, generated_at,
+  timeline: [{date, kind, title, detail, dated}]}` (kinds: `opened`, `scan`,
+  `alert`, `account_created`)
+- `GET /api/investigate/{id}/connections` — `{investigation_id, checked,
+  connections: [{investigation_id, label, strength, shared, summary}]}`
+
+The dossier (`GET /api/investigate/{id}/report`) now folds all three in as
+extra sections (exposure profile, subject timeline, cross-case connections).
+No new tables — these read the existing `investigations`, `runs`, and
+`watch_alerts` rows.
+
 ### Accuracy: verification + unified confidence
 
 - **Profile verification** (`recon/verify.py`) — Sherlock/Maigret report a hit
