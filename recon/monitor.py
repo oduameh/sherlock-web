@@ -17,6 +17,7 @@ import logging
 import sqlite3
 import time
 
+import dbconn
 from dbconn import connect as db_connect
 from recon import engines
 from recon.email_pivot import holehe_available, holehe_scan
@@ -41,9 +42,9 @@ _HOLEHE_WANTED = {engines.normalize_site(s) for s in engines.HIGH_VALUE_SITES}
 
 def init_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS watchlist (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {dbconn.PK},
             created_at TEXT NOT NULL,
             label TEXT NOT NULL,
             inputs TEXT NOT NULL,
@@ -55,9 +56,9 @@ def init_tables(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS watch_alerts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {dbconn.PK},
             watch_id INTEGER NOT NULL,
             created_at TEXT NOT NULL,
             kind TEXT NOT NULL,

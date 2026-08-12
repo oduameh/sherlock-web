@@ -33,7 +33,9 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+import dbconn
 from dbconn import connect as db_connect
+from dbconn import insert_returning_id
 
 # Adaptive routing (recon.router) is stdlib-only — safe to import even when
 # the optional recon dependencies (maigret, holehe) are missing.
@@ -147,33 +149,38 @@ NSFW_NAMES = {s.name for s in _ALL_SITES if s.is_nsfw}
 def _init_db() -> None:
     with db_connect(DB_PATH) as conn:
         conn.execute(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {dbconn.PK},
                 ts TEXT NOT NULL,
                 username TEXT NOT NULL,
                 found INTEGER NOT NULL,
                 total INTEGER NOT NULL,
-                results TEXT NOT NULL
+                results TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'sherlock',
+                investigation_id INTEGER
             )
             """
         )
-        # Migration: recon runs are stored in the same table, distinguished by
-        # kind. Existing rows get the default 'sherlock' and keep working.
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(runs)")]
-        if "kind" not in cols:
-            conn.execute(
-                "ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'sherlock'"
-            )
-        # Migration: link result rows to an investigation (nullable).
-        if "investigation_id" not in cols:
-            conn.execute(
-                "ALTER TABLE runs ADD COLUMN investigation_id INTEGER"
-            )
+        # Migration for pre-existing SQLite databases created before the `kind`
+        # / `investigation_id` columns existed. A fresh database (SQLite or
+        # Postgres) already has them from the CREATE above, so this is
+        # SQLite-only (PRAGMA table_info is SQLite-specific).
+        if not dbconn.IS_POSTGRES:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(runs)")]
+            if "kind" not in cols:
+                conn.execute(
+                    "ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL"
+                    " DEFAULT 'sherlock'"
+                )
+            if "investigation_id" not in cols:
+                conn.execute(
+                    "ALTER TABLE runs ADD COLUMN investigation_id INTEGER"
+                )
         conn.execute(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS investigations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {dbconn.PK},
                 created_at TEXT NOT NULL,
                 inputs TEXT NOT NULL,
                 summary TEXT,
@@ -193,7 +200,8 @@ def save_run(username: str, found: int, total: int, results,
              kind: str = "sherlock", investigation_id: int = None) -> int:
     """Persist one completed per-username run. Called from the scan thread."""
     with db_connect(DB_PATH) as conn:
-        cur = conn.execute(
+        return insert_returning_id(
+            conn,
             "INSERT INTO runs (ts, username, found, total, results, kind,"
             " investigation_id) VALUES (?,?,?,?,?,?,?)",
             (
@@ -206,7 +214,6 @@ def save_run(username: str, found: int, total: int, results,
                 investigation_id,
             ),
         )
-        return cur.lastrowid
 
 
 @app.get("/api/history")
@@ -975,12 +982,12 @@ if RECON_AVAILABLE:
             usernames = [inputs["email"].split("@", 1)[0]]
             inputs["usernames"] = usernames
         with db_connect(DB_PATH) as conn:
-            cur = conn.execute(
+            inv_id = insert_returning_id(
+                conn,
                 "INSERT INTO investigations (created_at, inputs, status)"
                 " VALUES (?,?, 'pending')",
                 (time.strftime("%Y-%m-%d %H:%M:%S"), json.dumps(inputs)),
             )
-            inv_id = cur.lastrowid
         return JSONResponse({"investigation_id": inv_id})
 
     @app.get("/api/investigate/{inv_id}")
@@ -1003,12 +1010,12 @@ if RECON_AVAILABLE:
             return JSONResponse({"error": "not found"}, status_code=404)
         inputs = src["inputs"]
         with db_connect(DB_PATH) as conn:
-            cur = conn.execute(
+            new_id = insert_returning_id(
+                conn,
                 "INSERT INTO investigations (created_at, inputs, status)"
                 " VALUES (?,?, 'pending')",
                 (time.strftime("%Y-%m-%d %H:%M:%S"), json.dumps(inputs)),
             )
-            new_id = cur.lastrowid
         return JSONResponse({"investigation_id": new_id, "inputs": inputs,
                              "rerun_of": inv_id})
 
@@ -1294,14 +1301,14 @@ if RECON_AVAILABLE:
                        int(body.get("interval_hours")
                            or recon_monitor.DEFAULT_INTERVAL_HOURS))
         with db_connect(DB_PATH) as conn:
-            cur = conn.execute(
+            watch_id = insert_returning_id(
+                conn,
                 "INSERT INTO watchlist"
                 " (created_at, label, inputs, interval_hours, enabled)"
                 " VALUES (?,?,?,?,1)",
                 (time.strftime("%Y-%m-%d %H:%M:%S"), label,
                  json.dumps(inputs), interval),
             )
-            watch_id = cur.lastrowid
         return JSONResponse({"watch_id": watch_id, "label": label,
                              "interval_hours": interval})
 
