@@ -10,3 +10,4 @@ android/app/build/
 local.properties
 *.apk
 .DS_Store
+.claude/

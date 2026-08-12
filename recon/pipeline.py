@@ -134,6 +134,7 @@ async def run_pipeline(
     phone: str = "",
     domain: str = "",
     variants: bool = False,
+    thorough: bool = False,
     timeout: int = 10,
     sher_data: dict,
     emit: Emit,
@@ -361,8 +362,13 @@ async def run_pipeline(
     # DB is unavailable.
     router = RunRouter(db_path, emit=emit)
     sher_data = router.filter_sites(sher_data, "sherlock")
+    # Thorough runs scan maigret's entire database (~3200 sites) for the base
+    # username instead of the top ~1200 by rank — broader long-tail coverage at
+    # the cost of runtime.
+    mai_limit = None if thorough else engines.DEFAULT_MAIGRET_LIMIT
     mai_all = router.filter_sites(
-        engines.maigret_all_sites() if engines.maigret_available() else {},
+        engines.maigret_all_sites(mai_limit) if engines.maigret_available()
+        else {},
         "maigret")
     sher_reduced = engines.sherlock_variant_site_data(sher_data)
     mai_reduced = router.filter_sites(
@@ -372,7 +378,8 @@ async def run_pipeline(
 
     emit("meta", {
         "name": name, "usernames": usernames, "email": email, "phone": phone,
-        "domain": pivot_domain, "variants": variants, "timeout": timeout,
+        "domain": pivot_domain, "variants": variants, "thorough": thorough,
+        "timeout": timeout,
         "sherlock_sites": len(sher_data), "maigret_sites": len(mai_all),
         "candidate_sites": len(sher_reduced), "candidates": len(candidates),
     })
@@ -467,7 +474,7 @@ async def run_pipeline(
         "params": {
             "name": name, "usernames": usernames, "email": email,
             "phone": phone, "domain": pivot_domain,
-            "variants": variants, "timeout": timeout,
+            "variants": variants, "thorough": thorough, "timeout": timeout,
         },
         "candidates": candidates,
         "accounts": accounts,
