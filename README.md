@@ -52,6 +52,75 @@ security-guard coverage for the recon engines — no network required):
 (FastAPI, uvicorn, `sherlock-project`), and starts uvicorn. Set `PORT=9000 ./run.sh`
 to use a different port.
 
+## Adaptive routing
+
+On datacenter deployments (Railway's IPs have poor reputation) a large share of
+site checks fail: WAF blocks and 429s, transient connect/DNS timeouts, and site
+detectors that have gone stale. The routing layer (`recon/router.py`) classifies
+every failure, remembers per-site health, stops hammering dead sites, and
+retries the failures that are actually worth retrying.
+
+**Error taxonomy.** Every per-site result (both engines, plus the watchlist
+monitor's light scans) is classified from its status + context into:
+`timeout`, `dns`, `tls`, `conn_reset`, `http_429` (rate limit),
+`http_403_waf` (WAF/block page), `http_5xx`, `detector_stale` (e.g. an
+ILLEGAL status or a detector regex that no longer matches), or `unknown`.
+
+**Circuit breaker.** Observations are kept in a `site_health` table (sliding
+window of the last 50 per site+engine, EWMA latency, consecutive failures).
+A site trips open after **5 consecutive failures**, or when its failure rate
+exceeds **60% over the last 20 observations** (min 10 observations). Open
+sites are excluded from scans — the full pipeline, the quick scan, *and* the
+monitor's light scans — for a **15-minute cooldown that doubles on each
+re-trip, up to 4 hours**. After the cooldown the site is half-open: it is
+scanned once; success closes the circuit (cooldown resets), failure re-trips
+it with the doubled cooldown. Skips are never silent: scans emit a
+`skipped_degraded` SSE event listing the excluded sites.
+
+Every check is recorded, but not on the hot path: observations are buffered in
+memory during a run and flushed to `site_health` in a single transaction at the
+end. This keeps the per-check callback (called thousands of times per run, some
+on the async event loop) free of blocking SQLite I/O and free of the
+lost-update race that concurrent per-observation writes would otherwise hit.
+Circuit state only takes effect at the *start* of the next run, so end-of-run
+persistence is behaviourally identical.
+
+**Smart retries.** After each engine pass, failures classed as transient
+(`timeout`, `conn_reset`, `http_5xx`, `dns`) are retried **once** after a
+jittered 5–15s delay, sequentially, capped at **40 retries per run**; each
+attempt emits a `retry` SSE event. 429/WAF-class failures are *not* retried
+in-run (immediate retries are pointless) — the circuit breaker handles them
+across runs.
+
+**Observability.**
+
+- `GET /api/health/sources` — per-site failure rate, dominant error class,
+  circuit state (open/half-open/closed + cooldown remaining), EWMA latency,
+  sorted worst-first, plus aggregate stats. The UI's **Health** tab renders it.
+- The run's final `done` payload gains `error_breakdown` (counts per class)
+  and `degraded_sources` — additive only; all existing event names/fields are
+  unchanged.
+
+**Optional proxy pool (off by default).** Set `PROXY_LIST` to a
+comma-separated list of proxy URLs, e.g.
+`PROXY_LIST=http://user:pass@host:8080,socks5://host:1080`. When set, one
+proxy is picked per run (round-robin) and passed to both engines
+(Sherlock's `proxy=` and maigret's `proxy=`). Per-proxy health is tracked in
+a `proxy_health` table; a proxy whose failure rate exceeds **70% over 10+
+uses** is benched for 30 minutes, then automatically re-tried. With no
+proxies configured, behavior is exactly as before — zero overhead.
+
+Two honest caveats:
+
+- **Good proxies cost money.** Free proxy lists are worse than nothing —
+  slow, dead, or already burned by the same WAFs you're trying to avoid.
+- WAF-class blocks are an **IP-reputation problem**. Routing detects them,
+  stops wasting requests on them, and reports them honestly — but the only
+  full fix is egress through residential proxies, which are a paid service.
+
+Everything degrades gracefully: if the `site_health` table is unavailable the
+app logs one warning and scans run unrouted, exactly as before.
+
 ## Access gate (optional)
 
 Set the `APP_PASSWORD` environment variable to put the whole app behind HTTP
@@ -121,7 +190,10 @@ The web app is also an installable PWA (manifest + service worker under
 
 - `GET /api/sites` — full site list (`name`, `nsfw`)
 - `GET /api/search/stream?usernames=alice,bob&timeout=10&nsfw=false&sites=github,twitter` — SSE stream
-  (`meta`, `user_start`, `found`, `error`, `progress`, `user_done`, `done` events)
+  (`meta`, `user_start`, `found`, `error`, `progress`, `user_done`, `done` events;
+  adaptive routing may add `skipped_degraded` / `retry` events and extends
+  `done` with `error_breakdown` + `degraded_sources`)
+- `GET /api/health/sources` — per-site reliability summary (see Adaptive routing)
 - `GET /api/history` — recent runs (includes `kind`: `sherlock` or `recon`)
 - `GET /api/history/{id}` — full stored results of one run
 

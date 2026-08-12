@@ -21,6 +21,7 @@ from dbconn import connect as db_connect
 from recon import engines
 from recon.email_pivot import holehe_available, holehe_scan
 from recon.names import generate_name_candidates
+from recon.router import RunRouter
 
 logger = logging.getLogger("recon.monitor")
 
@@ -73,7 +74,8 @@ def init_tables(conn: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 def _sherlock_light(usernames: list[str], site_data: dict,
-                    timeout: int) -> list[dict]:
+                    timeout: int, router: "RunRouter | None" = None,
+                    ) -> list[dict]:
     """Synchronous sherlock scan of usernames over the high-value subset.
 
     Runs in a worker thread (via asyncio.to_thread). Returns found rows.
@@ -86,6 +88,10 @@ def _sherlock_light(usernames: list[str], site_data: dict,
 
     class _N(QueryNotify):
         def update(self, result) -> None:
+            if router is not None:
+                router.observe("sherlock", result.site_name,
+                               str(result.status.value),
+                               result.context or "", result.query_time)
             if result.status == QueryStatus.CLAIMED:
                 found.append({"username": result.username,
                               "site": result.site_name,
@@ -93,14 +99,15 @@ def _sherlock_light(usernames: list[str], site_data: dict,
 
     for username in usernames:
         try:
-            sherlock(username, site_data, _N(), timeout=timeout)
+            sherlock(username, site_data, _N(), timeout=timeout,
+                     proxy=router.proxy if router else None)
         except Exception:
             logger.exception("monitor sherlock scan failed for %s", username)
     return found
 
 
 async def light_scan(inputs: dict, sher_site_data: dict,
-                     timeout: int = LIGHT_TIMEOUT_S) -> dict:
+                     timeout: int = LIGHT_TIMEOUT_S, db_path=None) -> dict:
     """Run the light scan for a watch's inputs. Returns found accounts +
     holehe hits. Never raises."""
     usernames = [u.strip() for u in (inputs.get("usernames") or []) if u.strip()]
@@ -108,10 +115,19 @@ async def light_scan(inputs: dict, sher_site_data: dict,
         usernames = generate_name_candidates(inputs["name"])
     email = (inputs.get("email") or "").strip()
 
+    # Honor circuit breakers: the monitor is the highest-frequency caller, so
+    # it must not hammer degraded sites between full scans.
+    router = RunRouter(db_path)
+    sher_site_data = router.filter_sites(sher_site_data, "sherlock")
+    if router.degraded:
+        logger.info("monitor: skipping %d degraded site(s): %s",
+                    len(router.degraded),
+                    ", ".join(d["site"] for d in router.degraded))
+
     accounts: list[dict] = []
     if usernames and sher_site_data:
         accounts = await asyncio.to_thread(
-            _sherlock_light, usernames, sher_site_data, timeout
+            _sherlock_light, usernames, sher_site_data, timeout, router
         )
 
     holehe_hits: list[dict] = []
@@ -127,6 +143,7 @@ async def light_scan(inputs: dict, sher_site_data: dict,
         except Exception:
             logger.exception("monitor holehe scan failed")
 
+    router.finish()
     return {"accounts": accounts, "holehe": holehe_hits}
 
 
@@ -224,7 +241,7 @@ async def run_watch(db_path, watch: dict, sher_site_data: dict) -> int:
         conn.execute("UPDATE watchlist SET last_run_at = ? WHERE id = ?",
                      (_now(), wid))
 
-    scan = await light_scan(watch["inputs"], sher_site_data)
+    scan = await light_scan(watch["inputs"], sher_site_data, db_path=db_path)
     new_sig = compute_signature(scan)
     old_sig = watch.get("last_signature") or {}
     baseline = not watch.get("last_run_at") and not old_sig

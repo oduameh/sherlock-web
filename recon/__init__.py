@@ -8,6 +8,7 @@ Modules:
     enrich        - best-effort public profile metadata extraction
     correlate     - cross-account clustering with confidence scores
     engines       - sherlock + maigret scan wrappers used by the SSE endpoint
+    router        - adaptive routing: error taxonomy, site health, circuits (v4)
     pipeline      - unified investigation pipeline (v3)
     graph         - identity-graph JSON builder (v3)
     monitor       - watchlist monitoring with change alerts (v3)

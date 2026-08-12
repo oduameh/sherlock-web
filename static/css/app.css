@@ -649,6 +649,17 @@ select { appearance: auto; }
 .badge.found { background: var(--success-soft); color: var(--success); border-color: rgba(76, 195, 138, 0.4); }
 .badge.scanning { background: var(--accent-soft); color: var(--accent-strong); border-color: rgba(94, 160, 255, 0.4); }
 .badge.err { background: var(--danger-soft); color: var(--danger); border-color: rgba(240, 97, 93, 0.35); }
+.badge.circuit-open { background: var(--danger-soft); color: var(--danger); border-color: rgba(240, 97, 93, 0.35); }
+.badge.circuit-half { background: var(--warn-soft); color: var(--warn); border-color: rgba(224, 163, 56, 0.35); }
+.badge.circuit-closed { background: var(--success-soft); color: var(--success); border-color: rgba(76, 195, 138, 0.4); }
+
+/* source-health rows */
+.hrow { display: flex; align-items: center; gap: 10px; padding: 8px 0; font-size: var(--fs-13); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.hrow:last-child { border-bottom: none; }
+.hrow .site { font-weight: 600; min-width: 150px; }
+.hrow .engine { color: var(--text-3); font-size: var(--fs-11); }
+.hrow .cls { color: var(--warn); font-size: var(--fs-12); }
+.hrow .meta { margin-left: auto; color: var(--text-3); font-size: var(--fs-12); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .user-head .mini-progress { flex: 1; min-width: 120px; }
 
 .result-rows { max-height: 440px; overflow-y: auto; }

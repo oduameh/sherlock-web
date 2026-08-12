@@ -35,6 +35,10 @@ from fastapi.staticfiles import StaticFiles
 
 from dbconn import connect as db_connect
 
+# Adaptive routing (recon.router) is stdlib-only — safe to import even when
+# the optional recon dependencies (maigret, holehe) are missing.
+from recon import router as recon_router
+
 from sherlock_project.notify import QueryNotify
 from sherlock_project.result import QueryStatus
 from sherlock_project.sherlock import sherlock
@@ -172,6 +176,7 @@ def _init_db() -> None:
         )
         if RECON_AVAILABLE:
             recon_monitor.init_tables(conn)
+        recon_router.init_tables(conn)
 
 
 _init_db()
@@ -248,6 +253,17 @@ def get_sites() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Source health (adaptive routing)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/health/sources")
+def get_health_sources() -> JSONResponse:
+    """Per-site reliability summary (failure rate, dominant error class,
+    circuit state, EWMA latency), worst-first, plus aggregate stats."""
+    return JSONResponse(recon_router.sources_summary(DB_PATH))
+
+
+# ---------------------------------------------------------------------------
 # Streaming search (SSE)
 # ---------------------------------------------------------------------------
 
@@ -263,11 +279,13 @@ class QueueNotify(QueryNotify):
     loop.call_soon_threadsafe.
     """
 
-    def __init__(self, username: str, queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
+    def __init__(self, username: str, queue: asyncio.Queue, loop: asyncio.AbstractEventLoop,
+                 router: "recon_router.RunRouter | None" = None):
         super().__init__()
         self.username = username
         self.queue = queue
         self.loop = loop
+        self.router = router
 
     def _emit(self, event: str, payload: dict) -> None:
         payload["username"] = self.username
@@ -277,6 +295,10 @@ class QueueNotify(QueryNotify):
 
     def update(self, result) -> None:  # called once per site, from scan thread
         status = result.status
+        if self.router is not None:
+            self.router.observe("sherlock", result.site_name,
+                                str(status.value), result.context or "",
+                                result.query_time, username=self.username)
         if status == QueryStatus.CLAIMED:
             self._emit(
                 "found",
@@ -301,6 +323,15 @@ class QueueNotify(QueryNotify):
 def _run_scan(usernames: list[str], site_data: dict, timeout: int,
               queue: asyncio.Queue, loop: asyncio.AbstractEventLoop) -> None:
     """Worker-thread entry point: scans usernames sequentially."""
+    # Adaptive routing: drop open-circuit sites, observe every result, retry
+    # transient failures once. Disabled (no-op) if the DB is unavailable.
+    def _emit_ts(event: str, payload: dict) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, (event, payload))
+
+    router = recon_router.RunRouter(DB_PATH, emit=_emit_ts)
+    site_data = router.filter_sites(site_data, "sherlock")
+    router.announce_skipped()
+
     total = len(site_data)
     summary = []
     try:
@@ -309,7 +340,7 @@ def _run_scan(usernames: list[str], site_data: dict, timeout: int,
                 queue.put_nowait,
                 ("user_start", {"username": username, "total": total}),
             )
-            notify = QueueNotify(username, queue, loop)
+            notify = QueueNotify(username, queue, loop, router)
             checked = 0
 
             # Wrap update() to also count progress per completed site check.
@@ -323,7 +354,24 @@ def _run_scan(usernames: list[str], site_data: dict, timeout: int,
 
             notify.update = counting_update
 
-            results_raw = sherlock(username, site_data, notify, timeout=timeout)
+            results_raw = sherlock(username, site_data, notify,
+                                   timeout=timeout, proxy=router.proxy)
+
+            # Smart retries: re-check this pass's transient failures once,
+            # sequentially, after a jittered delay. 429/WAF-class failures
+            # are left to the circuit breaker across runs.
+            for rec in router.drain_transient("sherlock", username):
+                if rec["site"] not in site_data:
+                    continue
+                router.retries_done += 1
+                _emit_ts("retry", rec)
+                time.sleep(recon_router.retry_delay())
+                try:
+                    sherlock(username, {rec["site"]: site_data[rec["site"]]},
+                             notify, timeout=timeout, proxy=router.proxy)
+                except Exception:
+                    logging.getLogger("app").exception(
+                        "retry failed for %s on %s", username, rec["site"])
 
             found_rows = []
             for site_name, info in results_raw.items():
@@ -347,7 +395,9 @@ def _run_scan(usernames: list[str], site_data: dict, timeout: int,
             queue.put_nowait, ("fatal", {"message": f"{type(exc).__name__}: {exc}"})
         )
     finally:
-        loop.call_soon_threadsafe(queue.put_nowait, ("done", {"runs": summary}))
+        router.finish()
+        done_payload = {"runs": summary, **router.breakdown()}
+        loop.call_soon_threadsafe(queue.put_nowait, ("done", done_payload))
         loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
 
 
@@ -981,6 +1031,7 @@ if RECON_AVAILABLE:
                     domain=inputs.get("domain", ""),
                     variants=inputs["variants"], timeout=inputs["timeout"],
                     sher_data=sher_data, emit=emit, loop=loop,
+                    db_path=DB_PATH,
                 )
                 _set_investigation(inv_id, "done", summary)
                 subject = _subject_label(inputs)

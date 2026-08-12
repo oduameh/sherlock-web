@@ -226,7 +226,8 @@
   var tabEls = {
     investigate: document.getElementById("tabInvestigate"),
     watchlist: document.getElementById("tabWatchlist"),
-    history: document.getElementById("tabHistory")
+    history: document.getElementById("tabHistory"),
+    health: document.getElementById("tabHealth")
   };
 
   function closeSidebar() {
@@ -259,11 +260,90 @@
       });
       if (tab === "watchlist") { loadWatchlist(); loadAllAlerts(); }
       if (tab === "history") { loadHistory(); }
+      if (tab === "health") { loadHealthSources(); }
       closeSidebar();
     });
   });
   function switchTab(tab) {
     document.querySelector('.app-tab[data-tab="' + tab + '"]').click();
+  }
+
+  /* ==================== adaptive routing / source health ==================== */
+  var ERROR_LABELS = {
+    timeout: "timeouts", dns: "DNS failures", tls: "TLS errors",
+    conn_reset: "connection resets", http_429: "rate-limited",
+    http_403_waf: "WAF-blocked", http_5xx: "server errors (5xx)",
+    detector_stale: "stale detectors", unknown: "unknown errors"
+  };
+
+  function breakdownText(d) {
+    var bd = (d && d.error_breakdown) || {};
+    var total = 0;
+    Object.keys(bd).forEach(function (k) { total += bd[k]; });
+    if (!total) return "";
+    var parts = Object.keys(bd).map(function (k) {
+      return bd[k] + " " + (ERROR_LABELS[k] || k);
+    });
+    return total + " errors: " + parts.join(", ");
+  }
+
+  function degradedText(d) {
+    return (d && d.degraded_sources)
+      ? d.degraded_sources + " degraded source(s) skipped (circuit open)" : "";
+  }
+
+  function noteSkippedDegraded(d) {
+    var names = (d.sites || []).map(function (s) { return s.site; });
+    toast("Skipping " + d.count + " degraded source(s) (circuit open): " +
+          names.slice(0, 5).join(", ") + (names.length > 5 ? "…" : ""));
+  }
+
+  function loadHealthSources() {
+    var sum = document.getElementById("healthSummary");
+    var list = document.getElementById("healthList");
+    fetch("/api/health/sources").then(function (r) { return r.json(); }).then(function (d) {
+      if (!d.available) {
+        sum.textContent = "Source health unavailable — routing is disabled (database error).";
+        list.innerHTML = "";
+        return;
+      }
+      var a = d.aggregate || {};
+      sum.textContent = (a.sites_tracked || 0) + " sources tracked · " +
+        (a.observations || 0) + " observations · " +
+        Math.round((a.overall_failure_rate || 0) * 100) + "% overall failure rate · " +
+        (a.circuits_open || 0) + " circuit(s) open";
+      if (!d.sites || !d.sites.length) {
+        list.innerHTML = '<div class="hint">No source observations yet.</div>';
+        return;
+      }
+      list.innerHTML = "";
+      d.sites.forEach(function (s) {
+        var row = document.createElement("div");
+        row.className = "hrow";
+        var circuitCls = s.circuit === "open" ? "circuit-open"
+          : (s.circuit === "half-open" ? "circuit-half" : "circuit-closed");
+        var circuitTxt = s.circuit === "open"
+          ? "open · " + Math.max(1, Math.ceil(s.cooldown_remaining_s / 60)) + "m left"
+          : s.circuit;
+        row.innerHTML =
+          '<span class="site"></span>' +
+          '<span class="engine"></span>' +
+          '<span class="badge ' + circuitCls + '"></span>' +
+          '<span class="cls"></span>' +
+          '<span class="meta"></span>';
+        row.querySelector(".site").textContent = s.site;
+        row.querySelector(".engine").textContent = s.engine;
+        row.querySelector(".badge").textContent = circuitTxt;
+        row.querySelector(".cls").textContent =
+          s.dominant_error ? (ERROR_LABELS[s.dominant_error] || s.dominant_error) : "";
+        row.querySelector(".meta").textContent =
+          Math.round((s.failure_rate || 0) * 100) + "% fail · " + s.observations + " obs" +
+          (s.ewma_latency_ms != null ? " · " + Math.round(s.ewma_latency_ms) + "ms" : "");
+        list.appendChild(row);
+      });
+    }).catch(function () {
+      sum.textContent = "Failed to load source health.";
+    });
   }
 
   /* global Esc handling: close whatever floating layer is open */
@@ -573,8 +653,25 @@
       stopStream();
     });
 
-    es.addEventListener("done", function () {
-      els.overallText.textContent = "All scans complete.";
+    es.addEventListener("skipped_degraded", function (e) {
+      noteSkippedDegraded(JSON.parse(e.data));
+    });
+
+    es.addEventListener("retry", function (e) {
+      var d = JSON.parse(e.data);
+      if (d.username && cards[d.username]) {
+        cards[d.username].scanning.textContent = "retrying…";
+      }
+    });
+
+    es.addEventListener("done", function (e) {
+      var d = e.data ? JSON.parse(e.data) : {};
+      var msg = "All scans complete.";
+      var bd = breakdownText(d);
+      if (bd) msg += " " + bd + ".";
+      var dg = degradedText(d);
+      if (dg) msg += " " + dg + ".";
+      els.overallText.textContent = msg;
       if (es) { es.close(); es = null; }
       setRunning(false);
       loadHistory();
@@ -1128,11 +1225,24 @@
       toast("Investigation failed: " + JSON.parse(e.data).message, "error");
       stopInvestigation();
     });
+    invEs.addEventListener("skipped_degraded", function (e) {
+      noteSkippedDegraded(JSON.parse(e.data));
+    });
+    invEs.addEventListener("retry", function (e) {
+      var d = JSON.parse(e.data);
+      var c = invCards[sectionKeyFor(d)];
+      if (c) c.status.textContent = "retrying…";
+    });
     invEs.addEventListener("done", function (e) {
       var d = JSON.parse(e.data);
-      els.overallText.textContent = "Investigation complete — " + d.found + " accounts, " +
+      var msg = "Investigation complete — " + d.found + " accounts, " +
         d.variant_hits + " variant hits, " + d.name_hits + " candidate hits, " +
         d.clusters + " clusters, " + d.email_hits + " email hits.";
+      var bd = breakdownText(d);
+      if (bd) msg += " " + bd + ".";
+      var dg = degradedText(d);
+      if (dg) msg += " " + dg + ".";
+      els.overallText.textContent = msg;
       els.overallFill.style.width = "100%";
       Object.keys(invCards).forEach(function (k) {
         invCards[k].status.textContent = "done";
