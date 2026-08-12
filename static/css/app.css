@@ -840,6 +840,27 @@ select { appearance: auto; }
 .engine-badge.maigret { color: var(--purple); border-color: rgba(195, 155, 255, 0.4); background: var(--purple-soft); }
 .engine-badge.whatsmyname { color: #4cc3d9; border-color: rgba(76, 195, 217, 0.4); background: rgba(76, 195, 217, 0.12); }
 
+/* data-broker exposure rows */
+.brow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px var(--sp-4);
+  font-size: var(--fs-13);
+  border-bottom: 1px solid rgba(36, 46, 60, 0.5);
+  flex-wrap: wrap;
+}
+.brow:last-child { border-bottom: none; }
+.brow .site { font-weight: 620; min-width: 150px; flex-shrink: 0; }
+.brow .engine { color: var(--text-3); font-size: var(--fs-11); font-family: var(--font-mono); }
+.brow-links { margin-left: auto; display: inline-flex; gap: 12px; white-space: nowrap; }
+.brow-links a { color: var(--accent); text-decoration: none; font-size: var(--fs-12); }
+.brow-links a:hover { color: var(--accent-strong); text-decoration: underline; }
+.badge.b-listed { background: var(--danger-soft); color: var(--danger); border-color: rgba(240, 97, 93, 0.4); }
+.badge.b-blocked { background: var(--warn-soft); color: var(--warn); border-color: rgba(224, 163, 56, 0.35); }
+.badge.b-none { background: var(--success-soft); color: var(--success); border-color: rgba(76, 195, 138, 0.4); }
+.badge.b-manual { background: var(--bg-2); color: var(--text-3); border-color: var(--border); }
+
 .variant-tag {
   display: inline-block;
   font-size: var(--fs-10);
