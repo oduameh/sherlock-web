@@ -23,6 +23,31 @@ cd sherlock-web
 
 Then open <http://127.0.0.1:8420>.
 
+## Development & tests
+
+Install the dev dependencies and run the test suite (pure-function and
+security-guard coverage for the recon engines — no network required):
+
+```bash
+./venv/bin/pip install -r requirements-dev.txt
+./venv/bin/python -m pytest -q
+```
+
+## Reliability & security hardening
+
+- **Concurrent SQLite** — all connections go through `dbconn.connect()`, which
+  enables WAL journaling and a busy timeout so the background watchlist monitor
+  and live scans no longer race into `database is locked`.
+- **SSRF-guarded fetches** — every outbound request the app makes for
+  enrichment, avatar hashing, and email pivots goes through
+  `recon/safeweb.py`, which follows redirects but refuses any host that
+  resolves to private / loopback / link-local / reserved IP space (blocking the
+  cloud-metadata and internal-service SSRF class on deployments). Response
+  bodies are size-capped while streaming.
+- **Input validation** — email inputs are format-checked before any pivot runs,
+  so a malformed address can't trigger a wasted holehe run or a misleading
+  graph node.
+
 `run.sh` creates a local `venv` on first use, installs `requirements.txt`
 (FastAPI, uvicorn, `sherlock-project`), and starts uvicorn. Set `PORT=9000 ./run.sh`
 to use a different port.
@@ -171,11 +196,13 @@ v3 turns the app from a scanner into an investigation product: **one clue in
 identity graph → professional dossier → continuous monitoring.**
 
 - **Name → username candidates** (`recon/names.py`) — a 2-4 word full name
-  generates up to 20 ranked candidate handles (`firstlast`, `first.last`,
-  `flast`, `firstl`, `f.last`, `lastfirst`, … plus only the common digit
-  suffixes `1`/`01`/`123` — no speculative birth years). Lowercase ASCII,
-  transliteration-safe. Candidates are scanned against the curated ~40-site
-  high-value list and results are tagged `from_name` / `candidate`.
+  generates up to 24 ranked candidate handles (`firstlast`, `first.last`,
+  `flast`, `firstl`, `f.last`, `lastfirst`, … **plus nickname expansions** —
+  `Robert Smith` → `bobsmith`/`robsmith`/`bob.smith`, `Elizabeth Jones` →
+  `lizjones`/`bethjones`, from a curated diminutive table — plus only the
+  common digit suffixes `1`/`01`/`123`, no speculative birth years). Lowercase
+  ASCII, transliteration-safe. Candidates are scanned against the curated
+  ~40-site high-value list and results are tagged `from_name` / `candidate`.
 - **Phone pivot** (`recon/phone_pivot.py`) — offline `phonenumbers` parsing:
   validity, E.164, country/region, carrier, line type, timezones. No
   WhatsApp/Telegram presence checks (those need APIs we don't have).

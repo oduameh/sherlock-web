@@ -16,12 +16,9 @@ from typing import Any, Callable, Optional
 
 import httpx
 
-logger = logging.getLogger("recon.enrich")
+from recon import safeweb
 
-BROWSER_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
+logger = logging.getLogger("recon.enrich")
 
 MAX_BODY_BYTES = 512 * 1024  # stop reading after 512 KB
 MAX_ENRICH_PER_RUN = 40
@@ -158,11 +155,7 @@ async def enrich_profiles(rows: list[dict],
     sem = asyncio.Semaphore(CONCURRENCY)
     count = 0
 
-    async with httpx.AsyncClient(
-        timeout=TIMEOUT_S,
-        headers={"User-Agent": BROWSER_UA},
-        follow_redirects=True,
-    ) as client:
+    async with safeweb.async_client(timeout=TIMEOUT_S) as client:
 
         async def work(row: dict) -> None:
             nonlocal count

@@ -18,6 +18,7 @@ import sqlite3
 import time
 from typing import Any, Callable, Optional
 
+from dbconn import connect as db_connect
 from recon import engines
 from recon.email_pivot import holehe_available, holehe_scan
 from recon.names import generate_name_candidates
@@ -191,7 +192,7 @@ def _now() -> str:
 
 
 def _due_watches(db_path) -> list[dict]:
-    with sqlite3.connect(db_path) as conn:
+    with db_connect(db_path) as conn:
         rows = conn.execute(
             "SELECT id, label, inputs, interval_hours, last_run_at,"
             " last_signature FROM watchlist WHERE enabled = 1"
@@ -220,7 +221,7 @@ async def run_watch(db_path, watch: dict, sher_site_data: dict) -> int:
     """Run one watch: light scan, diff, alert. Returns # of alerts written."""
     wid = watch["id"]
     # Stamp last_run_at up front so a crash doesn't hot-loop the same watch.
-    with sqlite3.connect(db_path) as conn:
+    with db_connect(db_path) as conn:
         conn.execute("UPDATE watchlist SET last_run_at = ? WHERE id = ?",
                      (_now(), wid))
 
@@ -230,7 +231,7 @@ async def run_watch(db_path, watch: dict, sher_site_data: dict) -> int:
     baseline = not watch.get("last_run_at") and not old_sig
 
     alerts = [] if baseline else diff_signatures(old_sig, new_sig)
-    with sqlite3.connect(db_path) as conn:
+    with db_connect(db_path) as conn:
         for a in alerts:
             conn.execute(
                 "INSERT INTO watch_alerts"

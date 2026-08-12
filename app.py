@@ -22,9 +22,9 @@ import logging
 import os
 import re
 import secrets
-import sqlite3
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
@@ -32,6 +32,8 @@ logging.basicConfig(level=logging.INFO)
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+
+from dbconn import connect as db_connect
 
 from sherlock_project.notify import QueryNotify
 from sherlock_project.result import QueryStatus
@@ -51,6 +53,7 @@ try:
     from recon.permutations import generate_variants
     from recon.pipeline import run_pipeline
     from recon.report import render_report
+    from recon.validate import is_probably_email
 
     RECON_AVAILABLE = True
 except Exception as _recon_exc:  # pragma: no cover
@@ -63,7 +66,28 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "history.db"
 STATIC_DIR = BASE_DIR / "static"
 
-app = FastAPI(title="sherlock-web")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start (and cleanly stop) the background watchlist monitor."""
+    monitor_task = None
+    if RECON_AVAILABLE:
+        sher_light = recon_engines.sherlock_variant_site_data(SITE_DATA_ALL)
+        monitor_task = asyncio.create_task(
+            recon_monitor.monitor_loop(DB_PATH, sher_light)
+        )
+    try:
+        yield
+    finally:
+        if monitor_task is not None:
+            monitor_task.cancel()
+            try:
+                await monitor_task
+            except asyncio.CancelledError:
+                pass
+
+
+app = FastAPI(title="sherlock-web", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
 # Optional access gate (Railway deployments etc.)
@@ -110,7 +134,7 @@ NSFW_NAMES = {s.name for s in _ALL_SITES if s.is_nsfw}
 # ---------------------------------------------------------------------------
 
 def _init_db() -> None:
-    with sqlite3.connect(DB_PATH) as conn:
+    with db_connect(DB_PATH) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS runs (
@@ -156,7 +180,7 @@ _init_db()
 def save_run(username: str, found: int, total: int, results,
              kind: str = "sherlock", investigation_id: int = None) -> int:
     """Persist one completed per-username run. Called from the scan thread."""
-    with sqlite3.connect(DB_PATH) as conn:
+    with db_connect(DB_PATH) as conn:
         cur = conn.execute(
             "INSERT INTO runs (ts, username, found, total, results, kind,"
             " investigation_id) VALUES (?,?,?,?,?,?,?)",
@@ -175,7 +199,7 @@ def save_run(username: str, found: int, total: int, results,
 
 @app.get("/api/history")
 def get_history() -> list[dict]:
-    with sqlite3.connect(DB_PATH) as conn:
+    with db_connect(DB_PATH) as conn:
         rows = conn.execute(
             "SELECT id, ts, username, found, total, kind, investigation_id"
             " FROM runs ORDER BY id DESC LIMIT 50"
@@ -189,7 +213,7 @@ def get_history() -> list[dict]:
 
 @app.get("/api/history/{run_id}")
 def get_run(run_id: int) -> JSONResponse:
-    with sqlite3.connect(DB_PATH) as conn:
+    with db_connect(DB_PATH) as conn:
         row = conn.execute(
             "SELECT id, ts, username, found, total, results, kind,"
             " investigation_id FROM runs WHERE id = ?",
@@ -467,6 +491,11 @@ if RECON_AVAILABLE:
     ) -> StreamingResponse:
         email = email.strip()
         names = [u.strip() for u in re.split(r"[,\n]+", usernames) if u.strip()]
+        if email and not is_probably_email(email):
+            return StreamingResponse(
+                iter([f'event: fatal\ndata: {json.dumps({"message": f"invalid email: {email}"})}\n\n']),
+                media_type="text/event-stream",
+            )
         if not names and email:
             names = [email.split("@", 1)[0]]
         if not names and not email:
@@ -747,7 +776,7 @@ if RECON_AVAILABLE:
 
     @app.get("/api/recon/report/{run_id}")
     def recon_report(run_id: int) -> Response:
-        with sqlite3.connect(DB_PATH) as conn:
+        with db_connect(DB_PATH) as conn:
             row = conn.execute(
                 "SELECT ts, username, results, kind FROM runs WHERE id = ?",
                 (run_id,),
@@ -797,7 +826,7 @@ if RECON_AVAILABLE:
         return ", ".join(bits)
 
     def _get_investigation(inv_id: int):
-        with sqlite3.connect(DB_PATH) as conn:
+        with db_connect(DB_PATH) as conn:
             row = conn.execute(
                 "SELECT id, created_at, inputs, summary, status"
                 " FROM investigations WHERE id = ?",
@@ -814,7 +843,7 @@ if RECON_AVAILABLE:
 
     def _set_investigation(inv_id: int, status: str,
                            summary: dict | None = None) -> None:
-        with sqlite3.connect(DB_PATH) as conn:
+        with db_connect(DB_PATH) as conn:
             if summary is not None:
                 conn.execute(
                     "UPDATE investigations SET status = ?, summary = ?"
@@ -857,12 +886,17 @@ if RECON_AVAILABLE:
                           " phone"},
                 status_code=400,
             )
+        if inputs["email"] and not is_probably_email(inputs["email"]):
+            return JSONResponse(
+                {"error": f"'{inputs['email']}' is not a valid email address"},
+                status_code=400,
+            )
         # Parity with deep recon: an email-only investigation also scans the
         # local part as a username.
         if not usernames and inputs["email"] and not inputs["name"]:
             usernames = [inputs["email"].split("@", 1)[0]]
             inputs["usernames"] = usernames
-        with sqlite3.connect(DB_PATH) as conn:
+        with db_connect(DB_PATH) as conn:
             cur = conn.execute(
                 "INSERT INTO investigations (created_at, inputs, status)"
                 " VALUES (?,?, 'pending')",
@@ -977,7 +1011,7 @@ if RECON_AVAILABLE:
 
     @app.get("/api/watchlist")
     def list_watchlist() -> list[dict]:
-        with sqlite3.connect(DB_PATH) as conn:
+        with db_connect(DB_PATH) as conn:
             rows = conn.execute(
                 "SELECT id, created_at, label, inputs, interval_hours,"
                 " last_run_at, enabled FROM watchlist ORDER BY id DESC"
@@ -1017,7 +1051,7 @@ if RECON_AVAILABLE:
         interval = max(recon_monitor.MIN_INTERVAL_HOURS,
                        int(body.get("interval_hours")
                            or recon_monitor.DEFAULT_INTERVAL_HOURS))
-        with sqlite3.connect(DB_PATH) as conn:
+        with db_connect(DB_PATH) as conn:
             cur = conn.execute(
                 "INSERT INTO watchlist"
                 " (created_at, label, inputs, interval_hours, enabled)"
@@ -1031,7 +1065,7 @@ if RECON_AVAILABLE:
 
     @app.post("/api/watchlist/{watch_id}/toggle")
     def toggle_watch(watch_id: int) -> JSONResponse:
-        with sqlite3.connect(DB_PATH) as conn:
+        with db_connect(DB_PATH) as conn:
             row = conn.execute(
                 "SELECT enabled FROM watchlist WHERE id = ?", (watch_id,)
             ).fetchone()
@@ -1044,7 +1078,7 @@ if RECON_AVAILABLE:
 
     @app.delete("/api/watchlist/{watch_id}")
     def delete_watch(watch_id: int) -> JSONResponse:
-        with sqlite3.connect(DB_PATH) as conn:
+        with db_connect(DB_PATH) as conn:
             conn.execute("DELETE FROM watch_alerts WHERE watch_id = ?",
                          (watch_id,))
             cur = conn.execute("DELETE FROM watchlist WHERE id = ?",
@@ -1063,7 +1097,7 @@ if RECON_AVAILABLE:
         if unseen:
             sql += " WHERE a.seen = 0"
         sql += " ORDER BY a.id DESC LIMIT 100"
-        with sqlite3.connect(DB_PATH) as conn:
+        with db_connect(DB_PATH) as conn:
             rows = conn.execute(sql).fetchall()
         return [
             {"id": r[0], "watch_id": r[1], "created_at": r[2], "kind": r[3],
@@ -1079,7 +1113,7 @@ if RECON_AVAILABLE:
         except Exception:
             body = {}
         ids = (body or {}).get("ids") or []
-        with sqlite3.connect(DB_PATH) as conn:
+        with db_connect(DB_PATH) as conn:
             if ids:
                 conn.execute(
                     f"UPDATE watch_alerts SET seen = 1 WHERE id IN"
@@ -1090,14 +1124,8 @@ if RECON_AVAILABLE:
                 conn.execute("UPDATE watch_alerts SET seen = 1 WHERE seen = 0")
         return JSONResponse({"ok": True})
 
-    # --- background monitor ---------------------------------------------------
-
-    @app.on_event("startup")
-    async def start_monitor() -> None:
-        sher_light = recon_engines.sherlock_variant_site_data(SITE_DATA_ALL)
-        asyncio.create_task(
-            recon_monitor.monitor_loop(DB_PATH, sher_light)
-        )
+    # The background watchlist monitor is started from the app lifespan handler
+    # (see ``lifespan`` above), which also cancels it cleanly on shutdown.
 
 else:
 

@@ -14,20 +14,16 @@ import logging
 import re
 from typing import Any, Optional
 
-import httpx
+from recon import safeweb
 
 logger = logging.getLogger("recon.correlate")
-
-BROWSER_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
 
 AVATAR_HAMMING_MAX = 5       # <= this on an 8x8 average hash = "same avatar"
 NAME_SIM_MIN = 0.75          # difflib ratio threshold
 BIO_JACCARD_MIN = 0.30       # token-overlap threshold (bios >= 5 words)
 MAX_AVATARS = 30
 AVATAR_TIMEOUT_S = 8
+AVATAR_MAX_BYTES = 5 * 1024 * 1024
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
@@ -38,7 +34,7 @@ def average_hash(image_bytes: bytes) -> Optional[int]:
         from PIL import Image
 
         img = Image.open(io.BytesIO(image_bytes)).convert("L").resize((8, 8))
-        pixels = list(img.getdata())
+        pixels = list(img.tobytes())  # 64 grayscale bytes, one per pixel
         avg = sum(pixels) / len(pixels)
         bits = 0
         for p in pixels:
@@ -93,19 +89,16 @@ async def _download_avatars(rows: list[dict]) -> None:
     """Attach ``avatar_hash`` to rows that have an avatar URL (in place)."""
     sem = asyncio.Semaphore(5)
     targets = [r for r in rows if _avatar_url(r)][:MAX_AVATARS]
-    async with httpx.AsyncClient(
-        timeout=AVATAR_TIMEOUT_S,
-        headers={"User-Agent": BROWSER_UA},
-        follow_redirects=True,
-    ) as client:
+    async with safeweb.async_client(timeout=AVATAR_TIMEOUT_S) as client:
 
         async def one(row: dict) -> None:
             url = _avatar_url(row)
             try:
                 async with sem:
-                    resp = await client.get(url)
-                if resp.status_code == 200 and len(resp.content) <= 10 * 1024 * 1024:
-                    h = average_hash(resp.content)
+                    content = await safeweb.fetch_capped(
+                        client, url, AVATAR_MAX_BYTES)
+                if content:
+                    h = average_hash(content)
                     if h is not None:
                         row["avatar_hash"] = h
             except Exception:

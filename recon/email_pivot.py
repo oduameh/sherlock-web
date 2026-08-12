@@ -12,14 +12,9 @@ import hashlib
 import logging
 from typing import Any, Callable, Optional
 
-import httpx
+from recon import safeweb
 
 logger = logging.getLogger("recon.email_pivot")
-
-BROWSER_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
 
 # Rate-sensitivity knobs: holehe-style checks run sequentially.
 HOLEHE_DELAY_S = 0.4
@@ -31,9 +26,7 @@ async def gravatar_lookup(email: str) -> Optional[dict]:
     digest = hashlib.md5(email.strip().lower().encode("utf-8")).hexdigest()
     url = f"https://www.gravatar.com/{digest}.json"
     try:
-        async with httpx.AsyncClient(
-            timeout=10, headers={"User-Agent": BROWSER_UA}, follow_redirects=True
-        ) as client:
+        async with safeweb.async_client(timeout=10) as client:
             resp = await client.get(url)
         if resp.status_code != 200:
             return None
@@ -101,11 +94,7 @@ async def holehe_scan(email: str, on_result: Callable[[dict], None],
     if only is not None:
         functions = [fn for fn in functions if fn.__name__.lower() in only]
 
-    async with httpx.AsyncClient(
-        timeout=HOLEHE_MODULE_TIMEOUT_S,
-        headers={"User-Agent": BROWSER_UA},
-        follow_redirects=True,
-    ) as client:
+    async with safeweb.async_client(timeout=HOLEHE_MODULE_TIMEOUT_S) as client:
         for fn in functions:
             site = fn.__name__
             out: list = []

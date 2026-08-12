@@ -28,6 +28,7 @@ from recon.enrich import enrich_profiles
 from recon.names import generate_name_candidates
 from recon.permutations import generate_variants
 from recon.phone_pivot import phone_intel
+from recon.validate import is_probably_email
 
 logger = logging.getLogger("recon.pipeline")
 
@@ -113,6 +114,12 @@ async def run_pipeline(
     name = (name or "").strip()
     email = (email or "").strip()
     phone = (phone or "").strip()
+
+    # Only pivot on a well-formed address; a malformed one would waste a
+    # rate-limited holehe run and draw a misleading email node.
+    if email and not is_probably_email(email):
+        logger.info("skipping email pivot: %r is not a valid email", email)
+        email = ""
 
     # --- shared run state (mutated on the event loop only) -----------------
     rows: dict[tuple[str, str], dict] = {}

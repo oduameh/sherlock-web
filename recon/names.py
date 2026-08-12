@@ -6,9 +6,9 @@ dependencies, ASCII-only lowercase output (transliteration-safe: accents are
 stripped via NFKD, anything non [a-z] becomes a separator or is dropped).
 
 Ranking is by commonness: plain ``firstlast`` first, separated forms next,
-initial-based forms after, digit-suffixed forms (only the common 1/01/123)
-last. Birth-year style digits are deliberately NOT generated — too
-speculative.
+initial-based forms after, then nickname-based forms (Robert -> bob/rob, ...)
+and finally digit-suffixed forms (only the common 1/01/123). Birth-year style
+digits are deliberately NOT generated — too speculative.
 """
 
 from __future__ import annotations
@@ -16,9 +16,49 @@ from __future__ import annotations
 import re
 import unicodedata
 
-MAX_CANDIDATES = 20
+MAX_CANDIDATES = 24
 
 _DIGIT_SUFFIXES = ["1", "01", "123"]
+
+# Common English given-name -> nickname expansions. People very often register
+# handles under a diminutive rather than their formal first name, so expanding
+# these materially raises the hit rate on name-based investigations. Kept to
+# high-confidence, widely-used forms only (noise here costs scan time).
+_NICKNAMES: dict[str, list[str]] = {
+    "abigail": ["abby"], "alexander": ["alex", "xander"],
+    "alexandra": ["alex", "lexi", "sasha"], "andrew": ["andy", "drew"],
+    "anthony": ["tony"], "benjamin": ["ben", "benny"],
+    "catherine": ["cathy", "kate", "cat"], "charles": ["charlie", "chuck"],
+    "christina": ["tina"], "christine": ["chris", "chrissy"],
+    "christopher": ["chris", "topher"], "cynthia": ["cindy"],
+    "daniel": ["dan", "danny"], "david": ["dave", "davey"],
+    "deborah": ["deb", "debbie"], "edward": ["ed", "eddie", "ted"],
+    "elizabeth": ["liz", "beth", "eliza", "lizzie", "betty"],
+    "frederick": ["fred", "freddie"], "gregory": ["greg"],
+    "isabella": ["bella", "izzy"], "jacob": ["jake"],
+    "james": ["jim", "jamie", "jimmy"], "jennifer": ["jen", "jenny"],
+    "jessica": ["jess", "jessie"], "john": ["jon", "johnny", "jack"],
+    "jonathan": ["jon", "jonny"], "joseph": ["joe", "joey"],
+    "joshua": ["josh"], "katherine": ["kate", "katie", "kathy", "kat"],
+    "kenneth": ["ken", "kenny"], "kimberly": ["kim"],
+    "lawrence": ["larry"], "margaret": ["maggie", "meg", "peggy"],
+    "matthew": ["matt"], "michael": ["mike", "mikey"],
+    "nicholas": ["nick", "nico"], "pamela": ["pam"],
+    "patricia": ["pat", "patty", "trish"], "patrick": ["pat", "paddy"],
+    "peter": ["pete"], "rebecca": ["becca", "becky"],
+    "richard": ["rick", "rich", "richie"], "robert": ["rob", "bob", "bobby"],
+    "ronald": ["ron", "ronnie"], "samantha": ["sam", "sammy"],
+    "samuel": ["sam", "sammy"], "stephanie": ["steph"],
+    "stephen": ["steve"], "steven": ["steve"], "susan": ["sue", "suzie"],
+    "theodore": ["theo", "ted", "teddy"], "thomas": ["tom", "tommy"],
+    "timothy": ["tim", "timmy"], "victoria": ["vicky", "tori"],
+    "vincent": ["vince"], "william": ["will", "bill", "billy", "liam"],
+    "zachary": ["zach", "zack"],
+}
+
+# Cap how many nicknames we expand per name so a name like "Elizabeth" doesn't
+# crowd out every other pattern within the candidate budget.
+_MAX_NICKNAMES = 4
 
 
 def _ascii_words(name: str) -> list[str]:
@@ -70,6 +110,14 @@ def generate_name_candidates(full_name: str,
         add(first + middles[0] + last)    # johnqsmith
         add(fi + mi + last)               # jqsmith
         add(first + mi + last)            # johnqsmith (initial form)
+
+    # Nickname-based forms (robert smith -> bobsmith, bob.smith, ...). Ranked
+    # above digit suffixes because a diminutive handle is far more likely than
+    # "firstlast123".
+    for nick in _NICKNAMES.get(first, [])[:_MAX_NICKNAMES]:
+        add(nick + last)                  # bobsmith
+        add(nick + "." + last)            # bob.smith
+        add(nick + "_" + last)            # bob_smith
 
     # Common digit suffixes on the two most common bases (no birth years).
     for suffix in _DIGIT_SUFFIXES:

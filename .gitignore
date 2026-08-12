@@ -1,6 +1,9 @@
 venv/
 __pycache__/
+.pytest_cache/
 history.db
+history.db-wal
+history.db-shm
 android/.gradle/
 android/build/
 android/app/build/
