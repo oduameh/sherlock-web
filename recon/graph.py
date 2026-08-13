@@ -1,9 +1,10 @@
 """Build the interactive identity-graph JSON from an investigation summary.
 
 Nodes: one central person node, account nodes (sized by confidence, colored
-by engine count client-side), one email node, one phone node, and email
-registration nodes from holehe hits. Edges carry a confidence score and a
-human-readable rationale, mostly derived from the correlator.
+by engine count client-side), one email node, one phone node, and registration
+nodes from account-existence hits — holehe on the email, ignorant on the phone.
+Edges carry a confidence score and a human-readable rationale, mostly derived
+from the correlator.
 
 Confidence heuristic (advisory):
   account node    45 base, +25 two-engine confirmation, +20 enrichment with
@@ -18,6 +19,7 @@ from __future__ import annotations
 from typing import Optional
 
 from recon.confidence import account_confidence
+from recon.engines import normalize_site
 
 
 def _avatar(row: dict) -> Optional[str]:
@@ -62,6 +64,7 @@ def build_graph(summary: dict) -> dict:
 
     # --- account nodes ------------------------------------------------------
     url_to_id: dict[str, str] = {}
+    acct_by_site: dict[str, str] = {}   # normalized site -> account node id
     all_rows = ((summary.get("accounts") or [])
                 + (summary.get("variants") or [])
                 + (summary.get("name_accounts") or []))
@@ -97,6 +100,8 @@ def build_graph(summary: dict) -> dict:
         })
         if row.get("url"):
             url_to_id[row["url"]] = nid
+        if row.get("site"):
+            acct_by_site.setdefault(normalize_site(row["site"]), nid)
         add_edge("person", nid, conf, rationale)
 
     # --- email node + holehe registration nodes ------------------------------
@@ -131,7 +136,7 @@ def build_graph(summary: dict) -> dict:
             add_edge("email", nid, 70,
                      "registered-account check positive (holehe)")
 
-    # --- phone node -----------------------------------------------------------
+    # --- phone node + phone-registration nodes -------------------------------
     phone = summary.get("phone")
     if phone:
         add_node({
@@ -141,6 +146,27 @@ def build_graph(summary: dict) -> dict:
             "data": phone,
         })
         add_edge("person", "phone", 100, "input phone")
+        # Account-existence hits (ignorant): each positive platform becomes a
+        # registration node hanging off the phone — the same pattern as holehe
+        # email registrations. Where the platform matches a username-discovered
+        # account, also link the phone straight to that account (correlation).
+        for a in phone.get("accounts") or []:
+            if not a.get("exists"):
+                continue
+            site = a.get("site")
+            nid = f"reg:phone:{site}"
+            add_node({
+                "id": nid, "type": "registration",
+                "label": site, "sublabel": a.get("domain"),
+                "confidence": 70,
+                "data": {"domain": a.get("domain"), "via": "phone",
+                         "method": a.get("method")},
+            })
+            add_edge("phone", nid, 70, "registered by phone (ignorant)")
+            acct_id = acct_by_site.get(normalize_site(site or ""))
+            if acct_id:
+                add_edge("phone", acct_id, 60,
+                         "number registered on a discovered account's platform")
 
     # --- domain / infrastructure nodes ---------------------------------------
     domain_state = summary.get("domain")

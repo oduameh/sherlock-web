@@ -978,6 +978,58 @@
     c.rows.appendChild(row);
   }
 
+  // Sub-heading inside a result card (used by the phone section's blocks).
+  function phoneSubhead(text) {
+    var h = document.createElement("div");
+    h.className = "phone-subhead";
+    h.textContent = text;
+    return h;
+  }
+
+  // Ensure (and return) the streamed "Registered platforms" container in the
+  // phone section, so live phone_account events and a reloaded p.accounts land
+  // in the same place — above the reverse-lookup and footprint blocks.
+  function ensurePhoneAccounts() {
+    var c = invSection("phone", "Phone intelligence", "phone");
+    var wrap = c.rows.querySelector(".phone-accounts");
+    if (!wrap) {
+      var head = phoneSubhead("Registered platforms");
+      head.style.display = "none";
+      wrap = document.createElement("div");
+      wrap.className = "phone-accounts";
+      wrap._head = head;
+      // Insert before the reverse-lookup/footprint blocks if they already exist.
+      var anchor = c.rows.querySelector(".phone-links-block");
+      c.rows.insertBefore(head, anchor);
+      c.rows.insertBefore(wrap, anchor);
+    }
+    return wrap;
+  }
+
+  function phoneAccountRow(a) {
+    var row = document.createElement("div");
+    row.className = "rrow";
+    var s = document.createElement("span");
+    s.className = "site " + (a.exists ? "email-hit" : "email-miss");
+    s.textContent = a.site || "?";
+    var st = document.createElement("span");
+    st.className = a.exists ? "email-hit" : "email-miss";
+    st.textContent = a.exists
+      ? ("registered" + (a.domain ? " — " + a.domain : ""))
+      : (a.error ? "error: " + a.error
+                 : (a.rate_limit ? "rate limited" : "not registered"));
+    row.appendChild(s); row.appendChild(st);
+    return row;
+  }
+
+  // Live phone_account events (mirror of addHoleheRow): show positives + errors.
+  function addPhoneAccountRow(d) {
+    if (!d.exists && !d.error) return;
+    var wrap = ensurePhoneAccounts();
+    if (wrap._head) wrap._head.style.display = "";
+    wrap.appendChild(phoneAccountRow(d));
+  }
+
   function renderPhoneIntel(p) {
     var c = invSection("phone", "Phone intelligence", "phone");
     c.status.textContent = "done";
@@ -993,20 +1045,79 @@
     }
     if (p.error) {
       addRow("Error", p.error, "phone-invalid");
-    } else {
-      addRow("Valid", p.valid ? "yes" : (p.possible ? "possible, not valid" : "no"),
-             p.valid ? "phone-valid" : "phone-invalid");
-      addRow("E.164", p.e164);
-      addRow("International", p.international);
-      addRow("Country", p.country);
-      addRow("Region", p.region);
-      addRow("Location", p.location);
-      addRow("Carrier", p.carrier);
-      addRow("Line type", p.line_type);
-      addRow("Timezones", (p.timezones || []).join(", "));
-      addRow("Note", p.note);
+      c.rows.appendChild(dl);
+      return;
     }
+    addRow("Valid", p.valid ? "yes" : (p.possible ? "possible, not valid" : "no"),
+           p.valid ? "phone-valid" : "phone-invalid");
+    addRow("E.164", p.e164);
+    addRow("International", p.international);
+    addRow("Country", p.country);
+    addRow("Region", p.region);
+    addRow("Location", p.location);
+    addRow("Carrier", p.carrier);
+    addRow("Line type", p.line_type);
+    addRow("Timezones", (p.timezones || []).join(", "));
+    addRow("Note", p.note);
     c.rows.appendChild(dl);
+
+    // Registered platforms (reloaded runs carry them on p.accounts; live runs
+    // stream them via addPhoneAccountRow into the same container).
+    ensurePhoneAccounts();
+    (p.accounts || []).forEach(addPhoneAccountRow);
+
+    // Reverse-phone lookup links (people-search brokers — manual leads).
+    var rev = p.reverse_lookup || [];
+    if (rev.length) {
+      var rblock = document.createElement("div");
+      rblock.className = "phone-links-block";
+      rblock.appendChild(phoneSubhead("Reverse-phone lookup"));
+      var rhint = document.createElement("div");
+      rhint.className = "hint";
+      rhint.textContent = "Direct reverse-phone searches on people-search brokers — " +
+        "where a name/address may be listed. Manual leads to review; each links its opt-out.";
+      rblock.appendChild(rhint);
+      rev.forEach(function (b) {
+        var row = document.createElement("div");
+        row.className = "brow";
+        var name = document.createElement("span");
+        name.className = "site"; name.textContent = b.name;
+        var links = document.createElement("span");
+        links.className = "brow-links";
+        if (b.search_url) {
+          var sl = document.createElement("a");
+          sl.href = b.search_url; sl.target = "_blank"; sl.rel = "noopener noreferrer";
+          sl.textContent = "reverse lookup"; links.appendChild(sl);
+        }
+        if (b.optout_url) {
+          var ol = document.createElement("a");
+          ol.href = b.optout_url; ol.target = "_blank"; ol.rel = "noopener noreferrer";
+          ol.textContent = "opt out"; links.appendChild(ol);
+        }
+        row.appendChild(name); row.appendChild(links);
+        rblock.appendChild(row);
+      });
+      c.rows.appendChild(rblock);
+    }
+
+    // Footprint leads (search dorks, spam DBs, messaging presence).
+    var fp = p.footprint || [];
+    if (fp.length) {
+      var fblock = document.createElement("div");
+      fblock.className = "phone-links-block";
+      fblock.appendChild(phoneSubhead("Footprint leads"));
+      var flist = document.createElement("div");
+      flist.className = "phone-links";
+      fp.forEach(function (f) {
+        var a = document.createElement("a");
+        a.className = "phone-link phone-link-" + (f.kind || "search");
+        a.href = f.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+        a.textContent = f.label;
+        flist.appendChild(a);
+      });
+      fblock.appendChild(flist);
+      c.rows.appendChild(fblock);
+    }
   }
 
   function renderDomainIntel(d) {
@@ -1303,6 +1414,9 @@
     });
     invEs.addEventListener("phone_intel", function (e) {
       renderPhoneIntel(JSON.parse(e.data));
+    });
+    invEs.addEventListener("phone_account", function (e) {
+      addPhoneAccountRow(JSON.parse(e.data));
     });
     invEs.addEventListener("domain_intel", function (e) {
       renderDomainIntel(JSON.parse(e.data));

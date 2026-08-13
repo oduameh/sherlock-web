@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -28,6 +29,21 @@ from urllib.parse import quote
 from recon import safeweb
 
 logger = logging.getLogger("recon.brokers")
+
+# Reverse-phone deep links for the people-search brokers that support them.
+# These are the closest legal thing to a "reverse lookup": the number pre-filled
+# on the broker's own search page (the analyst clicks through; we never scrape).
+# Reverse-phone is a US/North-American-plan feature, so it is gated on region.
+# Tokens: {phone}=national digits, {dashed}=xxx-xxx-xxxx, {e164}, {e164_digits}.
+_REVERSE_PHONE_TEMPLATES: dict[str, str] = {
+    "TruePeopleSearch": "https://www.truepeoplesearch.com/resultphone?phoneno={phone}",
+    "FastPeopleSearch": "https://www.fastpeoplesearch.com/{dashed}",
+    "ThatsThem": "https://thatsthem.com/phone/{dashed}",
+    "Whitepages": "https://www.whitepages.com/phone/{e164}",
+    "Spokeo": "https://www.spokeo.com/{dashed}",
+    "USPhonebook": "https://www.usphonebook.com/{dashed}",
+    "Radaris": "https://radaris.com/p/reverse-phone/?ph={phone}",
+}
 
 _DATA_PATH = Path(__file__).resolve().parent / "data" / "data_brokers.json"
 DROP_PORTAL = "https://consumer.drop.privacy.ca.gov"
@@ -91,6 +107,46 @@ def build_search_url(broker: dict, first, last, name, city, state) -> Optional[s
                 return None
             url = url.replace(token, quote(str(value)))
     return url
+
+
+def reverse_phone_links(e164: Optional[str],
+                        region: Optional[str] = None) -> list[dict]:
+    """Direct reverse-phone search links for the people-search brokers that
+    support them, reusing the registry's opt-out metadata. Offline (pure link
+    building) — the number is where a person's name/address actually lives, so
+    we point at those brokers rather than scraping them.
+
+    Reverse-phone lookup is a North-American-plan feature; for non-US numbers we
+    return nothing (the footprint search dorks still apply). Never raises.
+    """
+    if not e164:
+        return []
+    digits = re.sub(r"\D", "", e164)
+    if not digits:
+        return []
+    # National significant number (drop the US country code) for {phone}/{dashed}.
+    nsn = digits[1:] if len(digits) == 11 and digits.startswith("1") else digits
+    if region and region != "US":
+        return []
+    if len(nsn) != 10:  # reverse-phone templates below assume a 10-digit NANP number
+        return []
+    dashed = f"{nsn[0:3]}-{nsn[3:6]}-{nsn[6:]}"
+    by_name = {b["name"]: b for b in load_brokers()}
+    out: list[dict] = []
+    for name, tmpl in _REVERSE_PHONE_TEMPLATES.items():
+        b = by_name.get(name, {})
+        url = (tmpl.replace("{phone}", nsn)
+                   .replace("{dashed}", dashed)
+                   .replace("{e164}", quote(e164))
+                   .replace("{e164_digits}", digits))
+        out.append({
+            "name": name,
+            "category": b.get("category") or "people-search",
+            "owner": b.get("owner"),
+            "optout_url": b.get("optout_url"),
+            "search_url": url,
+        })
+    return out
 
 
 async def _get_capped(client, url: str) -> tuple[int, str]:
