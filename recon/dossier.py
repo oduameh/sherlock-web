@@ -450,10 +450,20 @@ def render_dossier(inv: dict, summary: dict, *,
         p.append(f"<p>Registered-account checks: <b>{len(hits)} positive</b> "
                  f"/ {len(holehe)} sites checked.</p>")
         if hits:
-            p.append("<table class='data'><tr><th>Service</th><th>Domain</th></tr>")
+            p.append("<table class='data'><tr><th>Service</th><th>Domain</th>"
+                     "<th>Recovery trail (masked)</th></tr>")
             for h in hits:
+                rec_bits = []
+                if h.get("email_recovery"):
+                    rec_bits.append("email " + _e(h["email_recovery"]))
+                if h.get("phone_number"):
+                    ph = "phone " + _e(h["phone_number"])
+                    if h.get("corroborates_phone"):
+                        ph += " <b>&harr; matches subject</b>"
+                    rec_bits.append(ph)
+                rec = " &middot; ".join(rec_bits) or "<span class='dim'>&mdash;</span>"
                 p.append(f"<tr><td><b>{_e(h.get('site'))}</b></td>"
-                         f"<td>{_e(h.get('domain'))}</td></tr>")
+                         f"<td>{_e(h.get('domain'))}</td><td>{rec}</td></tr>")
             p.append("</table>")
 
     # -- phone intel -----------------------------------------------------------------

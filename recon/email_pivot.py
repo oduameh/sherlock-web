@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 from typing import Callable, Optional
 
 from recon import safeweb
@@ -19,6 +20,37 @@ logger = logging.getLogger("recon.email_pivot")
 # Rate-sensitivity knobs: holehe-style checks run sequentially.
 HOLEHE_DELAY_S = 0.4
 HOLEHE_MODULE_TIMEOUT_S = 15
+
+
+def _digits(s: Optional[str]) -> str:
+    return re.sub(r"\D", "", s or "")
+
+
+def masked_recovery_matches_phone(masked: Optional[str],
+                                  subject_e164: Optional[str]) -> bool:
+    """True when a holehe masked recovery phone's visible digits match the
+    subject's number.
+
+    Password-reset flows reveal ~the last 2-4 digits of the account's recovery
+    phone (e.g. ``"•••-•••-2671"``). We require the last 3-4 visible digits to
+    equal the subject's last digits — enough to be a meaningful trail, strict
+    enough to avoid coincidental 2-digit collisions.
+    """
+    vis = _digits(masked)
+    subj = _digits(subject_e164)
+    if len(vis) < 3 or len(subj) < 3:
+        return False
+    n = min(len(vis), 4)
+    return vis[-n:] == subj[-n:]
+
+
+def annotate_recovery(entry: dict, subject_e164: Optional[str]) -> dict:
+    """Flag a holehe entry whose masked recovery phone corroborates the subject
+    phone — a real phone↔email↔account trail. Mutates and returns the entry."""
+    if entry.get("phone_number") and masked_recovery_matches_phone(
+            entry.get("phone_number"), subject_e164):
+        entry["corroborates_phone"] = True
+    return entry
 
 
 async def gravatar_lookup(email: str) -> Optional[dict]:

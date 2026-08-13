@@ -131,7 +131,8 @@ def build_graph(summary: dict) -> dict:
                 "confidence": 70,
                 "data": {"domain": h.get("domain"),
                          "email_recovery": h.get("email_recovery"),
-                         "phone_number": h.get("phone_number")},
+                         "phone_number": h.get("phone_number"),
+                         "corroborates_phone": h.get("corroborates_phone")},
             })
             add_edge("email", nid, 70,
                      "registered-account check positive (holehe)")
@@ -146,6 +147,14 @@ def build_graph(summary: dict) -> dict:
             "data": phone,
         })
         add_edge("person", "phone", 100, "input phone")
+        # Trail stitching: an email-derived account whose masked recovery phone
+        # matches this number links straight to the phone (phone↔email↔account).
+        for h in (summary.get("email") or {}).get("holehe") or []:
+            if h.get("exists") and h.get("corroborates_phone"):
+                reg_id = f"reg:{h.get('site')}"
+                if reg_id in node_ids:
+                    add_edge(reg_id, "phone", 80,
+                             "account's recovery phone matches the subject number")
         # Account-existence hits (ignorant): each positive platform becomes a
         # registration node hanging off the phone — the same pattern as holehe
         # email registrations. Where the platform matches a username-discovered

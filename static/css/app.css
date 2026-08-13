@@ -959,6 +959,31 @@ select { appearance: auto; }
 .email-hit { color: var(--success); }
 .email-miss { color: var(--text-3); }
 
+/* masked recovery trail leaked by a reset flow (a partial lead, not a profile) */
+.recovery-hint {
+  color: var(--text-3);
+  font-size: var(--fs-11);
+  margin-top: 4px;
+  line-height: 1.5;
+  word-break: break-all;
+  font-family: var(--font-mono);
+}
+.trail-badge {
+  display: inline-block;
+  font-size: var(--fs-10);
+  font-weight: 700;
+  font-family: var(--font-sans);
+  color: var(--success);
+  border: 1px solid rgba(67, 207, 143, 0.5);
+  background: var(--success-soft);
+  border-radius: 4px;
+  padding: 0 6px;
+  margin-left: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+
 /* phone / domain intel */
 .phone-grid {
   display: grid;
