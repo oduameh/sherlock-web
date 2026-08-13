@@ -972,6 +972,41 @@ select { appearance: auto; }
 .phone-valid { color: var(--success); font-weight: 700; }
 .phone-invalid { color: var(--warn); font-weight: 700; }
 
+/* phone pivot: registered platforms, reverse-lookup, footprint leads */
+.phone-subhead {
+  font-size: var(--fs-11);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-3);
+  padding: var(--sp-3) var(--sp-4) 4px;
+  border-top: 1px solid var(--border);
+  margin-top: var(--sp-2);
+}
+.phone-links-block .hint { padding: 0 var(--sp-4) var(--sp-2); margin-top: 0; }
+.phone-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  padding: 4px var(--sp-4) var(--sp-4);
+}
+.phone-link {
+  font-size: var(--fs-12);
+  color: var(--accent);
+  text-decoration: none;
+  border: 1px solid var(--border-input);
+  border-radius: var(--r-pill);
+  padding: 4px 11px;
+  background: var(--bg-2);
+  transition: color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
+  white-space: nowrap;
+}
+.phone-link:hover { color: var(--accent-strong); border-color: var(--accent); background: var(--accent-soft); }
+.phone-link-messaging { color: var(--success); }
+.phone-link-messaging:hover { color: var(--success); border-color: rgba(67, 207, 143, 0.5); background: var(--success-soft); }
+.phone-link-reputation { color: var(--warn); }
+.phone-link-reputation:hover { color: var(--warn); border-color: rgba(230, 171, 62, 0.5); background: var(--warn-soft); }
+
 /* correlation clusters */
 .cluster-card {
   background: var(--bg-2);

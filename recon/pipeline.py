@@ -29,6 +29,7 @@ from recon.enrich import enrich_profiles
 from recon.domain_pivot import domain_from_email, domain_intel
 from recon.names import generate_name_candidates
 from recon.permutations import generate_variants
+from recon.phone_accounts import ignorant_available, ignorant_scan
 from recon.phone_pivot import phone_intel
 from recon.router import RunRouter, retry_delay
 from recon.validate import is_probably_email
@@ -439,6 +440,23 @@ async def run_pipeline(
         broker_state.update(data)
         emit("broker_exposure", data)
 
+    async def phone_accounts_worker(e164):
+        """Phone analogue of email_worker: which platforms is the number
+        registered on (ignorant). Streams per-site hits, accumulates onto
+        phone_state so they persist under summary["phone"]["accounts"]."""
+        phone_state.setdefault("accounts", [])
+        if ignorant_available():
+            def on_hit(entry):
+                phone_state["accounts"].append(entry)
+                emit("phone_account", {"phone": e164, **entry})
+
+            await ignorant_scan(e164, on_hit)
+        else:
+            emit("phone_account", {"phone": e164,
+                                   "error": "ignorant not installed"})
+        hits = sum(1 for a in phone_state["accounts"] if a.get("exists"))
+        emit("phone_account_done", {"phone": e164, "hits": hits})
+
     # --- plan --------------------------------------------------------------
     candidates = generate_name_candidates(name) if name else []
 
@@ -480,9 +498,15 @@ async def run_pipeline(
     if candidates:
         emit("candidates", {"name": name, "candidates": candidates})
 
-    # Phone intel is offline — emit it immediately.
+    # Phone intel is offline — parse, attach reverse-lookup links, emit
+    # immediately. A valid number then pivots on account-existence (ignorant),
+    # which runs concurrently like the email pivot (started below).
+    phone_task = None
     if phone:
         phone_state = phone_intel(phone)
+        if phone_state.get("valid"):
+            phone_state["reverse_lookup"] = brokers.reverse_phone_links(
+                phone_state.get("e164"), phone_state.get("region"))
         emit("phone_intel", phone_state)
 
     # Base username scans (tri-engine, full site sets).
@@ -521,6 +545,10 @@ async def run_pipeline(
     # Data-broker exposure keys on a real name (brokers index by name/address).
     broker_task = (asyncio.create_task(broker_worker(name, location))
                    if name else None)
+    # Phone account-existence pivot: only worth running on a valid number.
+    if phone and phone_state.get("valid") and phone_state.get("e164"):
+        phone_task = asyncio.create_task(
+            phone_accounts_worker(phone_state["e164"]))
 
     # --- phases ------------------------------------------------------------
     await wait_all(base_events)
@@ -571,13 +599,15 @@ async def run_pipeline(
     clusters = await correlate(all_rows)
     emit("correlation", {"clusters": clusters})
 
-    # Wait for the email + domain + broker pivots before persisting.
+    # Wait for the email + domain + broker + phone pivots before persisting.
     if email_task is not None:
         await email_task
     if domain_task is not None:
         await domain_task
     if broker_task is not None:
         await broker_task
+    if phone_task is not None:
+        await phone_task
 
     summary = {
         "params": {
@@ -603,6 +633,8 @@ async def run_pipeline(
         "clusters": len(clusters),
         "email_hits": sum(1 for h in email_state["holehe"] if h.get("exists")),
         "phone": bool(phone_state),
+        "phone_accounts": sum(
+            1 for a in (phone_state.get("accounts") or []) if a.get("exists")),
         "domain": bool(domain_state),
         "brokers": (broker_state.get("summary", {}).get("total")
                     if broker_state else 0),

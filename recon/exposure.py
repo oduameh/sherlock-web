@@ -81,6 +81,7 @@ def footprint_score(summary: dict) -> dict:
       gravatar profile      10 pts flat
       enriched profiles     2 pts each, capped at 15  (name/avatar extracted)
       valid phone number    10 pts flat
+      phone registrations   5 pts each, capped at 15  (ignorant positives)
     """
     accounts = summary.get("accounts") or []
     variants = summary.get("variants") or []
@@ -90,6 +91,7 @@ def footprint_score(summary: dict) -> dict:
 
     n_accts = len(accounts) + len(variants) + len(name_rows)
     holehe_hits = sum(1 for h in (email.get("holehe") or []) if h.get("exists"))
+    phone_regs = sum(1 for a in (phone.get("accounts") or []) if a.get("exists"))
     enriched = sum(
         1 for r in accounts + variants + name_rows
         if (r.get("enrichment") or {}).get("jsonld_name")
@@ -101,6 +103,7 @@ def footprint_score(summary: dict) -> dict:
         "gravatar profile present": 10 if email.get("gravatar") else 0,
         f"enriched profiles ({enriched} × 2, cap 15)": min(15, enriched * 2),
         "valid phone number": 10 if phone.get("valid") else 0,
+        f"phone registrations ({phone_regs} × 5, cap 15)": min(15, phone_regs * 5),
     }
     return {"score": min(100, sum(parts.values())), "parts": parts}
 
@@ -171,6 +174,7 @@ def exposure_summary(summary: dict) -> dict[str, Any]:
         if (r.get("verification") or {}).get("status") == "likely_false_positive"
     )
     holehe_hits = sum(1 for h in (email.get("holehe") or []) if h.get("exists"))
+    phone_regs = sum(1 for a in (phone.get("accounts") or []) if a.get("exists"))
     high_conf_links = sum(1 for c in clusters if (c.get("confidence") or 0) >= 60)
 
     # Category breakdown (worst-first by count, then name for stability).
@@ -227,6 +231,7 @@ def exposure_summary(summary: dict) -> dict[str, Any]:
         "verified": verified,
         "flagged": flagged,
         "email_registrations": holehe_hits,
+        "phone_registrations": phone_regs,
         "correlation_clusters": len(clusters),
         "high_confidence_links": high_conf_links,
     }
@@ -271,6 +276,11 @@ def _factors(counts: dict, identity: dict, phone: dict, domain: dict,
     if identity["phone_valid"]:
         loc = phone.get("country") or phone.get("region")
         out.append("valid phone number" + (f" ({loc})" if loc else ""))
+    if counts.get("phone_registrations"):
+        out.append(
+            f"phone registered on {counts['phone_registrations']} checked "
+            f"platform(s)"
+        )
     if identity["has_domain"]:
         out.append(f"owns/associated domain {domain.get('domain')}")
     if counts["high_confidence_links"]:

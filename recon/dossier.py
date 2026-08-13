@@ -367,8 +367,8 @@ def render_dossier(inv: dict, summary: dict, *,
     p.append(
         "<p class='dim'>Heuristic: 4 pts per account (cap 40), 5 pts per email "
         "registration (cap 25), 10 for a Gravatar profile, 2 per enriched "
-        "profile (cap 15), 10 for a valid phone number. Higher = larger public "
-        "footprint.</p>"
+        "profile (cap 15), 10 for a valid phone number, 5 per phone registration "
+        "(cap 15). Higher = larger public footprint.</p>"
     )
 
     # -- exposure profile ------------------------------------------------------
@@ -470,6 +470,42 @@ def render_dossier(inv: dict, summary: dict, *,
         if phone.get("note"):
             p.append(f"<div class='notebox'>{_e(phone['note'])}</div>")
 
+        # Registered platforms (ignorant account-existence hits).
+        phone_regs = [a for a in (phone.get("accounts") or []) if a.get("exists")]
+        if phone_regs:
+            p.append("<h3>Registered platforms (by phone)</h3>")
+            p.append("<table class='data'><tr><th>Platform</th><th>Domain</th></tr>")
+            for a in phone_regs:
+                p.append(f"<tr><td><b>{_e(a.get('site'))}</b></td>"
+                         f"<td>{_e(a.get('domain'))}</td></tr>")
+            p.append("</table>")
+
+        # Reverse-phone lookup links (people-search brokers — manual leads).
+        rev = phone.get("reverse_lookup") or []
+        if rev:
+            p.append("<h3>Reverse-phone lookup</h3>")
+            p.append("<p class='dim'>Direct reverse-phone searches on people-search "
+                     "brokers (where a name/address may be listed). Manual leads — "
+                     "open and review; each broker's opt-out link is the removal path.</p>")
+            p.append("<table class='data'><tr><th>Broker</th><th>Search</th>"
+                     "<th>Opt-out</th></tr>")
+            for b in rev:
+                p.append(
+                    f"<tr><td><b>{_e(b.get('name'))}</b></td>"
+                    f"<td><a href='{_e(b.get('search_url'))}'>reverse lookup</a></td>"
+                    f"<td><a href='{_e(b.get('optout_url'))}'>opt out</a></td></tr>")
+            p.append("</table>")
+
+        # Footprint leads (search dorks, spam DBs, messaging presence).
+        fp = phone.get("footprint") or []
+        if fp:
+            p.append("<h3>Footprint leads</h3>")
+            p.append("<ul class='tight'>")
+            for f in fp:
+                p.append(f"<li><a href='{_e(f.get('url'))}'>{_e(f.get('label'))}</a>"
+                         f" <span class='dim'>({_e(f.get('kind'))})</span></li>")
+            p.append("</ul>")
+
     # -- domain / infrastructure ------------------------------------------------------
     if domain and domain.get("domain") and not domain.get("error"):
         rdap = domain.get("rdap") or {}
@@ -516,8 +552,10 @@ def render_dossier(inv: dict, summary: dict, *,
         "<li>Email pivot: public Gravatar profile API and registration checks "
         "against public sign-up/password-reset endpoints (holehe).</li>"
         "<li>Phone intelligence: offline parsing (phonenumbers) — validity, "
-        "region, carrier, line type, timezones. No messaging-app presence "
-        "checks are performed.</li>"
+        "region, carrier, line type, timezones — plus account-existence checks "
+        "(ignorant, against public register/reset endpoints), reverse-phone "
+        "people-search links, and search-engine footprint leads. Reverse-lookup "
+        "and footprint entries are leads to review, not confirmed facts.</li>"
         "<li>Domain intelligence: DNS records over DNS-over-HTTPS, registration "
         "data via RDAP, and subdomains from public Certificate Transparency "
         "logs (crt.sh). Public data, no API keys.</li>"
