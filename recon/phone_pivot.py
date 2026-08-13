@@ -18,11 +18,30 @@ in :mod:`recon.phone_accounts`; reverse-lookup people-search links live in
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any, Optional
 from urllib.parse import quote
 
 logger = logging.getLogger("recon.phone_pivot")
+
+# A bare national number ("415-555-2671") has no country code, so phonenumbers
+# can't resolve it without a region. This app is US-centric (US placeholder, US
+# people-search brokers), so we assume this region for numbers typed without a
+# leading "+". Override with PHONE_DEFAULT_REGION; an explicit "+<country code>"
+# always takes precedence.
+DEFAULT_REGION = (os.environ.get("PHONE_DEFAULT_REGION", "US").strip().upper()
+                  or "US")
+
+# Friendly messages for phonenumbers.NumberParseException.error_type.
+_PARSE_ERRORS = {
+    0: ("couldn't read the country — prefix with + and the country code, "
+        "e.g. +1 415 555 2671"),
+    1: "that doesn't look like a phone number",
+    2: "too short after the international dialing prefix",
+    3: "too short to be a valid number",
+    4: "too long to be a valid number",
+}
 
 _TYPE_NAMES = {
     0: "fixed_line",
@@ -143,10 +162,18 @@ def phone_intel(raw: str, country_hint: Optional[str] = None) -> dict[str, Any]:
     from phonenumbers import timezone as pn_timezone
 
     hint = (country_hint or "").strip().upper() or None
+    # For a bare national number (no "+", no explicit hint), assume the default
+    # region so common formats like "415-555-2671" parse instead of erroring.
+    assumed_region = None
+    if hint is None and not raw.lstrip().startswith("+"):
+        hint = DEFAULT_REGION
+        assumed_region = DEFAULT_REGION
     try:
         num = phonenumbers.parse(raw, hint)
     except phonenumbers.NumberParseException as exc:
-        return {"input": raw, "error": f"unparseable: {exc.error_type}"}
+        msg = _PARSE_ERRORS.get(getattr(exc, "error_type", -1),
+                                "couldn't parse this number")
+        return {"input": raw, "error": msg}
 
     valid = phonenumbers.is_valid_number(num)
     possible = phonenumbers.is_possible_number(num)
@@ -182,6 +209,9 @@ def phone_intel(raw: str, country_hint: Optional[str] = None) -> dict[str, Any]:
     fmts = _number_formats(num, phonenumbers)
     result["formats"] = fmts
     result["footprint"] = footprint_links(fmts, num.country_code)
+    if assumed_region:
+        # Transparency: we guessed the country for a number typed without "+".
+        result["assumed_region"] = assumed_region
     # Fictional/range note: phonenumbers marks reserved-for-fiction ranges
     # (e.g. US 555-01xx, UK 7700 900xxx) as possible-but-invalid; surface that.
     if not valid and possible:
