@@ -398,9 +398,12 @@ def render_dossier(inv: dict, summary: dict, *,
         )
     p.append("</table>")
 
-    # -- confirmed accounts ------------------------------------------------------
-    p.append(f"<h2>Confirmed accounts ({len(accounts)})</h2>")
+    # -- accounts (base usernames) -----------------------------------------------
+    p.append(f"<h2>Accounts — base usernames ({len(accounts)})</h2>")
     if accounts:
+        p.append("<p class='dim'>Raw engine hits, ranked by confidence. Read the "
+                 "verdict column: only <b>confirmed</b> rows were verified as the "
+                 "subject's; leads and likely-false-positives are not.</p>")
         p.append("<table class='data'>" + _ACCT_HEADER)
         p.append(_account_rows(accounts))
         p.append("</table>")
@@ -416,6 +419,13 @@ def render_dossier(inv: dict, summary: dict, *,
     # -- name-candidate matches ----------------------------------------------------
     if params.get("name"):
         p.append(f"<h2>Name-candidate matches ({len(name_rows)})</h2>")
+        p.append(
+            "<div class='notebox'><b>Speculative.</b> These are guessed handles "
+            "that merely exist somewhere \u2014 many belong to entirely different "
+            "people. A row is only your subject if its verdict is "
+            "<b>confirmed</b> (handle/name verified on the page). Treat everything "
+            "else as a lead to check by hand, not a finding.</div>"
+        )
         p.append(
             f"<p class='dim'>{len(candidates)} candidate handles generated from "
             f"\u201c{_e(params['name'])}\u201d: "

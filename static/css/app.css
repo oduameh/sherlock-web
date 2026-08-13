@@ -737,7 +737,7 @@ select { appearance: auto; }
   font-variant-numeric: tabular-nums;
   color: var(--text-1);
 }
-#runFound.stat-v { color: var(--success); }
+#runFound.stat-v { color: var(--text-1); }
 
 .progress-track { background: var(--bg-3); border-radius: var(--r-pill); height: 7px; overflow: hidden; position: relative; }
 .progress-fill {
@@ -938,8 +938,44 @@ select { appearance: auto; }
   white-space: nowrap;
 }
 .verify-badge.confirmed { color: var(--success); border-color: rgba(76, 195, 138, 0.5); background: var(--success-soft); }
-.verify-badge.unconfirmed { color: var(--text-2); border-color: rgba(125, 138, 156, 0.4); }
+.verify-badge.unconfirmed { color: var(--warn); border-color: rgba(230, 171, 62, 0.45); background: var(--warn-soft); }
+.verify-badge.unverified { color: var(--text-3); border-color: var(--border); }
 .verify-badge.false { color: var(--danger); border-color: rgba(240, 97, 93, 0.5); background: var(--danger-soft); }
+
+/* per-row confidence chip (belief this is the subject's account) */
+.row-conf {
+  font-size: var(--fs-10);
+  font-weight: 700;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-left: 6px;
+  border: 1px solid;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.row-conf.conf-high { color: var(--success); border-color: rgba(76, 195, 138, 0.5); background: var(--success-soft); }
+.row-conf.conf-med { color: var(--warn); border-color: rgba(230, 171, 62, 0.45); background: var(--warn-soft); }
+.row-conf.conf-low { color: var(--text-3); border-color: var(--border); }
+
+/* neutral raw-hit counter (existence, not a confirmed account) */
+.badge.hits { background: var(--bg-2); color: var(--text-3); border-color: var(--border); }
+
+/* speculative-section caveat under a "Name candidates" heading */
+.section-caveat {
+  display: flex;
+  gap: 7px;
+  align-items: flex-start;
+  font-size: var(--fs-12);
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid rgba(230, 171, 62, 0.3);
+  border-radius: var(--r-sm);
+  padding: 7px 11px;
+  margin: 0 0 var(--sp-3);
+  line-height: 1.5;
+}
 
 /* enrichment preview */
 .rrow .enrich { display: flex; align-items: center; gap: var(--sp-2); margin-top: 7px; }

@@ -36,11 +36,21 @@ def test_categorize_site_known_and_default():
     assert categorize_site("Totally Unknown Site") == "other"
 
 
-def test_footprint_score_moved_but_unchanged():
+def test_footprint_score_weighted_by_verification():
     score = footprint_score(_summary())
-    # 2 accounts*4 + 1 registration*5 + 10 gravatar + 1 enriched*2 + 10 phone.
-    assert score["score"] == 8 + 5 + 10 + 2 + 10
+    # 1 confirmed*6 + 1 lead*1 + 1 email-registration*5 + 10 gravatar + 10 phone.
+    assert score["score"] == 6 + 1 + 5 + 10 + 10
     assert "parts" in score
+
+
+def test_footprint_score_ignores_false_positives():
+    s = _summary()
+    # Flip the unverified Twitter account into a flagged false positive: it must
+    # no longer add to the score.
+    s["accounts"][1]["verification"] = {"status": "likely_false_positive"}
+    score = footprint_score(s)
+    # 1 confirmed*6 + 0 leads + 5 email + 10 gravatar + 10 phone.
+    assert score["score"] == 6 + 5 + 10 + 10
 
 
 def test_exposure_counts_and_categories():

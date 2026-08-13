@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from recon.confidence import account_confidence
+from recon.confidence import account_confidence, bucket_counts
 from recon.engines import normalize_site
 
 
@@ -74,14 +74,17 @@ def categorize_site(site: str) -> str:
 # ---------------------------------------------------------------------------
 
 def footprint_score(summary: dict) -> dict:
-    """Digital-footprint score 0-100. Documented heuristic:
+    """Digital-footprint score 0-100, weighted by verification so speculation
+    can't inflate it. Documented heuristic:
 
-      accounts found        4 pts each, capped at 40
+      confirmed accounts    6 pts each, capped at 42  (verification-confirmed)
+      unconfirmed leads     1 pt each,  capped at 8   (fetched, not confirmed)
       email registrations   5 pts each, capped at 25  (holehe positives)
       gravatar profile      10 pts flat
-      enriched profiles     2 pts each, capped at 15  (name/avatar extracted)
       valid phone number    10 pts flat
       phone registrations   5 pts each, capped at 15  (ignorant positives)
+
+    Likely-false-positive rows contribute nothing.
     """
     accounts = summary.get("accounts") or []
     variants = summary.get("variants") or []
@@ -89,19 +92,15 @@ def footprint_score(summary: dict) -> dict:
     email = summary.get("email") or {}
     phone = summary.get("phone") or {}
 
-    n_accts = len(accounts) + len(variants) + len(name_rows)
+    b = bucket_counts(accounts + variants + name_rows)
+    confirmed, leads = b["found"], b["lead"]
     holehe_hits = sum(1 for h in (email.get("holehe") or []) if h.get("exists"))
     phone_regs = sum(1 for a in (phone.get("accounts") or []) if a.get("exists"))
-    enriched = sum(
-        1 for r in accounts + variants + name_rows
-        if (r.get("enrichment") or {}).get("jsonld_name")
-        or (r.get("enrichment") or {}).get("og_image")
-    )
     parts = {
-        f"accounts found ({n_accts} × 4, cap 40)": min(40, n_accts * 4),
+        f"confirmed accounts ({confirmed} × 6, cap 42)": min(42, confirmed * 6),
+        f"unconfirmed leads ({leads} × 1, cap 8)": min(8, leads),
         f"email registrations ({holehe_hits} × 5, cap 25)": min(25, holehe_hits * 5),
         "gravatar profile present": 10 if email.get("gravatar") else 0,
-        f"enriched profiles ({enriched} × 2, cap 15)": min(15, enriched * 2),
         "valid phone number": 10 if phone.get("valid") else 0,
         f"phone registrations ({phone_regs} × 5, cap 15)": min(15, phone_regs * 5),
     }
