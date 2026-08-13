@@ -24,7 +24,8 @@ from sherlock_project.sherlock import sherlock
 
 from recon import engines
 from recon.correlate import correlate
-from recon.email_pivot import gravatar_lookup, holehe_available, holehe_scan
+from recon.email_pivot import (annotate_recovery, gravatar_lookup,
+                                holehe_available, holehe_scan)
 from recon.enrich import enrich_profiles
 from recon.domain_pivot import domain_from_email, domain_intel
 from recon.names import generate_name_candidates
@@ -417,6 +418,9 @@ async def run_pipeline(
         })
         if holehe_available():
             def on_holehe(entry):
+                # Stitch the trail: flag when this account's masked recovery
+                # phone matches the subject's number (phone↔email↔account).
+                annotate_recovery(entry, phone_state.get("e164"))
                 email_state["holehe"].append(entry)
                 emit("email", {"source": "holehe", "email": addr, **entry})
 

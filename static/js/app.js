@@ -970,11 +970,32 @@
     var s = document.createElement("span");
     s.className = "site " + (d.exists ? "email-hit" : "email-miss");
     s.textContent = d.site || "?";
-    var st = document.createElement("span");
+    var main = document.createElement("div");
+    main.className = "rmain";
+    var st = document.createElement("div");
     st.className = d.exists ? "email-hit" : "email-miss";
     st.textContent = d.exists ? ("registered" + (d.domain ? " — " + d.domain : ""))
                               : (d.error ? "error: " + d.error : (d.rate_limit ? "rate limited" : ""));
-    row.appendChild(s); row.appendChild(st);
+    main.appendChild(st);
+    // Masked recovery trail some reset flows leak — a partial lead that can tie
+    // this account to another email/phone (never a full profile, so labelled so).
+    if (d.exists && (d.email_recovery || d.phone_number)) {
+      var rec = document.createElement("div");
+      rec.className = "recovery-hint";
+      var bits = [];
+      if (d.email_recovery) bits.push("recovery email " + d.email_recovery);
+      if (d.phone_number) bits.push("recovery phone " + d.phone_number);
+      rec.appendChild(document.createTextNode("↳ " + bits.join(" · ")));
+      if (d.corroborates_phone) {
+        var b = document.createElement("span");
+        b.className = "trail-badge";
+        b.textContent = "matches subject phone";
+        rec.appendChild(document.createTextNode(" "));
+        rec.appendChild(b);
+      }
+      main.appendChild(rec);
+    }
+    row.appendChild(s); row.appendChild(main);
     c.rows.appendChild(row);
   }
 
@@ -2111,9 +2132,9 @@
       var addr = params.email || run.username;
       renderGravatar(addr, em.gravatar);
       (em.holehe || []).forEach(function (h) {
-        addHoleheRow({ email: addr, site: h.site, domain: h.domain,
-                       exists: h.exists, error: h.error,
-                       rate_limit: h.rate_limit });
+        // Spread the whole entry so recovery hints (email_recovery,
+        // phone_number, corroborates_phone) survive a reload.
+        addHoleheRow(Object.assign({ email: addr }, h));
       });
     }
     if (summary.phone) renderPhoneIntel(summary.phone);
