@@ -168,14 +168,26 @@ async def enrich_profiles(rows: list[dict],
     """
     seen_urls: set[str] = set()
     targets: list[dict] = []
+    skipped: list[dict] = []
     for row in sorted(rows, key=_verify_priority):
         url = row.get("url")
         if not url or url in seen_urls:
             continue
         seen_urls.add(url)
-        targets.append(row)
-        if len(targets) >= limit:
-            break
+        if len(targets) < limit:
+            targets.append(row)
+        else:
+            skipped.append(row)
+    # Anything we never fetched must say so explicitly. An unexamined row is not
+    # a weak finding — it is no finding at all, and it must never be presented
+    # alongside verified ones as though someone had checked it.
+    for row in skipped:
+        row.setdefault("verification", {
+            "status": "not_examined",
+            "score": 0,
+            "signals": ["not fetched — verification budget exhausted"],
+            "reason": "budget_exhausted",
+        })
 
     sem = asyncio.Semaphore(CONCURRENCY)
     count = 0
