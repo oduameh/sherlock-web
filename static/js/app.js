@@ -563,7 +563,7 @@
     }
     c.rows.appendChild(row);
     c.foundCount++;
-    c.found.textContent = c.foundCount + " found";
+    c.found.textContent = c.foundCount + " hit" + (c.foundCount > 1 ? "s" : "");
     bumpFound();
     if (!silent) currentRun.push({ username: username, site: site, url: url, status: "found" });
   }
@@ -734,11 +734,20 @@
     head.className = "section-head";
     head.textContent = title;
     els.results.appendChild(head);
+    // Name candidates are speculative — handles that merely exist and may belong
+    // to a different person. Say so, prominently, right under the heading.
+    if (key.indexOf("name:") === 0) {
+      var caveat = document.createElement("div");
+      caveat.className = "section-caveat";
+      caveat.textContent = "Speculative — guessed handles that exist somewhere; " +
+        "many belong to other people. Trust the per-row verdicts, not the count.";
+      els.results.appendChild(caveat);
+    }
     var card = document.createElement("div");
     card.className = "user-card";
     card.innerHTML =
       '<div class="user-head"><h2></h2><span class="badge scanning">running</span>' +
-      '<span class="badge found">0 found</span>' +
+      '<span class="badge hits">0 hits</span>' +
       '<span class="dim" style="font-size:11px;margin-left:auto"></span></div>' +
       '<div class="result-rows"></div>';
     card.querySelector("h2").textContent = badgeText || title;
@@ -746,7 +755,7 @@
     var refs = {
       head: head, root: card,
       status: card.querySelector(".badge.scanning"),
-      found: card.querySelector(".badge.found"),
+      found: card.querySelector(".badge.hits"),
       note: card.querySelector(".user-head .dim"),
       rows: card.querySelector(".result-rows"),
       foundCount: 0
@@ -812,7 +821,7 @@
     row.appendChild(main);
     c.rows.appendChild(row);
     c.foundCount++;
-    c.found.textContent = c.foundCount + " found";
+    c.found.textContent = c.foundCount + " hit" + (c.foundCount > 1 ? "s" : "");
     bumpFound();
 
     var entry = { username: d.username, site: d.site, url: d.url,
@@ -837,10 +846,62 @@
   }
 
   var VERIFY_LABELS = {
-    confirmed: { cls: "confirmed", text: "✓ verified" },
-    unconfirmed: { cls: "unconfirmed", text: "? unconfirmed" },
-    likely_false_positive: { cls: "false", text: "⚠ likely false" }
+    confirmed: { cls: "confirmed", text: "✓ confirmed" },
+    unconfirmed: { cls: "unconfirmed", text: "? unconfirmed lead" },
+    likely_false_positive: { cls: "false", text: "⚠ likely false positive" },
+    unverified: { cls: "unverified", text: "· unverified lead" }
   };
+
+  // Approximate a row's confidence from its verdict when the server number
+  // isn't at hand (e.g. a reloaded run). Live runs send the real value.
+  function rowConfFromStatus(status) {
+    if (status === "confirmed") return 80;
+    if (status === "unconfirmed") return 35;
+    if (status === "likely_false_positive") return 5;
+    return 20; // unverified lead
+  }
+  function rowConfBand(conf) {
+    if (conf >= 65) return "conf-high";
+    if (conf >= 35) return "conf-med";
+    return "conf-low";
+  }
+  function applyRowConfidence(r, conf) {
+    if (conf == null || isNaN(conf)) return;
+    conf = Math.round(conf);
+    r.el.dataset.conf = String(conf);
+    r.data.confidence = conf;
+    var chip = r.el.querySelector(".row-conf");
+    if (!chip) {
+      chip = document.createElement("span");
+      chip.className = "row-conf";
+      r.el.querySelector(".rmain").appendChild(chip);
+    }
+    chip.className = "row-conf " + rowConfBand(conf);
+    chip.textContent = conf + "%";
+    chip.title = "confidence this is the subject's account";
+  }
+
+  // After a run (or a reload) completes: any row that never got a verdict is an
+  // unverified lead — label it, then re-rank each card so the strongest matches
+  // sit on top and the noise sinks. Nothing is hidden.
+  function finalizeAccuracy() {
+    Object.keys(invRows).forEach(function (k) {
+      var r = invRows[k];
+      if (r.data.verification) return;
+      setVerifyBadge(r, { status: "unverified",
+        signals: ["not fetched/verified — a lead, not a confirmed account"] });
+      if (!r.el.dataset.conf) applyRowConfidence(r, 20);
+    });
+    Object.keys(invCards).forEach(function (key) {
+      var rowsEl = invCards[key].rows;
+      if (!rowsEl) return;
+      var rows = Array.prototype.slice.call(rowsEl.querySelectorAll(".rrow"));
+      rows.sort(function (a, b) {
+        return parseInt(b.dataset.conf || "0", 10) - parseInt(a.dataset.conf || "0", 10);
+      });
+      rows.forEach(function (el) { rowsEl.appendChild(el); });
+    });
+  }
 
   function setVerifyBadge(r, v) {
     if (!v || !v.status) return;
@@ -866,6 +927,9 @@
     var r = invRows[key];
     if (!r) return;
     if (d.verification) setVerifyBadge(r, d.verification);
+    var conf = (typeof d.confidence === "number") ? d.confidence
+             : rowConfFromStatus((d.verification || {}).status);
+    applyRowConfidence(r, conf);
     var enr = d.enrichment || {};
     var img = enr.jsonld_image || enr.og_image;
     var name = enr.jsonld_name || enr.og_title || enr.title;
@@ -1467,8 +1531,11 @@
     });
     invEs.addEventListener("done", function (e) {
       var d = JSON.parse(e.data);
-      var msg = "Investigation complete — " + d.found + " accounts, " +
-        d.variant_hits + " variant hits, " + d.name_hits + " candidate hits, " +
+      finalizeAccuracy();
+      var hits = (d.hits != null) ? d.hits : (d.found + d.leads + d.flagged);
+      var msg = "Investigation complete — " + d.found + " confirmed, " +
+        (d.leads || 0) + " unconfirmed leads, " + (d.flagged || 0) +
+        " likely false positives (of " + hits + " raw hits). " +
         d.clusters + " clusters, " + d.email_hits + " email hits.";
       var bd = breakdownText(d);
       if (bd) msg += " " + bd + ".";
@@ -1548,11 +1615,14 @@
 
   function nodeColor(n) {
     if (n.type === "account") {
+      // Colour by verification only. Two engines agreeing that a handle EXISTS
+      // is not evidence about WHOSE it is, so it must not read as "confirmed".
       var v = n.verification || (n.data || {}).verification;
       if (v === "likely_false_positive") return "#f0615d";  // flagged red
-      if (v === "confirmed") return "#4cc38a";               // verified green
-      if ((n.engines || []).length >= 2) return "#4cc38a";
-      if ((n.data || {}).source === "name") return "#e0a338";
+      if (v === "confirmed") return "#4cc38a";               // confirmed green
+      if (v === "unconfirmed") return "#e6ab3e";             // lead amber
+      if ((n.data || {}).source === "name") return "#e6ab3e"; // speculative amber
+      return "#7d8a9c";                                       // unverified grey
     }
     return NODE_COLORS[n.type] || "#7d8a9c";
   }
@@ -1843,9 +1913,11 @@
 
   els.csvBtn.addEventListener("click", function () {
     if (!currentRun.length) { toast("Nothing to export", "error"); return; }
-    var lines = ["username,site,url,status,engines,source,variant_of,from_name,candidate,display_name,bio"];
+    var lines = ["username,site,url,verdict,confidence,engines,source,variant_of,from_name,candidate,display_name,bio"];
     currentRun.forEach(function (r) {
-      lines.push([r.username, r.site, r.url, r.status,
+      lines.push([r.username, r.site, r.url,
+                  (r.verification || "unverified"),
+                  (r.confidence != null ? r.confidence : ""),
                   (r.engines || []).join("|"), r.source || "",
                   r.variant_of || "", r.from_name || "", r.candidate || "",
                   r.display_name || "", r.bio || ""].map(function (v) {
@@ -2063,7 +2135,11 @@
         m.title = run.ts;
         var f = document.createElement("span");
         f.className = "h-found";
-        f.textContent = run.found + "/" + run.total + " found";
+        // Investigations persist an honest split (confirmed accounts vs total
+        // raw hits); quick scans keep the simple found/sites ratio.
+        f.textContent = (run.kind === "investigation")
+          ? (run.found + " confirmed · " + run.total + " hits")
+          : (run.found + "/" + run.total + " found");
         m.appendChild(f);
         main.appendChild(u);
         main.appendChild(m);
@@ -2141,6 +2217,7 @@
     if (summary.domain) renderDomainIntel(summary.domain);
     if (summary.brokers) renderBrokerExposure(summary.brokers);
     renderCorrelation(summary.correlation || []);
+    finalizeAccuracy();
     Object.keys(invCards).forEach(function (k) {
       invCards[k].status.textContent = "loaded · " + run.ts;
     });

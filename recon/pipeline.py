@@ -23,6 +23,7 @@ from sherlock_project.result import QueryStatus
 from sherlock_project.sherlock import sherlock
 
 from recon import engines
+from recon.confidence import account_confidence, bucket_counts
 from recon.correlate import correlate
 from recon.email_pivot import (annotate_recovery, gravatar_lookup,
                                 holehe_available, holehe_scan)
@@ -595,9 +596,10 @@ async def run_pipeline(
             "candidate": row.get("candidate"),
             "enrichment": data,
             "verification": row.get("verification"),
+            "confidence": account_confidence(row),
         })
 
-    await enrich_profiles(all_rows, on_enriched)
+    await enrich_profiles(all_rows, on_enriched, subject_name=name)
 
     # Correlation.
     clusters = await correlate(all_rows)
@@ -630,8 +632,15 @@ async def run_pipeline(
         "correlation": clusters,
     }
     router.finish()
+    # Honest headline: split the raw union of "handle exists" hits into
+    # verification-confirmed accounts, unconfirmed leads, and flagged false
+    # positives — instead of reporting every speculative hit as "found".
+    buckets = bucket_counts(all_rows)
     emit("done", {
-        "found": len(accounts),
+        "found": buckets["found"],       # verification-confirmed subject accounts
+        "leads": buckets["lead"],        # fetched-but-unconfirmed / unverified
+        "flagged": buckets["flagged"],   # likely false positives
+        "hits": len(all_rows),           # raw existence hits across all sources
         "variant_hits": len(variant_rows),
         "name_hits": len(name_rows),
         "clusters": len(clusters),

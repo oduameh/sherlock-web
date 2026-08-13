@@ -1072,10 +1072,14 @@ if RECON_AVAILABLE:
                 )
                 _set_investigation(inv_id, "done", summary)
                 subject = _subject_label(inputs)
-                n_found = (len(summary["accounts"])
-                           + len(summary["variants"])
-                           + len(summary["name_accounts"]))
-                run_id = save_run(subject, n_found, len(sher_data), summary,
+                # Persist the honest headline: verification-confirmed accounts
+                # only, not the raw union of every speculative "handle exists"
+                # hit (which lumped base + variants + 24 name guesses together).
+                from recon.confidence import bucket_counts
+                all_rows = (summary["accounts"] + summary["variants"]
+                            + summary["name_accounts"])
+                n_found = bucket_counts(all_rows)["found"]
+                run_id = save_run(subject, n_found, len(all_rows), summary,
                                   kind="investigation",
                                   investigation_id=inv_id)
                 emit("saved", {"history_id": run_id,

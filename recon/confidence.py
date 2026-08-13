@@ -21,26 +21,31 @@ BIO_WEIGHT = 20             # overlapping bio vocabulary
 CORRELATION_LINK_MIN = 40    # below this a pairwise link is too weak to report
 
 # --- account confidence components -----------------------------------------
-_BASE = 45
-_TWO_ENGINE_BONUS = 25       # two independent engines both claim the account
+# A bare "this handle exists" hit is weak on its own: the belief that it's the
+# *subject's* account has to be earned by verification and identity signals, not
+# assumed. So the base is low and verification is the dominant lever.
+_BASE = 30
+_TWO_ENGINE_BONUS = 15       # engine agreement raises *existence* certainty
 _IDENTITY_BONUS = 15         # a real page with a name/avatar was parsed
 _VERIFY_BONUS = {
-    "confirmed": 20,             # scanned username corroborated on the page
-    "unconfirmed": -5,           # page fetched but username not seen
-    "likely_false_positive": -40,  # page looks like a soft-404
+    "confirmed": 45,             # page is genuinely about this handle/subject
+    "unconfirmed": -8,           # page fetched, nothing tied it to the subject
+    "likely_false_positive": -60,  # soft-404 / hard-404 / different person
+    None: -12,                   # never verified → an unconfirmed lead, not a fact
 }
+_ATTRIBUTION_BONUS = 20      # profile's name matched the subject (verify.py)
 _SOURCE_PENALTY = {
-    "name": -15,                 # name-derived candidate, speculative
-    "variant": -8,               # handle variant, weaker than the base handle
+    "name": -12,                 # name-derived candidate, speculative
+    "variant": -6,               # handle variant, weaker than the base handle
 }
 
 
 def _has_identity(row: dict) -> bool:
+    # Only a real name or avatar counts — a bare <title> (which every page,
+    # including error pages, has) is not identity evidence.
     enr = row.get("enrichment") or {}
-    return bool(
-        enr.get("jsonld_name") or enr.get("og_title") or enr.get("title")
-        or enr.get("jsonld_image") or enr.get("og_image")
-    )
+    return bool(enr.get("jsonld_name") or enr.get("jsonld_image")
+                or enr.get("og_image"))
 
 
 def account_confidence(row: dict) -> int:
@@ -50,7 +55,34 @@ def account_confidence(row: dict) -> int:
         score += _TWO_ENGINE_BONUS
     if _has_identity(row):
         score += _IDENTITY_BONUS
-    status = (row.get("verification") or {}).get("status")
-    score += _VERIFY_BONUS.get(status, 0)
+    verification = row.get("verification") or {}
+    score += _VERIFY_BONUS.get(verification.get("status"), 0)
+    if verification.get("identity_match") is True:
+        score += _ATTRIBUTION_BONUS
     score += _SOURCE_PENALTY.get(row.get("source"), 0)
     return max(5, min(100, score))
+
+
+def verdict_bucket(row: dict) -> str:
+    """Coarse honesty bucket for headline counts (single source of truth):
+
+    * ``"found"``   — verification confirmed it's the subject's account.
+    * ``"flagged"`` — likely false positive (soft/hard-404 or different person).
+    * ``"lead"``    — fetched-but-unconfirmed, or not yet verified.
+
+    A raw engine "claimed" is only ever a lead until verification promotes it.
+    """
+    status = (row.get("verification") or {}).get("status")
+    if status == "confirmed":
+        return "found"
+    if status == "likely_false_positive":
+        return "flagged"
+    return "lead"
+
+
+def bucket_counts(rows) -> dict:
+    """{'found': n, 'lead': n, 'flagged': n} over an iterable of rows."""
+    counts = {"found": 0, "lead": 0, "flagged": 0}
+    for row in rows:
+        counts[verdict_bucket(row)] += 1
+    return counts
