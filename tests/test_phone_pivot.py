@@ -19,6 +19,25 @@ def test_national_with_country_hint():
 def test_unparseable_number():
     res = phone_intel("not a phone")
     assert "error" in res
+    # Friendly message, not the raw "unparseable: <int>".
+    assert "unparseable" not in res["error"]
+
+
+def test_national_number_without_plus_defaults_to_us():
+    # The common case: a US number typed without the "+1" country code.
+    for raw in ("4155552671", "415-555-2671", "(415) 555-2671"):
+        res = phone_intel(raw)
+        assert res.get("valid") is True, raw
+        assert res["e164"] == "+14155552671"
+        assert res["region"] == "US"
+        assert res.get("assumed_region") == "US"
+
+
+def test_explicit_country_code_not_overridden():
+    # A "+" number is parsed as-is; the US default must not apply.
+    res = phone_intel("+442079460018")  # GB
+    assert res["region"] == "GB"
+    assert "assumed_region" not in res
 
 
 def test_empty_input():

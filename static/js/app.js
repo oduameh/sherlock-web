@@ -1054,6 +1054,7 @@
     addRow("International", p.international);
     addRow("Country", p.country);
     addRow("Region", p.region);
+    if (p.assumed_region) addRow("Assumed region", p.assumed_region + " — no country code given; prefix + for other regions");
     addRow("Location", p.location);
     addRow("Carrier", p.carrier);
     addRow("Line type", p.line_type);
