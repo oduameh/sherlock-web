@@ -849,7 +849,11 @@
     confirmed: { cls: "confirmed", text: "✓ confirmed" },
     unconfirmed: { cls: "unconfirmed", text: "? unconfirmed lead" },
     likely_false_positive: { cls: "false", text: "⚠ likely false positive" },
-    unverified: { cls: "unverified", text: "· unverified lead" }
+    // "blocked" and "never checked" are NOT weak findings — they are absences
+    // of evidence, and must read differently from anything we actually examined.
+    indeterminate: { cls: "indeterminate", text: "⃠ blocked — can't tell" },
+    not_examined: { cls: "unverified", text: "· not examined" },
+    unverified: { cls: "unverified", text: "· not examined" }
   };
 
   // Approximate a row's confidence from its verdict when the server number
@@ -858,7 +862,8 @@
     if (status === "confirmed") return 80;
     if (status === "unconfirmed") return 35;
     if (status === "likely_false_positive") return 5;
-    return 20; // unverified lead
+    if (status === "indeterminate") return 18;
+    return 15; // not examined
   }
   function rowConfBand(conf) {
     if (conf >= 65) return "conf-high";
@@ -888,9 +893,9 @@
     Object.keys(invRows).forEach(function (k) {
       var r = invRows[k];
       if (r.data.verification) return;
-      setVerifyBadge(r, { status: "unverified",
-        signals: ["not fetched/verified — a lead, not a confirmed account"] });
-      if (!r.el.dataset.conf) applyRowConfidence(r, 20);
+      setVerifyBadge(r, { status: "not_examined",
+        signals: ["not fetched — no evidence either way for this row"] });
+      if (!r.el.dataset.conf) applyRowConfidence(r, 15);
     });
     Object.keys(invCards).forEach(function (key) {
       var rowsEl = invCards[key].rows;
@@ -1535,7 +1540,8 @@
       var hits = (d.hits != null) ? d.hits : (d.found + d.leads + d.flagged);
       var msg = "Investigation complete — " + d.found + " confirmed, " +
         (d.leads || 0) + " unconfirmed leads, " + (d.flagged || 0) +
-        " likely false positives (of " + hits + " raw hits). " +
+        " likely false positives, " + (d.not_examined || 0) + " not examined, " +
+        (d.indeterminate || 0) + " blocked (of " + hits + " raw hits). " +
         d.clusters + " clusters, " + d.email_hits + " email hits.";
       var bd = breakdownText(d);
       if (bd) msg += " " + bd + ".";

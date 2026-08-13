@@ -638,8 +638,10 @@ async def run_pipeline(
     buckets = bucket_counts(all_rows)
     emit("done", {
         "found": buckets["found"],       # verification-confirmed subject accounts
-        "leads": buckets["lead"],        # fetched-but-unconfirmed / unverified
+        "leads": buckets["lead"],        # fetched, real page, nothing decisive
         "flagged": buckets["flagged"],   # likely false positives
+        "indeterminate": buckets["indeterminate"],  # blocked — existence unknown
+        "not_examined": buckets["not_examined"],    # never fetched — no evidence
         "hits": len(all_rows),           # raw existence hits across all sources
         "variant_hits": len(variant_rows),
         "name_hits": len(name_rows),

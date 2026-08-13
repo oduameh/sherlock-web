@@ -11,7 +11,7 @@ import html
 import time
 from typing import Any
 
-from recon.confidence import account_confidence
+from recon.confidence import account_confidence, bucket_counts, verdict_bucket
 from recon.exposure import exposure_summary, footprint_score
 
 
@@ -88,8 +88,12 @@ def _exec_summary(inv: dict, summary: dict, score: dict) -> str:
     phone = summary.get("phone") or {}
     clusters = summary.get("correlation") or []
 
-    n = len(accounts) + len(variants) + len(name_rows)
-    platforms = {r.get("site") for r in accounts + variants + name_rows}
+    all_rows = accounts + variants + name_rows
+    buckets = bucket_counts(all_rows)
+    # Platforms are counted from CONFIRMED rows only: a rejected or never-fetched
+    # row must never inflate a headline the reader will take as established fact.
+    platforms = {r.get("site") for r in all_rows
+                 if verdict_bucket(r) == "found" and r.get("site")}
     holehe_hits = sum(1 for h in (email.get("holehe") or []) if h.get("exists"))
     strong_links = sum(
         1 for c in clusters if (c.get("confidence") or 0) >= 60
@@ -108,14 +112,19 @@ def _exec_summary(inv: dict, summary: dict, score: dict) -> str:
 
     s = (
         f"Investigation #{inv.get('id')} began from {subject}. "
-        f"The automated pipeline identified {n} account(s) across "
-        f"{len(platforms)} platform(s)"
+        f"Of {len(all_rows)} raw engine hit(s), {buckets['found']} were "
+        f"verified as the subject's account across {len(platforms)} platform(s). "
+        f"{buckets['lead']} remain unconfirmed leads, {buckets['flagged']} were "
+        f"assessed as likely false positives, {buckets['not_examined']} were "
+        f"never examined, and {buckets['indeterminate']} could not be determined "
+        f"(access blocked). Only the verified figure should be relied upon; the "
+        f"remainder require manual corroboration. "
     )
     if variants:
-        s += f", including {len(variants)} via username variants"
+        s += f"{len(variants)} hit(s) came from username variants. "
     if name_rows:
-        s += f" and {len(name_rows)} via name-derived candidate handles"
-    s += ". "
+        s += (f"{len(name_rows)} hit(s) came from speculative name-derived "
+              f"candidate handles and may belong to unrelated people. ")
     if strong_links:
         s += (f"Cross-account correlation produced {strong_links} "
               f"high-confidence identity link(s) (\u226560% confidence). ")

@@ -38,8 +38,10 @@ def test_categorize_site_known_and_default():
 
 def test_footprint_score_weighted_by_verification():
     score = footprint_score(_summary())
-    # 1 confirmed*6 + 1 lead*1 + 1 email-registration*5 + 10 gravatar + 10 phone.
-    assert score["score"] == 6 + 1 + 5 + 10 + 10
+    # 1 confirmed*6 + 1 email-registration*5 + 10 gravatar + 10 phone.
+    # The second account carries no verdict — never examined — so it adds
+    # nothing: absence of evidence must not inflate an exposure score.
+    assert score["score"] == 6 + 5 + 10 + 10
     assert "parts" in score
 
 

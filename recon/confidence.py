@@ -30,8 +30,10 @@ _IDENTITY_BONUS = 15         # a real page with a name/avatar was parsed
 _VERIFY_BONUS = {
     "confirmed": 45,             # page is genuinely about this handle/subject
     "unconfirmed": -8,           # page fetched, nothing tied it to the subject
-    "likely_false_positive": -60,  # soft-404 / hard-404 / different person
-    None: -12,                   # never verified → an unconfirmed lead, not a fact
+    "likely_false_positive": -60,  # 404/410, soft-404, or site serves all handles
+    "indeterminate": -10,        # blocked (403/429/5xx) — existence unknown
+    "not_examined": -12,         # never fetched (budget//skip) — not evidence
+    None: -12,                   # no verdict recorded → treat as not examined
 }
 _ATTRIBUTION_BONUS = 20      # profile's name matched the subject (verify.py)
 _SOURCE_PENALTY = {
@@ -66,23 +68,32 @@ def account_confidence(row: dict) -> int:
 def verdict_bucket(row: dict) -> str:
     """Coarse honesty bucket for headline counts (single source of truth):
 
-    * ``"found"``   — verification confirmed it's the subject's account.
-    * ``"flagged"`` — likely false positive (soft/hard-404 or different person).
-    * ``"lead"``    — fetched-but-unconfirmed, or not yet verified.
+    * ``"found"``         verification confirmed it's the subject's account.
+    * ``"flagged"``       likely false positive (404/soft-404/serves-everyone).
+    * ``"indeterminate"`` we were blocked and genuinely cannot tell.
+    * ``"not_examined"``  never fetched — carries no evidential weight at all.
+    * ``"lead"``          fetched, real page, nothing tied it to the subject.
 
     A raw engine "claimed" is only ever a lead until verification promotes it.
+    Critically, "blocked" and "never looked" are kept out of ``lead`` so they can
+    never be presented as though someone checked and found something.
     """
     status = (row.get("verification") or {}).get("status")
     if status == "confirmed":
         return "found"
     if status == "likely_false_positive":
         return "flagged"
+    if status == "indeterminate":
+        return "indeterminate"
+    if status == "not_examined" or not status:
+        return "not_examined"
     return "lead"
 
 
 def bucket_counts(rows) -> dict:
-    """{'found': n, 'lead': n, 'flagged': n} over an iterable of rows."""
-    counts = {"found": 0, "lead": 0, "flagged": 0}
+    """Counts per :func:`verdict_bucket` over an iterable of rows."""
+    counts = {"found": 0, "lead": 0, "flagged": 0,
+              "indeterminate": 0, "not_examined": 0}
     for row in rows:
         counts[verdict_bucket(row)] += 1
     return counts

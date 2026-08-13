@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from recon.confidence import account_confidence, bucket_counts
+from recon.confidence import account_confidence, bucket_counts, verdict_bucket
 from recon.engines import normalize_site
 
 
@@ -122,8 +122,10 @@ def _score_band(score: int) -> str:
 
 
 def _display_name(row: dict) -> str | None:
+    # A bare page <title> is site boilerplate, not a person's name — including
+    # it is how an unrelated page's title became "the subject's real name".
     enr = row.get("enrichment") or {}
-    return enr.get("jsonld_name") or enr.get("og_title") or enr.get("title")
+    return enr.get("jsonld_name") or enr.get("og_title")
 
 
 def _has_avatar(row: dict) -> bool:
@@ -185,17 +187,20 @@ def exposure_summary(summary: dict) -> dict[str, Any]:
         sorted(cat_counts.items(), key=lambda kv: (-kv[1], kv[0]))
     )
 
-    # Identity signals.
+    # Identity signals. Names are collected ONLY from verification-confirmed
+    # rows: attributing a rejected row's display name to the subject is how an
+    # innocent third party ends up named in a report.
+    confirmed_rows = [r for r in all_rows if verdict_bucket(r) == "found"]
     display_names = []
     seen_names: set[str] = set()
-    for r in all_rows:
+    for r in confirmed_rows:
         name = _display_name(r)
         if name and name.lower() not in seen_names:
             seen_names.add(name.lower())
             display_names.append(name)
     identity_signals = {
         "has_real_name": bool(display_names),
-        "has_avatar": any(_has_avatar(r) for r in all_rows),
+        "has_avatar": any(_has_avatar(r) for r in confirmed_rows),
         "gravatar": bool(email.get("gravatar")),
         "phone_valid": bool(phone.get("valid")),
         "has_domain": bool(domain.get("domain") and not domain.get("error")),

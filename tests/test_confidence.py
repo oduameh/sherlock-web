@@ -67,10 +67,37 @@ def test_verdict_buckets():
     assert verdict_bucket({"verification": {"status": "confirmed"}}) == "found"
     assert verdict_bucket(
         {"verification": {"status": "likely_false_positive"}}) == "flagged"
-    assert verdict_bucket({}) == "lead"  # unverified is a lead, not a "found"
+    # A row with no verdict was never examined — it is not a "lead" either.
+    assert verdict_bucket({}) == "not_examined"
+    assert verdict_bucket({"verification": {"status": "unconfirmed"}}) == "lead"
     counts = bucket_counts([
         {"verification": {"status": "confirmed"}},
-        {},
+        {"verification": {"status": "unconfirmed"}},
         {"verification": {"status": "likely_false_positive"}},
     ])
-    assert counts == {"found": 1, "lead": 1, "flagged": 1}
+    assert counts["found"] == 1 and counts["lead"] == 1 and counts["flagged"] == 1
+
+
+def test_blocked_and_unexamined_are_not_leads():
+    """'We were blocked' and 'we never looked' must never be counted as leads —
+    they are absences of evidence, not weak findings."""
+    assert verdict_bucket({"verification": {"status": "indeterminate"}}) == "indeterminate"
+    assert verdict_bucket({"verification": {"status": "not_examined"}}) == "not_examined"
+    counts = bucket_counts([
+        {"verification": {"status": "confirmed"}},
+        {"verification": {"status": "unconfirmed"}},
+        {"verification": {"status": "likely_false_positive"}},
+        {"verification": {"status": "indeterminate"}},
+        {"verification": {"status": "not_examined"}},
+        {},
+    ])
+    assert counts == {"found": 1, "lead": 1, "flagged": 1,
+                      "indeterminate": 1, "not_examined": 2}
+
+
+def test_unexamined_never_outranks_examined():
+    examined_weak = account_confidence(
+        {"engines": ["s"], "verification": {"status": "unconfirmed"}})
+    never_looked = account_confidence(
+        {"engines": ["s"], "verification": {"status": "not_examined"}})
+    assert examined_weak > never_looked
