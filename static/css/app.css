@@ -941,6 +941,15 @@ select { appearance: auto; }
 .verify-badge.unconfirmed { color: var(--warn); border-color: rgba(230, 171, 62, 0.45); background: var(--warn-soft); }
 .verify-badge.unverified { color: var(--text-3); border-color: var(--border); }
 .verify-badge.indeterminate { color: var(--info); border-color: rgba(72, 207, 224, 0.45); background: var(--info-soft); }
+
+/* account age / last activity, sourced from the platform's own API */
+.row-temporal {
+  font-size: var(--fs-11);
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  margin-top: 4px;
+}
 .verify-badge.false { color: var(--danger); border-color: rgba(240, 97, 93, 0.5); background: var(--danger-soft); }
 
 /* per-row confidence chip (belief this is the subject's account) */

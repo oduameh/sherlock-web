@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from recon import safeweb
+from recon import adapters, policy, safeweb
 from recon.verify import verify_username
 
 logger = logging.getLogger("recon.enrich")
@@ -147,7 +147,11 @@ _SOURCE_ORDER = {"base": 0, "name": 1, "variant": 2}
 
 
 def _verify_priority(row: dict) -> tuple:
-    return (_SOURCE_ORDER.get(row.get("source"), 3),
+    # Adapter-covered rows first: they are cheap, authoritative, and yield
+    # identity + dates, so they are the best possible use of the budget.
+    has_adapter = adapters.adapter_for(row.get("site") or "") is not None
+    return (0 if has_adapter else 1,
+            _SOURCE_ORDER.get(row.get("source"), 3),
             -len(row.get("engines") or []))
 
 
@@ -220,6 +224,55 @@ async def enrich_profiles(rows: list[dict],
 
         async def work(row: dict) -> None:
             nonlocal count
+            # 1. Access policy: some hosts disallow all automated access. We do
+            #    not fetch them, and we say so — "we did not look" is honest;
+            #    inferring absence from a login wall is not.
+            reason = policy.denied_reason(row.get("url") or "")
+            if reason:
+                row["verification"] = policy.not_examined_verdict(reason)
+                count += 1
+                try:
+                    res = on_enriched(row, {})
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception:
+                    logger.exception("on_enriched callback failed")
+                return
+
+            # 2. Per-site adapter: an authoritative public API beats scraping a
+            #    page and guessing. It also yields identity + creation/activity
+            #    dates the generic path cannot see.
+            adapter = adapters.adapter_for(row.get("site") or "")
+            if adapter is not None:
+                async with sem:
+                    result = await adapter.check(row.get("username") or "")
+                row["verification"] = adapters.to_verification(
+                    result, subject_name=subject_name)
+                ident = result.get("identity") or {}
+                temporal = result.get("temporal") or {}
+                data = {}
+                if ident.get("display_name"):
+                    data["jsonld_name"] = ident["display_name"]
+                if ident.get("avatar"):
+                    data["jsonld_image"] = ident["avatar"]
+                if ident.get("bio"):
+                    data["jsonld_description"] = ident["bio"]
+                if data:
+                    row["enrichment"] = data
+                if ident:
+                    row["platform_identity"] = ident
+                if temporal:
+                    row["temporal"] = temporal
+                row["evidence_source"] = result.get("source_url")
+                count += 1
+                try:
+                    res = on_enriched(row, data)
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception:
+                    logger.exception("on_enriched callback failed")
+                return
+
             async with sem:
                 status, html = await _fetch_page(client, row["url"])
             c_status, c_html, c_data = await control_for(

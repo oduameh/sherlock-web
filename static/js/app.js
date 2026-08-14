@@ -865,6 +865,20 @@
     if (status === "indeterminate") return 18;
     return 15; // not examined
   }
+  // Platform dates arrive in mixed shapes (ISO-8601, "Dec 27, 2016", or a unix
+  // epoch). Render a stable YYYY-MM-DD, or pass the value through unchanged.
+  function shortDate(v) {
+    if (v == null || v === "") return "";
+    if (typeof v === "number" || /^\d{9,13}$/.test(String(v))) {
+      var n = Number(v);
+      if (n < 1e12) n *= 1000;               // seconds -> ms
+      var du = new Date(n);
+      if (!isNaN(du.getTime())) return du.toISOString().slice(0, 10);
+    }
+    var d = new Date(v);
+    return isNaN(d.getTime()) ? String(v).slice(0, 10) : d.toISOString().slice(0, 10);
+  }
+
   function rowConfBand(conf) {
     if (conf >= 65) return "conf-high";
     if (conf >= 35) return "conf-med";
@@ -935,6 +949,24 @@
     var conf = (typeof d.confidence === "number") ? d.confidence
              : rowConfFromStatus((d.verification || {}).status);
     applyRowConfidence(r, conf);
+    // Account age / last activity, straight from the platform's own API. In a
+    // time-critical case this is often the single most decisive fact, so it
+    // goes on the row rather than being buried in the payload.
+    if (d.temporal && !r.el.querySelector(".row-temporal")) {
+      var bits = [];
+      if (d.temporal.created_at) bits.push("created " + shortDate(d.temporal.created_at));
+      var last = d.temporal.last_activity || d.temporal.last_post
+              || d.temporal.indexed_at || d.temporal.last_profile_update;
+      if (last) bits.push("active " + shortDate(last));
+      if (bits.length) {
+        var t = document.createElement("div");
+        t.className = "row-temporal";
+        t.textContent = "⏱ " + bits.join(" · ");
+        r.el.querySelector(".rmain").appendChild(t);
+        r.data.created_at = d.temporal.created_at || "";
+        r.data.last_activity = last || "";
+      }
+    }
     var enr = d.enrichment || {};
     var img = enr.jsonld_image || enr.og_image;
     var name = enr.jsonld_name || enr.og_title || enr.title;
@@ -1919,11 +1951,12 @@
 
   els.csvBtn.addEventListener("click", function () {
     if (!currentRun.length) { toast("Nothing to export", "error"); return; }
-    var lines = ["username,site,url,verdict,confidence,engines,source,variant_of,from_name,candidate,display_name,bio"];
+    var lines = ["username,site,url,verdict,confidence,created_at,last_activity,engines,source,variant_of,from_name,candidate,display_name,bio"];
     currentRun.forEach(function (r) {
       lines.push([r.username, r.site, r.url,
                   (r.verification || "unverified"),
                   (r.confidence != null ? r.confidence : ""),
+                  r.created_at || "", r.last_activity || "",
                   (r.engines || []).join("|"), r.source || "",
                   r.variant_of || "", r.from_name || "", r.candidate || "",
                   r.display_name || "", r.bio || ""].map(function (v) {
