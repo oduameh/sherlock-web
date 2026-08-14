@@ -87,10 +87,15 @@
   --fs-26: 26px;
   --fs-32: 32px;
 
-  /* motion */
-  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
-  --dur-1: 0.12s;
-  --dur-2: 0.2s;
+  /* motion — the built-in CSS easings are too weak to feel intentional, so
+     these are stronger custom curves. Never ease-in on UI: it delays the
+     initial movement, exactly when the user is watching most closely. */
+  --ease: cubic-bezier(0.23, 1, 0.32, 1);          /* enter/exit — ease-out */
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);  /* movement on screen */
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);   /* iOS-like drawer curve */
+  --dur-1: 0.12s;   /* press feedback, hover */
+  --dur-2: 0.2s;    /* dropdowns, popovers */
+  --dur-3: 0.26s;   /* drawers, modals — still under the 300ms UI ceiling */
 
   /* z-index scale */
   --z-sticky: 40;
@@ -214,6 +219,7 @@ button { font-family: inherit; }
 }
 .side-nav .app-tab svg { color: var(--text-3); flex-shrink: 0; transition: color var(--dur-1) var(--ease); }
 .side-nav .app-tab:hover { background: var(--bg-2); color: var(--text-1); }
+.side-nav .app-tab:active { transform: scale(0.985); }
 .side-nav .app-tab:hover svg { color: var(--text-2); }
 .side-nav .app-tab.active {
   background: var(--grad-accent-soft);
@@ -349,6 +355,7 @@ button { font-family: inherit; }
   transition: color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
 }
 .icon-btn:hover { color: var(--text-1); border-color: var(--border-input); background: var(--bg-3); }
+.icon-btn:active { transform: scale(0.94); }
 
 /* alerts bell */
 #bellWrap { position: relative; }
@@ -382,7 +389,8 @@ button { font-family: inherit; }
   z-index: var(--z-dropdown);
   overflow: hidden;
 }
-.dropdown.open { display: block; animation: pop-in 0.14s var(--ease); }
+.dropdown { transform-origin: top right; }
+.dropdown.open { display: block; animation: pop-in var(--dur-2) var(--ease); }
 .drop-head {
   display: flex;
   justify-content: space-between;
@@ -462,6 +470,7 @@ main.page.active { display: block; max-width: 1080px; }
   transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
 }
 .mode-tab:hover { color: var(--text-1); }
+.mode-tab:active { transform: scale(0.98); }
 .mode-tab.active {
   color: var(--text-1);
   background: var(--bg-3);
@@ -577,7 +586,8 @@ select { appearance: auto; }
   flex-direction: column;
   box-shadow: var(--shadow-2);
 }
-.dropdown-panel.open { display: flex; animation: pop-in 0.14s var(--ease); }
+.dropdown-panel { transform-origin: top center; }
+.dropdown-panel.open { display: flex; animation: pop-in var(--dur-2) var(--ease); }
 .dropdown-panel .picker-head { padding: var(--sp-2); border-bottom: 1px solid var(--border); }
 #siteList { overflow-y: auto; max-height: 200px; padding: var(--sp-1) 0; }
 .site-item {
@@ -635,7 +645,9 @@ select { appearance: auto; }
 }
 .btn svg { flex-shrink: 0; opacity: 0.9; }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
-.btn:active:not(:disabled) { transform: translateY(1px); }
+/* Scale, not nudge: a press should feel like the interface heard you. Subtle
+   (0.97) and fast, so it reads as feedback rather than as an animation. */
+.btn:active:not(:disabled) { transform: scale(0.97); }
 .btn-block { width: 100%; margin-top: var(--sp-2); }
 
 .btn-primary { background: var(--grad-accent); color: var(--accent-ink); box-shadow: 0 4px 14px rgba(94, 160, 255, 0.24); }
@@ -1166,6 +1178,7 @@ select { appearance: auto; }
   gap: var(--sp-3);
 }
 .cap-card {
+  animation: rise-in var(--dur-3) var(--ease) backwards;
   display: flex;
   align-items: flex-start;
   gap: var(--sp-3);
@@ -1176,10 +1189,12 @@ select { appearance: auto; }
   box-shadow: inset 0 1px 0 var(--edge-hi);
   transition: border-color var(--dur-1) var(--ease), transform var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease);
 }
-.cap-card:hover {
-  border-color: rgba(94, 160, 255, 0.34);
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-2), inset 0 1px 0 var(--edge-hi);
+@media (hover: hover) and (pointer: fine) {
+  .cap-card:hover {
+    border-color: rgba(94, 160, 255, 0.34);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-2), inset 0 1px 0 var(--edge-hi);
+  }
 }
 .cap-ic {
   display: grid;
@@ -1192,6 +1207,12 @@ select { appearance: auto; }
   background: var(--accent-soft);
   border: 1px solid rgba(94, 160, 255, 0.22);
 }
+.cap-card:nth-child(1) { animation-delay: 0ms; }
+.cap-card:nth-child(2) { animation-delay: 45ms; }
+.cap-card:nth-child(3) { animation-delay: 90ms; }
+.cap-card:nth-child(4) { animation-delay: 135ms; }
+.cap-card:nth-child(5) { animation-delay: 180ms; }
+.cap-card:nth-child(6) { animation-delay: 225ms; }
 .cap-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .cap-t { font-size: var(--fs-13); font-weight: 660; color: var(--text-1); }
 .cap-d { font-size: var(--fs-12); color: var(--text-3); line-height: 1.5; }
@@ -1338,7 +1359,7 @@ select { appearance: auto; }
   font-size: var(--fs-13);
   box-shadow: var(--shadow-2);
 }
-#nodePanel.open { display: block; animation: slide-in 0.2s var(--ease); }
+#nodePanel.open { display: block; animation: slide-in var(--dur-3) var(--ease-drawer); }
 #nodePanel h3 { font-size: var(--fs-16); margin-bottom: 4px; word-break: break-all; padding-right: 26px; }
 #nodePanel .np-type {
   display: inline-flex;
@@ -1392,7 +1413,9 @@ select { appearance: auto; }
   background: var(--bg-2);
   transition: border-color var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
 }
-.watch-item:hover { border-color: var(--border-input); transform: translateY(-1px); }
+@media (hover: hover) and (pointer: fine) {
+  .watch-item:hover { border-color: var(--border-input); transform: translateY(-1px); }
+}
 .watch-item .w-label { font-weight: 650; font-size: var(--fs-14); display: flex; align-items: center; gap: var(--sp-2); }
 .watch-item .w-label::before {
   content: "";
@@ -1474,7 +1497,10 @@ select { appearance: auto; }
   border-left: 2px solid transparent;
   transition: border-color var(--dur-1) var(--ease), background var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
 }
-#historyPage .hist-item:hover { border-color: var(--border-input); border-left-color: var(--accent); background: var(--bg-2); transform: translateX(2px); }
+@media (hover: hover) and (pointer: fine) {
+  #historyPage .hist-item:hover { border-color: var(--border-input); border-left-color: var(--accent); background: var(--bg-2); transform: translateX(2px); }
+}
+#historyPage .hist-item:active { transform: scale(0.995); }
 .hist-item .h-user { font-weight: 650; font-size: var(--fs-14); }
 .hist-item .h-meta { color: var(--text-3); font-size: var(--fs-11); margin-top: 2px; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .hist-item .h-found { color: var(--success); }
@@ -1538,7 +1564,7 @@ select { appearance: auto; }
 }
 .toast.success { border-left-color: var(--success); }
 .toast.error { border-left-color: var(--danger); }
-.toast.leaving { animation: toast-out 0.25s var(--ease) forwards; }
+.toast.leaving { animation: toast-out 0.16s var(--ease) forwards; }
 
 /* ==========================================================================
    Modal
@@ -1588,18 +1614,26 @@ select { appearance: auto; }
   70% { box-shadow: 0 0 0 6px transparent; }
   100% { box-shadow: 0 0 0 0 transparent; }
 }
-@keyframes radar {
-  0% { opacity: 0.7; transform: translate(-50%, -50%) scale(0.45); }
-  100% { opacity: 0; transform: translate(-50%, -50%) scale(1); }
-}
 
 @media (prefers-reduced-motion: reduce) {
+  /* Keep opacity and colour transitions — they carry meaning (a row arriving,
+     a verdict changing). Remove motion: transforms, position animations, and
+     anything looping. */
   *, *::before, *::after {
-    animation-duration: 0.001s !important;
+    animation-name: none !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.001s !important;
+    transition-property: opacity, color, background-color, border-color, box-shadow !important;
+    transition-duration: 0.15s !important;
     scroll-behavior: auto !important;
   }
+  /* A pure fade still communicates arrival without any movement. */
+  .user-card, .rrow, .toast, .modal, .dropdown.open, .dropdown-panel.open,
+  #nodePanel.open, .cap-card {
+    animation-name: fade-in !important;
+    animation-duration: 0.15s !important;
+  }
+  .btn:active:not(:disabled), .icon-btn:active, .mode-tab:active,
+  .side-nav .app-tab:active { transform: none !important; }
 }
 
 /* ==========================================================================
@@ -1612,7 +1646,7 @@ select { appearance: auto; }
 }
 
 @media (max-width: 860px) {
-  .sidebar { transform: translateX(-100%); transition: transform 0.22s var(--ease); box-shadow: none; }
+  .sidebar { transform: translateX(-100%); transition: transform var(--dur-3) var(--ease-drawer); box-shadow: none; }
   .sidebar.open { transform: none; box-shadow: var(--shadow-3); }
   .menu-btn { display: inline-grid; }
   .shell { margin-left: 0; }
