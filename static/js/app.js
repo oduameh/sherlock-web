@@ -900,6 +900,23 @@
     chip.title = "confidence this is the subject's account";
   }
 
+  // A row we never fetched has no confidence — printing a number for it invents
+  // evidence that does not exist. Show an em-dash instead, and sort it to the
+  // bottom without pretending to have measured anything.
+  function applyRowUnknownConfidence(r) {
+    r.el.dataset.conf = "0";
+    r.data.confidence = null;
+    var chip = r.el.querySelector(".row-conf");
+    if (!chip) {
+      chip = document.createElement("span");
+      chip.className = "row-conf";
+      r.el.querySelector(".rmain").appendChild(chip);
+    }
+    chip.className = "row-conf conf-none";
+    chip.textContent = "—";
+    chip.title = "not examined — no confidence can be stated";
+  }
+
   // After a run (or a reload) completes: any row that never got a verdict is an
   // unverified lead — label it, then re-rank each card so the strongest matches
   // sit on top and the noise sinks. Nothing is hidden.
@@ -909,7 +926,7 @@
       if (r.data.verification) return;
       setVerifyBadge(r, { status: "not_examined",
         signals: ["not fetched — no evidence either way for this row"] });
-      if (!r.el.dataset.conf) applyRowConfidence(r, 15);
+      if (!r.el.dataset.conf) applyRowUnknownConfidence(r);
     });
     Object.keys(invCards).forEach(function (key) {
       var rowsEl = invCards[key].rows;
@@ -946,9 +963,13 @@
     var r = invRows[key];
     if (!r) return;
     if (d.verification) setVerifyBadge(r, d.verification);
-    var conf = (typeof d.confidence === "number") ? d.confidence
-             : rowConfFromStatus((d.verification || {}).status);
-    applyRowConfidence(r, conf);
+    var vstatus = (d.verification || {}).status;
+    if (vstatus === "not_examined") {
+      applyRowUnknownConfidence(r);
+    } else {
+      applyRowConfidence(r, (typeof d.confidence === "number")
+        ? d.confidence : rowConfFromStatus(vstatus));
+    }
     // Account age / last activity, straight from the platform's own API. In a
     // time-critical case this is often the single most decisive fact, so it
     // goes on the row rather than being buried in the payload.
