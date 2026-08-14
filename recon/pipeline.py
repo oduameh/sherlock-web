@@ -597,6 +597,8 @@ async def run_pipeline(
             "enrichment": data,
             "verification": row.get("verification"),
             "confidence": account_confidence(row),
+            "temporal": row.get("temporal"),
+            "platform_identity": row.get("platform_identity"),
         })
 
     await enrich_profiles(all_rows, on_enriched, subject_name=name)
