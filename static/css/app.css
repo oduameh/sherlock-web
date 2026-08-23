@@ -4,51 +4,74 @@
    Token-driven: refine the tokens, the whole UI follows.
    ========================================================================== */
 
-/* ---------- design tokens ---------- */
+/* ---------- design tokens — SIGNALS OPS ----------
+   Tactical dark ops console. Graphite-green layers, amber working accent,
+   phosphor green reserved for VERIFIED/live signals. Squared corners.
+   Mono chrome (JetBrains Mono) over Inter prose. */
 :root {
-  /* background layers (0 = deepest). Cool near-black navy with a touch of
-     blue so the accent reads as part of the world, not painted on top. */
-  --bg-0: #070a0f;
-  --bg-1: #0e1219;
-  --bg-2: #141a24;
-  --bg-3: #1b2330;
-  --bg-hover: #222c3b;
-  --bg-elevated: #121a28;
+  /* background layers (0 = deepest). Near-black graphite with a green cast;
+     the blueprint grid is painted on body by the theme layer below. */
+  --bg-0: #0a0c0a;
+  --bg-1: #111511;
+  --bg-2: #171d17;
+  --bg-3: #1f271f;
+  --bg-hover: #1f271f;
+  --bg-elevated: #131813;
+  /* Ledger-era extra steps — defined here so every fallback chain resolves */
+  --bg-4: #232c23;
+  --bg-5: #2a352a;
 
   /* borders */
-  --border: #202a38;
-  --border-strong: #33405299;
-  --border-input: #2b3747;
+  --border: #1d251d;
+  --border-strong: #2a352a;
+  --border-input: #242e24;
   /* hairline top-edge highlight for a subtle glass/elevation feel */
-  --edge-hi: rgba(255, 255, 255, 0.045);
+  --edge-hi: rgba(87, 217, 106, 0.06);
+  /* header rules / running heads */
+  --rule-major: rgba(232, 238, 230, 0.14);
+  --separator: var(--border-strong);
 
   /* text */
-  --text-1: #edf2f9;
-  --text-2: #aab6c6;
-  --text-3: #77839a;
+  --text-1: #e8eee6;
+  --text-2: #9aa79a;
+  --text-3: #5f6b5f;
+  --text-4: #4a544a;
 
-  /* accent & semantic */
-  --accent: #5ea0ff;
-  --accent-strong: #93c0ff;
-  --accent-soft: rgba(94, 160, 255, 0.13);
-  --accent-ink: #05101f;
-  --accent-glow: rgba(94, 160, 255, 0.38);
-  --accent-2: #48cfe0;                        /* cyan — gradient partner */
-  --grad-accent: linear-gradient(135deg, #5ea0ff 0%, #48cfe0 100%);
-  --grad-accent-soft: linear-gradient(135deg, rgba(94,160,255,0.18), rgba(72,207,224,0.10));
+  /* accent & semantic.
+     Amber (--accent / --accent-ops) is the WORKING accent: focus, active nav,
+     commit actions. Phosphor green (--accent-signal) is a VERDICT/live colour:
+     confirmed accounts, connected state, closed circuits. It never decorates. */
+  --accent: #e0a63d;
+  --accent-ops: #e0a63d;
+  --accent-signal: #57d96a;
+  --accent-strong: #f0c063;
+  --accent-soft: rgba(224, 166, 61, 0.12);
+  --accent-ink: #0a0c0a;
+  --accent-glow: rgba(224, 166, 61, 0.35);
+  --signal-soft: rgba(87, 217, 106, 0.12);
+  --accent-fill: #e0a63d;                     /* commit buttons — dark label on top */
+  --accent-fill-lo: #c8922f;
+  --accent-2: #57d96a;                        /* gradient partner */
+  --grad-accent: linear-gradient(135deg, #e0a63d 0%, #57d96a 100%);
+  --grad-accent-soft: linear-gradient(135deg, rgba(224,166,61,0.16), rgba(87,217,106,0.10));
 
-  --success: #43cf8f;
-  --success-soft: rgba(67, 207, 143, 0.14);
-  --success-ink: #04130b;
-  --warn: #e6ab3e;
-  --warn-soft: rgba(230, 171, 62, 0.14);
-  --danger: #f2635f;
-  --danger-soft: rgba(242, 99, 95, 0.14);
-  --info: #48cfe0;
-  --info-soft: rgba(72, 207, 224, 0.12);
-  --purple: #c39bff;
-  --purple-soft: rgba(195, 155, 255, 0.12);
+  --success: #57d96a;
+  --success-soft: rgba(87, 217, 106, 0.13);
+  --success-ink: #07130a;
+  --warn: #e0a63d;
+  --warn-soft: rgba(224, 166, 61, 0.14);
+  --danger: #e05a4e;
+  --danger-soft: rgba(224, 90, 78, 0.15);
+  --info: #5aa9c9;
+  --info-soft: rgba(90, 169, 201, 0.13);
+  --purple: #b18cff;
+  --purple-soft: rgba(177, 140, 255, 0.13);
   --pink: #f778ba;
+
+  /* circuit-state LEDs (health board) */
+  --status-open: #e05a4e;
+  --status-half: #e0a63d;
+  --status-closed: #57d96a;
 
   /* spacing scale */
   --sp-1: 4px;
@@ -58,23 +81,24 @@
   --sp-5: 24px;
   --sp-6: 32px;
 
-  /* radii */
-  --r-sm: 7px;
-  --r-md: 11px;
-  --r-lg: 16px;
+  /* radii — tactical squared corners */
+  --r-sm: 2px;
+  --r-md: 3px;
+  --r-lg: 4px;
   --r-pill: 999px;
 
-  /* shadows — layered, with a faint cool tint for depth */
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.38), 0 1px 1px rgba(0, 0, 0, 0.22);
-  --shadow-2: 0 12px 32px rgba(0, 0, 0, 0.5);
-  --shadow-3: 0 28px 64px rgba(0, 0, 0, 0.62);
-  --ring: 0 0 0 3px rgba(94, 160, 255, 0.22);
+  /* shadows — layered, near-black */
+  --shadow-0: 0 0 0 0 transparent;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.45), 0 1px 1px rgba(0, 0, 0, 0.28);
+  --shadow-2: 0 12px 32px rgba(0, 0, 0, 0.55);
+  --shadow-3: 0 28px 64px rgba(0, 0, 0, 0.66);
+  --ring: 0 0 0 3px rgba(224, 166, 61, 0.22);
 
-  /* typography */
-  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+  /* typography — JetBrains Mono speaks for the chrome, Inter for prose */
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco,
-    "Cascadia Code", "Roboto Mono", Consolas, monospace;
+  --font-mono: 'JetBrains Mono', ui-monospace, "SF Mono", SFMono-Regular, Menlo,
+    Monaco, Consolas, monospace;
   --fs-10: 10px;
   --fs-11: 11px;
   --fs-12: 12px;
@@ -87,15 +111,20 @@
   --fs-26: 26px;
   --fs-32: 32px;
 
-  /* motion — the built-in CSS easings are too weak to feel intentional, so
-     these are stronger custom curves. Never ease-in on UI: it delays the
-     initial movement, exactly when the user is watching most closely. */
+  /* motion — unchanged curves from the Ledger system */
   --ease: cubic-bezier(0.23, 1, 0.32, 1);          /* enter/exit — ease-out */
   --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);  /* movement on screen */
   --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);   /* iOS-like drawer curve */
   --dur-1: 0.12s;   /* press feedback, hover */
   --dur-2: 0.2s;    /* dropdowns, popovers */
-  --dur-3: 0.26s;   /* drawers, modals — still under the 300ms UI ceiling */
+  --dur-3: 0.26s;   /* drawers, modals */
+
+  /* control metrics */
+  --ctl-h: 34px;
+  --ctl-h-lg: 42px;
+  --ctl-gap: 8px;
+  --ctl-px: 12px;
+  --mat-hi: inset 0 1px 0 var(--edge-hi);
 
   /* z-index scale */
   --z-sticky: 40;
@@ -107,6 +136,9 @@
 
   --sidebar-w: 244px;
   --topbar-h: 64px;
+
+  /* blueprint grid etch (body background, theme layer) */
+  --grid-line: rgba(87, 217, 106, 0.03);
 }
 
 /* ---------- base ---------- */
@@ -9066,3 +9098,483 @@ main.page.active { display: block; max-width: 1120px; }
 }
 /* "not examined" states no number at all — an em-dash, not a manufactured %. */
 .row-conf.conf-none { color: var(--unexamined, var(--text-3)); border-color: transparent; background: none; }
+
+/* ==========================================================================
+   BLOCK 17: SIGNALS OPS THEME LAYER
+   ==========================================================================
+   The bold-identity pass ported from the approved Superdesign drafts
+   (project "Sherlock Web — UI Revamp", SIGNALS OPS direction).
+
+   Relationship to the Ledger blocks above: tokens did most of the work
+   (every fallback chain now resolves to graphite-green values), but some
+   patterns cannot be expressed as token swaps. This layer overrides by
+   source order and, where the originals use ID selectors (#controls …),
+   matches that specificity. Nothing here renames a class or id app.js
+   reads.
+
+   Identity rules:
+   · Amber is the WORKING accent (focus, active nav, commit actions).
+   · Phosphor green is a VERDICT/live colour: confirmed accounts,
+     connected state, closed circuits. It never decorates chrome.
+   · Mono chrome: nav, buttons, labels, stamps speak JetBrains Mono;
+     Inter carries prose (bios, hints' sentences, leads).
+   · Squared corners; hairline rules over boxes; blueprint grid etched
+     into the page background at 3% opacity.
+   ========================================================================== */
+
+/* ---------- page: blueprint grid replaces radial glows ------------------- */
+html { background: var(--bg-0); }
+body {
+  background:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    var(--bg-0);
+  background-size: 24px 24px, 24px 24px, auto;
+  background-attachment: fixed;
+}
+::selection { background: rgba(224, 166, 61, 0.85); color: var(--bg-0); }
+
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: var(--bg-0); }
+*::-webkit-scrollbar-thumb {
+  background: var(--bg-4);
+  border: 2px solid var(--bg-0);
+  border-radius: 0;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- sidebar: bracketed callsign rail ----------------------------- */
+#sidebar { padding: 16px 14px; }
+
+#sidebar .brand { gap: 12px; margin-bottom: 28px; padding: 0 4px; }
+#sidebar .brand-mark {
+  width: 32px; height: 32px;
+  border-radius: 0;
+  background: none;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  position: relative;
+}
+#sidebar .brand-mark::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border: 1px solid rgba(224, 166, 61, 0.22);
+}
+#sidebar .brand-text strong {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-1);
+}
+#sidebar .brand-text small {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--text-3);
+}
+
+.side-nav { gap: 6px; }
+.app-tab {
+  height: 36px;
+  padding: 0 10px;
+  gap: 10px;
+  border-radius: 0;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-2);
+  font-family: var(--font-mono) !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  transition: color var(--dur-1) var(--ease),
+              background var(--dur-1) var(--ease),
+              border-color var(--dur-1) var(--ease);
+}
+.app-tab:hover {
+  color: var(--text-1);
+  background: rgba(87, 217, 106, 0.05);
+  box-shadow: none;
+}
+.app-tab.active,
+.app-tab.active:hover {
+  background: rgba(224, 166, 61, 0.1);
+  border-color: var(--accent);
+  box-shadow: none;
+  color: var(--accent);
+}
+.tab-callsign { opacity: 0.55; min-width: 44px; }
+.app-tab.active .tab-callsign { opacity: 1; }
+/* the old accent-rail/chip treatment from BLOCK 1 is retired */
+.app-tab.active::before, .app-tab::before { display: none; }
+
+.side-foot-hint {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  line-height: 1.7;
+}
+
+/* ---------- topbar: mono running head + signal status strip -------------- */
+.topbar { background: var(--bg-1); border-bottom: 1px solid var(--border-strong); }
+.topbar-title {
+  font-family: var(--font-mono) !important;
+  font-size: 15px !important;
+  font-weight: 700 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.08em !important;
+}
+.topbar-sub {
+  font-family: var(--font-mono) !important;
+  font-size: 10px !important;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.status-pill {
+  height: 26px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  border-radius: 0;
+  background: rgba(87, 217, 106, 0.05);
+  border: 1px solid rgba(87, 217, 106, 0.25);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent-signal);
+}
+.status-dot {
+  width: 8px; height: 2px;
+  border-radius: 0;
+  background: var(--accent-signal);
+  box-shadow: 0 0 8px var(--accent-signal);
+}
+.status-pill.offline {
+  background: rgba(224, 90, 78, 0.07);
+  border-color: rgba(224, 90, 78, 0.35);
+  color: var(--danger);
+}
+.status-pill.offline .status-dot {
+  background: var(--danger);
+  box-shadow: 0 0 8px var(--danger);
+}
+.badge-count {
+  top: -5px; right: -7px;
+  min-width: 15px; height: 15px;
+  border-radius: 0;
+  background: var(--accent);
+  color: var(--bg-0);
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
+/* ---------- buttons: mono chrome, amber commit ---------------------------- */
+.btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  border-radius: var(--r-sm);
+}
+.btn-block {
+  height: 42px;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+}
+/* Commit actions: amber slab, dark label (white-on-amber fails AA). */
+.btn-primary, .btn-success {
+  background: var(--accent-fill);
+  border-color: transparent;
+  color: var(--accent-ink);
+}
+.btn-primary:active:not(:disabled),
+.btn-success:active:not(:disabled) { background: var(--accent-fill-lo); }
+@media (hover: hover) and (pointer: fine) {
+  .btn-primary:hover:not(:disabled),
+  .btn-success:hover:not(:disabled) { filter: brightness(1.09); background: var(--accent-fill); }
+}
+.btn-danger {
+  background: none;
+  border: 1px solid rgba(224, 90, 78, 0.5);
+  color: var(--danger);
+}
+@media (hover: hover) and (pointer: fine) {
+  .btn-danger:hover:not(:disabled) {
+    background: rgba(224, 90, 78, 0.1);
+    filter: none;
+  }
+}
+.btn-key { border-radius: var(--r-sm); }
+.btn-ghost { border-radius: var(--r-sm); }
+.btn-ghost[aria-pressed="true"] {
+  background: var(--bg-4);
+  border-color: var(--border-strong);
+  color: var(--text-1);
+}
+
+/* ---------- form panel: corner-bracket focus, mono heads ------------------ */
+#controls {
+  width: 372px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-0);
+}
+#controls .mode-tabs { border-bottom: 1px solid var(--border-strong); padding: 0; }
+#controls .mode-tab {
+  height: 46px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+#controls .mode-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+#controls .field > label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-2);
+}
+input[type="text"], input[type="number"], input[type="email"], textarea, select {
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+  border-color: var(--border-input);
+}
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+textarea, input[type="text"], input[type="email"] { font-family: var(--font-sans); }
+/* Machine-issued strings stay mono (BLOCK 3 §5 scoping preserved) */
+input[type="number"], .mono-input { font-family: var(--font-mono); }
+
+/* Corner brackets: the focus frame of the identity. */
+.field { position: relative; }
+.field:focus-within::before,
+.field:focus-within::after {
+  content: "";
+  position: absolute;
+  width: 9px; height: 9px;
+  pointer-events: none;
+}
+.field:focus-within::before {
+  left: -3px; top: -1px;
+  border-top: 2px solid var(--accent);
+  border-left: 2px solid var(--accent);
+}
+.field:focus-within::after {
+  right: -3px; bottom: -1px;
+  border-right: 2px solid var(--accent);
+  border-bottom: 2px solid var(--accent);
+}
+
+.hint {
+  border-left: 1px solid var(--border-strong);
+  padding-left: 10px;
+  font-size: 11px;
+}
+.form-sep {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--text-3);
+}
+.check-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+}
+input[type="checkbox"] { accent-color: var(--accent); }
+
+/* Recessed scan-parameter tray */
+.opt-tray {
+  background: var(--bg-2);
+  border-top: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border-strong);
+  padding: 14px 20px;
+  margin: 0 -20px;
+}
+#controls .form-group { padding: 18px 20px 20px; }
+
+/* ---------- results: ledger rows & verdict colours ------------------------ */
+.rrow { border-radius: 0; }
+.row-url, .row-handle, .mono, code {
+  font-family: var(--font-mono);
+}
+.sh-live {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  border-radius: 0;
+}
+.stat-k {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+.stat-v { font-family: var(--font-mono); }
+.progress-fill {
+  background: var(--accent-signal);
+  box-shadow: 0 0 10px rgba(87, 217, 106, 0.4);
+}
+.progress-track { border-radius: 0; }
+
+/* ---------- panels (watchlist / history / health) ------------------------- */
+.panel {
+  background: var(--bg-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+}
+.panel-title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--text-2);
+}
+.hist-item, .watch-item { border-radius: 0; }
+
+/* circuit-state LEDs — glow only when open (a live fault deserves light) */
+.badge { border-radius: 1px; }
+.badge.circuit-open {
+  background: var(--status-open);
+  box-shadow: 0 0 8px rgba(224, 90, 78, 0.6);
+}
+.badge.circuit-half { background: var(--status-half); }
+.badge.circuit-closed {
+  background: transparent;
+  border: 1px solid var(--status-closed);
+}
+
+/* ---------- hero empty state ---------------------------------------------- */
+.hero-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--text-3);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.hero-eyebrow::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-strong);
+}
+.hero-eyebrow-dot {
+  width: 12px; height: 2px;
+  border-radius: 0;
+  background: var(--accent);
+  animation: none;
+}
+.hero-title {
+  font-family: var(--font-sans);
+  font-size: clamp(30px, 4vw, 42px);
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: -0.03em;
+  line-height: 1.02;
+}
+.hero-accent {
+  display: block;
+  color: var(--text-3);
+}
+.hero-accent::after {
+  content: "_";
+  color: var(--accent-signal);
+  animation: sop-blink 1.1s steps(1) infinite;
+}
+@keyframes sop-blink { 50% { opacity: 0; } }
+.cap-grid { gap: 32px; }
+.cap-card {
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  counter-increment: cap;
+}
+.cap-grid { counter-reset: cap; }
+.cap-card::before {
+  content: "[" counter(cap, decimal-leading-zero) "]";
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--accent);
+  display: block;
+  margin-bottom: 10px;
+}
+.cap-t {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.cap-d { font-size: 13px; color: var(--text-3); }
+.cap-ic { color: var(--text-3); }
+
+/* ---------- overlays ------------------------------------------------------ */
+.dropdown, .dropdown-panel, .modal {
+  background: var(--bg-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-2);
+}
+.modal h3 {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+.drop-head, .picker-head { font-family: var(--font-mono); }
+
+/* toast: a console line, not a pill */
+#toastWrap .toast {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+  border: 1px solid var(--border-strong);
+}
+
+/* ---------- graph panel ---------------------------------------------------- */
+.graph-legend, .graph-zoom, #graphToolbar {
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.legend-title {
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+
+/* ---------- motion discipline ---------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .hero-accent::after { animation: none; }
+}
