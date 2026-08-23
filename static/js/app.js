@@ -56,6 +56,8 @@
     invStartBtn: document.getElementById("invStartBtn"),
     invStopBtn: document.getElementById("invStopBtn"),
     graphPanel: document.getElementById("graphPanel"),
+    graphPngBtn: document.getElementById("graphPngBtn"),
+    graphSearch: document.getElementById("graphSearch"),
     graphFallback: document.getElementById("graphFallback"),
     cy: document.getElementById("cy"),
     confSlider: document.getElementById("confSlider"),
@@ -67,6 +69,10 @@
     graphZoomInBtn: document.getElementById("graphZoomInBtn"),
     graphZoomOutBtn: document.getElementById("graphZoomOutBtn"),
     nodePanel: document.getElementById("nodePanel"),
+    tlBar: document.getElementById("timelineBar"),
+    tlPlayBtn: document.getElementById("tlPlayBtn"),
+    tlScrub: document.getElementById("tlScrub"),
+    tlDate: document.getElementById("tlDate"),
     nodePanelBody: document.getElementById("nodePanelBody"),
     nodePanelClose: document.getElementById("nodePanelClose"),
     bellBtn: document.getElementById("bellBtn"),
@@ -1654,17 +1660,49 @@
   var cy = null;
   var graphData = null;
   var graphLabelsOn = true;
+  var fcoseRegistered = false;
+  var selNode = null;   // first of a possible two-click path trace
 
   var NODE_COLORS = {
-    person: "#5ea0ff",
-    account: "#5ea0ff",
-    email: "#e0a338",
-    phone: "#4cc3d9",
+    person: "#e8eee6",
+    handle: "#e0a63d",
+    account: "#9aa79a",
+    email: "#e0a63d",
+    phone: "#5aa9c9",
     registration: "#7d8a9c",
-    domain: "#c39bff",
+    domain: "#b18cff",
     ip: "#f778ba",
     nameserver: "#6e7681"
   };
+
+  // Node-type → toolbar chip group. Chips hide whole groups at once.
+  function typeGroup(t) {
+    if (t === "account") return "account";
+    if (t === "handle") return "handle";
+    if (t === "email" || t === "phone" || t === "registration") return "contact";
+    return "infra"; // person, domain, ip, nameserver
+  }
+
+  // Age band from an ISO creation date. 0 = new (<6 mo), 1 = mid (<2 y),
+  // 2 = old, -1 = unknown (no ring). Rings are neutral greys on purpose:
+  // age is context, not a verdict.
+  function ageBand(iso) {
+    if (!iso) return -1;
+    var t = Date.parse(iso);
+    if (isNaN(t)) return -1;
+    var days = (Date.now() - t) / 86400000;
+    if (days < 183) return 0;
+    if (days < 730) return 1;
+    return 2;
+  }
+  var AGE_STYLE = [
+    { color: "#e0a63d", padding: 7 },   // new — amber ring (fresh accounts deserve attention)
+    { color: "#9aa79a", padding: 4 },   // mid
+    { color: "#3d463d", padding: 2 }    // old — barely there
+  ];
+
+  // Timeline state: sorted ISO dates of dated nodes; scrub position 0..1000.
+  var tlState = { dates: [], minT: 0, maxT: 1, playing: false, raf: null };
 
   function confidenceBand(conf) {
     if (conf >= 70) return { label: "High", cls: "conf-high" };
@@ -1688,35 +1726,187 @@
 
   function nodeSize(n) {
     if (n.type === "person") return 46;
+    if (n.type === "handle") return 34;   // pivots sit between person and contacts
     if (n.type === "email" || n.type === "phone") return 30;
     return 16 + Math.round((n.confidence || 40) * 0.22);
+  }
+
+  // Which toolbar chips are on. Keys: account / handle / contact / infra.
+  var typeVis = { account: true, handle: true, contact: true, infra: true };
+
+  function nodeVisible(n) {
+    // Confidence slider only gates accounts (inputs/facts are always shown).
+    if (n.data("type") === "account" &&
+        (n.data("confidence") || 0) < parseInt(els.nodeConfSlider.value, 10)) {
+      return false;
+    }
+    if (!typeVis[typeGroup(n.data("type"))]) return false;
+    if (tlState.playing || parseInt(els.tlScrub.value, 10) < 1000) {
+      // Timeline window: dated nodes appear once created; undated nodes are
+      // baseline and fade out while scrubbing (they return at the far end).
+      var d = n.data("created_at");
+      if (d) {
+        if (Date.parse(d) > tlCursor()) return false;
+      } else if (parseInt(els.tlScrub.value, 10) < 1000) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function tlCursor() {
+    var v = parseInt(els.tlScrub.value, 10);
+    return tlState.minT + (tlState.maxT - tlState.minT) * (v / 1000);
   }
 
   function applyGraphFilters() {
     if (!cy) return;
     var edgeMin = parseInt(els.confSlider.value, 10);
-    var nodeMin = parseInt(els.nodeConfSlider.value, 10);
     els.confSliderVal.textContent = edgeMin + "%";
-    els.nodeConfSliderVal.textContent = nodeMin + "%";
-    // Dim account nodes below the confidence threshold (other entity types —
-    // person/email/phone/domain/ip — are inputs/facts and always shown).
-    var dimmed = {};
-    cy.nodes().forEach(function (n) {
-      var weak = n.data("type") === "account" &&
-        (n.data("confidence") || 0) < nodeMin;
-      dimmed[n.id()] = weak;
-      n.style("opacity", weak ? 0.12 : 1);
+    els.nodeConfSliderVal.textContent = parseInt(els.nodeConfSlider.value, 10) + "%";
+    var vis = {};
+    cy.batch(function () {
+      cy.nodes().forEach(function (n) {
+        var ok = nodeVisible(n);
+        vis[n.id()] = ok;
+        n.style("display", ok ? "element" : "none");
+      });
+      cy.edges().forEach(function (e) {
+        var show = (e.data("confidence") || 0) >= edgeMin &&
+          vis[e.data("source")] && vis[e.data("target")];
+        e.style("display", show ? "element" : "none");
+      });
     });
-    // Hide an edge below the edge threshold, or if either endpoint is dimmed.
-    cy.edges().forEach(function (e) {
-      var show = (e.data("confidence") || 0) >= edgeMin &&
-        !dimmed[e.data("source")] && !dimmed[e.data("target")];
-      e.style("display", show ? "element" : "none");
-    });
+    updateTlReadout();
   }
 
   // Backwards-compatible alias (renderGraph calls applyEdgeFilter once built).
   var applyEdgeFilter = applyGraphFilters;
+
+  // ---- timeline scrubber -------------------------------------------------
+  function setupTimeline(data) {
+    tlState.dates = data.nodes.map(function (n) { return n.created_at; })
+      .filter(function (d) { return d && !isNaN(Date.parse(d)); })
+      .map(function (d) { return Date.parse(d); })
+      .sort(function (a, b) { return a - b; });
+    // Fewer than three dated sources is not a story — hide the control
+    // rather than play a nearly empty film.
+    els.tlBar.hidden = tlState.dates.length < 3;
+    if (els.tlBar.hidden) return;
+    tlState.minT = tlState.dates[0];
+    tlState.maxT = Date.now();
+    els.tlScrub.value = "1000";
+    stopTimelinePlay();
+  }
+
+  function updateTlReadout() {
+    if (els.tlBar.hidden) return;
+    var t = tlCursor();
+    els.tlDate.textContent = new Date(t).toISOString().slice(0, 7);
+    els.tlPlayBtn.innerHTML = tlState.playing ? "&#10074;&#10074;" : "&#9654;";
+  }
+
+  function stopTimelinePlay() {
+    tlState.playing = false;
+    if (tlState.raf) cancelAnimationFrame(tlState.raf);
+    tlState.raf = null;
+    updateTlReadout();
+  }
+
+  els.tlScrub.addEventListener("input", function () {
+    stopTimelinePlay();
+    applyGraphFilters();
+  });
+
+  els.tlPlayBtn.addEventListener("click", function () {
+    if (tlState.playing) { stopTimelinePlay(); return; }
+    tlState.playing = true;
+    var start = null, dur = 12000, from = parseInt(els.tlScrub.value, 10);
+    if (from >= 1000) { from = 0; }
+    function step(ts) {
+      if (!tlState.playing) return;
+      if (!start) start = ts;
+      var k = Math.min(1, from + ((ts - start) / dur) * 1000);
+      els.tlScrub.value = String(Math.round(k));
+      applyGraphFilters();
+      if (k >= 1000) { stopTimelinePlay(); return; }
+      tlState.raf = requestAnimationFrame(step);
+    }
+    tlState.raf = requestAnimationFrame(step);
+  });
+
+  // ---- type chips ----------------------------------------------------------
+  Array.prototype.forEach.call(document.querySelectorAll(".gchip"), function (chip) {
+    chip.addEventListener("click", function () {
+      var g = chip.getAttribute("data-gtype");
+      typeVis[g] = !typeVis[g];
+      chip.classList.toggle("active", typeVis[g]);
+      chip.setAttribute("aria-pressed", String(typeVis[g]));
+      applyGraphFilters();
+    });
+  });
+
+  // ---- PNG export -----------------------------------------------------------
+  els.graphPngBtn.addEventListener("click", function () {
+    if (!cy) return;
+    var png = cy.png({ bg: "#0a0c0a", full: true, scale: 2 });
+    var a = document.createElement("a");
+    a.href = png;
+    a.download = "signals-ops-graph.png";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    toast("Graph exported as PNG", "success");
+  });
+
+  // ---- search ----------------------------------------------------------------
+  var searchTimer = null;
+  els.graphSearch.addEventListener("input", function () {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(applySearchDim, 120);
+  });
+  els.graphSearch.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape") {
+      els.graphSearch.value = "";
+      applySearchDim();
+    } else if (ev.key === "Enter") {
+      var q = els.graphSearch.value.trim().toLowerCase();
+      if (!q || !cy) return;
+      var hit = cy.nodes().filter(function (n) {
+        if (n.style("display") === "none") return false;
+        var d = n.data();
+        var hay = ((d.label || "") + " " + (d.sublabel || "") + " " +
+          ((d.data || {}).category || "")).toLowerCase();
+        return hay.indexOf(q) !== -1;
+      })[0];
+      if (hit) {
+        cy.animate({ center: { eles: hit }, zoom: Math.max(cy.zoom(), 1.1) },
+                   { duration: 250 });
+        hit.trigger("tap");
+      } else {
+        toast("No node matches “" + q + "”", "error");
+      }
+    }
+  });
+
+  function applySearchDim() {
+    if (!cy) return;
+    var q = els.graphSearch.value.trim().toLowerCase();
+    if (!q) {
+      cy.nodes().removeClass("srch-out");
+      return;
+    }
+    cy.batch(function () {
+      cy.nodes().forEach(function (n) {
+        if (n.style("display") === "none") return;
+        var d = n.data();
+        var hay = ((d.label || "") + " " + (d.sublabel || "") + " " +
+          ((d.data || {}).category || "")).toLowerCase();
+        n.removeClass("srch-out");
+        if (hay.indexOf(q) === -1) n.addClass("srch-out");
+      });
+    });
+  }
 
   els.confSlider.addEventListener("input", applyGraphFilters);
   els.nodeConfSlider.addEventListener("input", applyGraphFilters);
@@ -1747,7 +1937,7 @@
     }
   });
 
-  function showNodePanel(n) {
+  function showNodePanel(n, note) {
     var d = n.data();
     // Tint the drawer (top border, type dot, avatar ring) to match the node.
     els.nodePanel.style.setProperty("--np-accent", d.color || "#5ea0ff");
@@ -1773,6 +1963,12 @@
       chip.textContent = band.label + " confidence · " + d.confidence + "%";
       body.appendChild(chip);
     }
+    if (note) {
+      var pnote = document.createElement("span");
+      pnote.className = "conf-band conf-med";
+      pnote.textContent = note;
+      body.appendChild(pnote);
+    }
 
     function addField(k, v, isLink) {
       if (v === null || v === undefined || v === "") return;
@@ -1795,6 +1991,7 @@
 
     addField("profile", d.url, true);
     addField("engines", (d.engines || []).join(", "));
+    addField("created", d.created_at ? String(d.created_at).slice(0, 10) : null);
     var data = d.data || {};
     Object.keys(data).forEach(function (k) {
       if (data[k] === null || data[k] === undefined || data[k] === "") return;
@@ -1830,12 +2027,19 @@
       els.graphFallback.style.display = "block";
       return;
     }
+    if (!fcoseRegistered && typeof window.cytoscapeFcose !== "undefined" &&
+        typeof window.coseBase !== "undefined" &&
+        typeof window.layoutBase !== "undefined") {
+      try { cytoscape.use(window.cytoscapeFcose); fcoseRegistered = true; }
+      catch (e) { /* fall back to cose below */ }
+    }
     var elements = [];
     data.nodes.forEach(function (n) {
       var nd = {
         id: n.id, type: n.type, label: n.label, sublabel: n.sublabel || "",
         url: n.url || "",
         confidence: n.confidence, engines: n.engines || [],
+        created_at: n.created_at || null,
         data: n.data || {},
         color: nodeColor(n), size: nodeSize(n),
         labelText: n.label + (n.sublabel ? "\n" + n.sublabel : "")
@@ -1844,7 +2048,15 @@
       // matches the `node[avatar]` style rule, and cytoscape then throws
       // parsing "" as a background-image — which silently killed the graph.
       if (n.avatar) nd.avatar = n.avatar;
-      elements.push({ data: nd });
+      var el = { data: nd, classes: "g-" + typeGroup(n.type) };
+      // Age ring (underlay): neutral encoding — amber = fresh account,
+      // greys = older. Undated nodes get no ring.
+      var band = ageBand(nd.created_at);
+      if (band >= 0) {
+        el.data.ageBand = band;
+        el.classes += " aged";
+      }
+      elements.push(el);
     });
     data.edges.forEach(function (e) {
       elements.push({ data: {
@@ -1853,6 +2065,7 @@
       }});
     });
     if (cy) { cy.destroy(); cy = null; }
+    selNode = null;
     cy = cytoscape({
       container: els.cy,
       elements: elements,
@@ -1862,17 +2075,23 @@
           "background-color": "data(color)",
           "width": "data(size)", "height": "data(size)",
           "label": "data(labelText)",
-          "color": "#eaf0f7", "font-size": 9, "line-height": 1.3,
-          "font-family": "ui-sans-serif, system-ui, sans-serif",
+          "color": "#e8eee6", "font-size": 9, "line-height": 1.3,
+          "font-family": "'JetBrains Mono', ui-monospace, monospace",
           "min-zoomed-font-size": 7,
           "text-wrap": "wrap", "text-max-width": "110px",
           "text-valign": "bottom", "text-margin-y": 5,
-          "text-background-color": "#090c11", "text-background-opacity": 0.78,
+          "text-background-color": "#0a0c0a", "text-background-opacity": 0.82,
           "text-background-padding": 3, "text-background-shape": "roundrectangle",
           "border-width": 1.5, "border-color": "data(color)", "border-opacity": 0.55,
           "background-opacity": 0.95,
           "transition-property": "border-width, border-color, opacity",
           "transition-duration": 120
+        }},
+        // Age rings: an underlay halo whose colour/size encodes account age.
+        { selector: "node.aged", style: {
+          "underlay-color": "mapData(ageBand, 0, 2, #e0a63d, #3d463d)",
+          "underlay-padding": "mapData(ageBand, 0, 2, 7px, 2px)",
+          "underlay-opacity": 0.5
         }},
         // Contact identifiers read as tags; domains as hexagons; IPs as diamonds.
         { selector: 'node[type="email"]', style: { "shape": "round-rectangle" } },
@@ -1881,8 +2100,13 @@
         { selector: 'node[type="nameserver"]', style: { "shape": "round-rectangle" } },
         { selector: 'node[type="domain"]', style: { "shape": "hexagon" } },
         { selector: 'node[type="ip"]', style: { "shape": "diamond" } },
+        // Handle pivots: square, amber outline — the reuse signal.
+        { selector: 'node[type="handle"]', style: {
+          "shape": "cut-rectangle", "border-width": 2,
+          "border-color": "#e0a63d", "border-opacity": 0.9
+        }},
         { selector: 'node[type="person"]', style: {
-          "border-width": 3, "border-color": "#eaf0f7", "border-opacity": 1,
+          "border-width": 3, "border-color": "#e8eee6", "border-opacity": 1,
           "font-size": 12, "font-weight": "bold"
         }},
         { selector: "node[avatar]", style: {
@@ -1892,25 +2116,27 @@
         }},
         { selector: "edge", style: {
           "width": "mapData(confidence, 0, 100, 1, 4.5)",
-          "line-color": "#3a4658", "curve-style": "bezier",
+          "line-color": "#26302a", "curve-style": "bezier",
           "opacity": 0.85,
-          "label": "data(confidence)", "font-size": 8, "color": "#8a97a8",
+          "label": "data(confidence)", "font-size": 8, "color": "#9aa79a",
           "min-zoomed-font-size": 8,
-          "font-family": "ui-monospace, monospace",
+          "font-family": "'JetBrains Mono', ui-monospace, monospace",
           "text-rotation": "autorotate",
-          "text-background-color": "#090c11", "text-background-opacity": 0.7,
+          "text-background-color": "#0a0c0a", "text-background-opacity": 0.75,
           "text-background-padding": 1
         }},
-        { selector: "edge[confidence >= 60]", style: { "line-color": "#4cc38a" } },
+        { selector: "edge[confidence >= 60]", style: { "line-color": "#57d96a" } },
         { selector: "edge[confidence < 40]", style: { "line-style": "dashed", "opacity": 0.6 } },
         { selector: "node:selected", style: { "border-color": "#ffffff", "border-width": 3, "border-opacity": 1 } },
-        { selector: "node.hl", style: { "border-color": "#ffffff", "border-width": 3, "border-opacity": 1 } },
-        { selector: "edge.hl", style: { "line-color": "#8dbcff", "opacity": 1, "width": 3 } },
-        { selector: ".dimmed", style: { "opacity": 0.12 } }
+        { selector: "node.hl", style: { "border-color": "#e8eee6", "border-width": 3, "border-opacity": 1 } },
+        { selector: "edge.hl", style: { "line-color": "#e0a63d", "opacity": 1, "width": 3 } },
+        { selector: ".dimmed", style: { "opacity": 0.12 } },
+        { selector: ".srch-out", style: { "opacity": 0.15 } }
       ],
       layout: {
-        name: "cose", animate: true, animationDuration: 800,
-        nodeRepulsion: 8000, idealEdgeLength: 110, gravity: 0.4,
+        name: fcoseRegistered ? "fcose" : "cose",
+        animate: true, animationDuration: 800,
+        nodeRepulsion: 12000, idealEdgeLength: 100, gravity: 0.35,
         padding: 40
       }
     });
@@ -1920,10 +2146,23 @@
     requestAnimationFrame(function () {
       if (cy) { cy.resize(); cy.fit(undefined, 40); }
     });
-    // Selecting a node focuses its neighborhood: highlight the node + its
-    // links, dim everything else. Tapping the background clears the focus.
+    setupTimeline(data);
+    applyEdgeFilter();
+    if (!graphLabelsOn) {
+      cy.style().selector("node").style("label", "").update();
+    }
+
+    // Selecting a node focuses its neighborhood; selecting a SECOND node while
+    // one is focused traces the strongest connection chain between them
+    // ("how does this registration tie back to the subject?"). Tapping the
+    // background clears everything.
     cy.on("tap", "node", function (evt) {
       var n = evt.target;
+      if (selNode && selNode !== n && selNode.inside()) {
+        highlightPath(selNode, n);
+        return;
+      }
+      selNode = n;
       var hood = n.closedNeighborhood();
       cy.elements().addClass("dimmed").removeClass("hl");
       hood.removeClass("dimmed");
@@ -1934,15 +2173,35 @@
     });
     cy.on("tap", function (evt) {
       if (evt.target === cy) {
+        selNode = null;
         cy.elements().removeClass("hl dimmed");
         els.nodePanel.classList.remove("open");
       }
     });
-    applyEdgeFilter();
-    if (!graphLabelsOn) {
-      cy.style().selector("node").style("label", "").update();
-    }
     els.graphPanel.scrollIntoView({ behavior: "smooth" });
+  }
+
+  // Trace the shortest evidence chain between two nodes and light it up.
+  function highlightPath(a, b) {
+    var dij = cy.elements().dijkstra({ root: a, directed: false });
+    var path = dij.pathTo(b);
+    if (!path || path.length === 0) {
+      toast("No connection found between those nodes", "error");
+      return;
+    }
+    cy.elements().addClass("dimmed").removeClass("hl");
+    path.removeClass("dimmed");
+    path.nodes().addClass("hl");
+    path.edges().addClass("hl");
+    var weakest = null;
+    path.edges().forEach(function (e) {
+      var c = e.data("confidence") || 0;
+      if (weakest === null || c < weakest) weakest = c;
+    });
+    showNodePanel(b, weakest === null ? null :
+      "path via " + (path.nodes().length - 1) + " hops · weakest link " +
+      weakest + "%");
+    selNode = null;
   }
 
   els.graphBtn.addEventListener("click", function () {

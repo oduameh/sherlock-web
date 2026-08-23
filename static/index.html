@@ -260,16 +260,17 @@
           <div class="graph-legend" aria-label="Graph legend">
             <div class="legend-title">Entities</div>
             <div class="legend-item"><span class="legend-swatch sw-circle sw-person" aria-hidden="true"></span>Person</div>
+            <div class="legend-item"><span class="legend-swatch sw-handle" aria-hidden="true"></span>Handle pivot (reused handle)</div>
             <div class="legend-item"><span class="legend-swatch sw-circle sw-account" aria-hidden="true"></span>Account</div>
             <div class="legend-item"><span class="legend-swatch sw-round sw-email" aria-hidden="true"></span>Email</div>
             <div class="legend-item"><span class="legend-swatch sw-round sw-phone" aria-hidden="true"></span>Phone</div>
             <div class="legend-item"><span class="legend-swatch sw-hex sw-domain" aria-hidden="true"></span>Domain</div>
-            <div class="legend-title">Account signal</div>
-            <div class="legend-item"><span class="legend-swatch sw-circle sw-good" aria-hidden="true"></span>Verification-confirmed</div>
-            <div class="legend-item"><span class="legend-swatch sw-circle sw-name" aria-hidden="true"></span>Unconfirmed lead</div>
-            <div class="legend-item"><span class="legend-swatch sw-circle sw-flag" aria-hidden="true"></span>Likely false positive</div>
+            <div class="legend-title">Age ring</div>
+            <div class="legend-item"><span class="age-ring r-new" aria-hidden="true"></span>&lt; 6 months</div>
+            <div class="legend-item"><span class="age-ring r-mid" aria-hidden="true"></span>6 mo &ndash; 2 years</div>
+            <div class="legend-item"><span class="age-ring r-old" aria-hidden="true"></span>&gt; 2 years</div>
             <div class="legend-title">Confidence</div>
-            <div class="legend-item legend-note">Node size = confidence · sliders hide weak matches</div>
+            <div class="legend-item legend-note">Node size = confidence &middot; click two nodes to trace the path between them</div>
           </div>
           <div id="graphToolbar">
             <span class="graph-zoom">
@@ -278,6 +279,15 @@
             </span>
             <button id="graphFitBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Fit graph to view">Fit</button>
             <button id="graphLabelsBtn" class="btn btn-ghost btn-sm" type="button" aria-pressed="true" aria-label="Toggle node labels">Labels</button>
+            <button id="graphPngBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Download graph as PNG">PNG</button>
+            <input type="text" id="graphSearch" placeholder="find node / site / category&hellip;" aria-label="Search graph nodes" spellcheck="false">
+            <span class="toolbar-sep" aria-hidden="true"></span>
+            <span class="graph-chip-row" role="group" aria-label="Node types">
+              <button class="gchip active" data-gtype="account" type="button" aria-pressed="true">Accounts</button>
+              <button class="gchip active" data-gtype="handle" type="button" aria-pressed="true">Handles</button>
+              <button class="gchip active" data-gtype="contact" type="button" aria-pressed="true">Contacts</button>
+              <button class="gchip active" data-gtype="infra" type="button" aria-pressed="true">Infra</button>
+            </span>
             <span class="toolbar-sep" aria-hidden="true"></span>
             <label for="nodeConfSlider">min account confidence</label>
             <input type="range" id="nodeConfSlider" min="0" max="100" value="0" step="5">
@@ -286,6 +296,13 @@
             <label for="confSlider">min edge confidence</label>
             <input type="range" id="confSlider" min="0" max="100" value="0" step="5">
             <span id="confSliderVal">0%</span>
+          </div>
+          <div id="timelineBar" hidden>
+            <span class="tl-label">TIMELINE</span>
+            <button id="tlPlayBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Play timeline">&#9654;</button>
+            <input type="range" id="tlScrub" min="0" max="1000" value="1000" step="1">
+            <span id="tlDate" class="tl-date">&mdash;</span>
+            <span class="tl-hint">accounts appear as they were created &middot; undated nodes fade until the end</span>
           </div>
           <div id="nodePanel" role="complementary" aria-label="Node details">
             <button class="np-close icon-btn" id="nodePanelClose" type="button" aria-label="Close node details">&times;</button>
@@ -410,6 +427,9 @@
 <div id="toastWrap" aria-live="polite"></div>
 
 <script src="/static/vendor/cytoscape.min.js"></script>
+<script src="/static/vendor/layout-base.js"></script>
+<script src="/static/vendor/cose-base.js"></script>
+<script src="/static/vendor/cytoscape-fcose.js"></script>
 <script>
 // The app no longer uses a service worker (it caused stale-UI bugs and offers no
 // value for a live, server-backed tool). Proactively remove any worker a browser

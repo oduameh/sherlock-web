@@ -1,10 +1,22 @@
 """Build the interactive identity-graph JSON from an investigation summary.
 
-Nodes: one central person node, account nodes (sized by confidence, colored
-by engine count client-side), one email node, one phone node, and registration
-nodes from account-existence hits — holehe on the email, ignorant on the phone.
-Edges carry a confidence score and a human-readable rationale, mostly derived
-from the correlator.
+Nodes: one central person node, **handle pivot nodes** (one per reused handle —
+the same handle on N sites pivots through a single node, so "one handle
+everywhere" is visible at a glance), account nodes (sized by confidence,
+coloured by verification client-side), one email node, one phone node,
+registration nodes from account-existence hits, and domain / IP / nameserver
+infrastructure.
+
+Accounts carry two investigative signals the UI renders directly:
+
+* ``category``   platform category (social / coding / gaming …) from the
+                 pipeline merge, with the vendored WhatsMyName dataset as a
+                 fallback lookup by site name.
+* ``created_at`` account creation date when an adapter reported one (GitHub,
+                 Bluesky, …). The client's timeline scrubber grows the graph
+                 from these dates; nodes without dates are baseline.
+
+Edges carry a confidence score and a human-readable rationale.
 
 Confidence heuristic (advisory):
   account node    45 base, +25 two-engine confirmation, +20 enrichment with
@@ -16,10 +28,38 @@ Confidence heuristic (advisory):
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Optional
 
 from recon.confidence import account_confidence
 from recon.engines import normalize_site
+
+_WMN_DATA = Path(__file__).resolve().parent / "data" / "wmn-data.json"
+_category_cache: Optional[dict[str, str]] = None
+
+
+def _site_categories() -> dict[str, str]:
+    """``{lowercased site name: category}`` from the vendored WMN dataset."""
+    global _category_cache
+    if _category_cache is None:
+        try:
+            data = json.loads(_WMN_DATA.read_text(encoding="utf-8"))
+            _category_cache = {
+                (s.get("name") or "").strip().lower(): s.get("cat")
+                for s in (data.get("sites") or [])
+                if s.get("cat")
+            }
+        except Exception:
+            _category_cache = {}
+    return _category_cache
+
+
+def category_for(site: Optional[str]) -> Optional[str]:
+    """Best-effort platform category for a site name."""
+    if not site:
+        return None
+    return _site_categories().get(str(site).strip().lower())
 
 
 def _avatar(row: dict) -> Optional[str]:
@@ -30,6 +70,11 @@ def _avatar(row: dict) -> Optional[str]:
 def _display_name(row: dict) -> Optional[str]:
     enr = row.get("enrichment") or {}
     return enr.get("jsonld_name") or enr.get("og_title") or enr.get("title")
+
+
+def _created_at(row: dict) -> Optional[str]:
+    """ISO creation date when an adapter reported one."""
+    return (row.get("temporal") or {}).get("created_at") or None
 
 
 def build_graph(summary: dict) -> dict:
@@ -63,6 +108,9 @@ def build_graph(summary: dict) -> dict:
     })
 
     # --- account nodes ------------------------------------------------------
+    # Pass 1 creates every account node; pass 2 wires edges so that reused
+    # handles can pivot through one shared node instead of star-ing off the
+    # person individually.
     url_to_id: dict[str, str] = {}
     acct_by_site: dict[str, str] = {}   # normalized site -> account node id
     all_rows = ((summary.get("accounts") or [])
@@ -73,19 +121,15 @@ def build_graph(summary: dict) -> dict:
         conf = account_confidence(row)
         verification = (row.get("verification") or {}).get("status")
         enr = row.get("enrichment") or {}
-        if row.get("source") == "name":
-            rationale = (f"name-derived candidate '{row.get('candidate')}' "
-                         f"from '{row.get('from_name')}'")
-        elif row.get("source") == "variant":
-            rationale = f"username variant of '{row.get('variant_of')}'"
-        else:
-            rationale = "username match"
+        created = _created_at(row)
+        category = row.get("category") or category_for(row.get("site"))
         add_node({
             "id": nid, "type": "account",
             "label": row.get("username"), "sublabel": row.get("site"),
             "url": row.get("url"), "avatar": _avatar(row),
             "confidence": conf, "engines": row.get("engines") or [],
             "verification": verification,
+            "created_at": created,
             "data": {
                 "site": row.get("site"), "url": row.get("url"),
                 "source": row.get("source"),
@@ -94,6 +138,7 @@ def build_graph(summary: dict) -> dict:
                 "candidate": row.get("candidate"),
                 "display_name": _display_name(row),
                 "verification": verification,
+                "category": category,
                 "bio": enr.get("jsonld_description")
                        or enr.get("og_description"),
             },
@@ -102,7 +147,38 @@ def build_graph(summary: dict) -> dict:
             url_to_id[row["url"]] = nid
         if row.get("site"):
             acct_by_site.setdefault(normalize_site(row["site"]), nid)
-        add_edge("person", nid, conf, rationale)
+
+    def _norm_handle(u: Optional[str]) -> str:
+        return (u or "").strip().lstrip("@").lower()
+
+    # Pass 2: group by normalized handle. Handles used on two or more sites
+    # become pivot nodes; single-site handles stay directly wired to the
+    # person (a pivot for one node is pure noise).
+    by_handle: dict[str, list[dict]] = {}
+    for row in all_rows:
+        h = _norm_handle(row.get("username"))
+        if h:
+            by_handle.setdefault(h, []).append(row)
+    for h, rows in by_handle.items():
+        ids = [f"acct:{r.get('site')}:{r.get('username')}" for r in rows]
+        if len(ids) < 2:
+            r0 = rows[0]
+            add_edge("person", ids[0], account_confidence(r0),
+                     f"username match on {r0.get('site')}")
+            continue
+        hid = f"handle:{h}"
+        top_conf = max(account_confidence(r) for r in rows)
+        add_node({
+            "id": hid, "type": "handle",
+            "label": h, "sublabel": f"{len(ids)} sites",
+            "confidence": top_conf,
+            "data": {"handle": h, "sites": [r.get("site") for r in rows]},
+        })
+        add_edge("person", hid, top_conf, f"handle '{h}' reused across platforms")
+        for r in rows:
+            add_edge(hid, f"acct:{r.get('site')}:{r.get('username')}",
+                     account_confidence(r),
+                     f"'{h}' on {r.get('site')}")
 
     # --- email node + holehe registration nodes ------------------------------
     email_addr = params.get("email") or ""
@@ -130,6 +206,7 @@ def build_graph(summary: dict) -> dict:
                 "label": h.get("site"), "sublabel": h.get("domain"),
                 "confidence": 70,
                 "data": {"domain": h.get("domain"),
+                         "category": category_for(h.get("site")),
                          "email_recovery": h.get("email_recovery"),
                          "phone_number": h.get("phone_number"),
                          "corroborates_phone": h.get("corroborates_phone")},
@@ -169,7 +246,8 @@ def build_graph(summary: dict) -> dict:
                 "label": site, "sublabel": a.get("domain"),
                 "confidence": 70,
                 "data": {"domain": a.get("domain"), "via": "phone",
-                         "method": a.get("method")},
+                         "method": a.get("method"),
+                         "category": category_for(site)},
             })
             add_edge("phone", nid, 70, "registered by phone (ignorant)")
             acct_id = acct_by_site.get(normalize_site(site or ""))
