@@ -98,6 +98,11 @@ async def lifespan(app: FastAPI):
                 await monitor_task
             except asyncio.CancelledError:
                 pass
+        try:
+            from recon import stealthweb
+            await stealthweb.aclose()
+        except Exception:
+            pass
 
 
 app = FastAPI(title="sherlock-web", lifespan=lifespan)

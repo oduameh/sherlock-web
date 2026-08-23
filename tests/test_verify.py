@@ -156,3 +156,42 @@ def test_control_probe_recorded_in_verdict():
                         control_html="<html><body>totally different not found</body></html>",
                         control_extracted={"title": "not found"})
     assert v.get("control_probe") == "ran"
+
+
+def test_cloudflare_challenge_is_indeterminate_not_unconfirmed():
+    # A challenge page is *blockage*: it must not read as a real profile
+    # ("unconfirmed" lead) and never as absence.
+    html = ("<html><head><title>Just a moment...</title></head>"
+            "<body>Checking your browser before accessing.</body></html>")
+    v = verify_username("someone", "https://x/someone", html,
+                        {"title": "Just a moment..."}, status=200)
+    assert v["status"] == "indeterminate"
+    assert "anti-bot challenge page" in v["signals"][0]
+
+
+def test_challenge_phrase_in_bio_alone_does_not_trigger():
+    # Scope check: the phrase must be in title/heading/top-of-content, not
+    # buried mid-body.
+    html = ("<html><head><title>someone · Example</title></head><body>"
+            + "lorem ipsum " * 80
+            + " ...and my friend dared me to verify you are a human, ha. "
+            + "lorem ipsum " * 80
+            + "</body></html>")
+    v = verify_username("someone", "https://x/someone", html,
+                        {"title": "someone · Example"}, status=200)
+    assert v["status"] != "indeterminate"
+
+
+def test_challenge_page_does_not_veto_identity_confirmation():
+    # A structured name match is still the strongest evidence — but a
+    # challenge page carries no structured name anyway; this pins the order.
+    html = ("<html><head><title>Just a moment...</title></head>"
+            "<body>enable javascript and cookies to continue</body></html>")
+    v = verify_username("jsmith", "https://x/jsmith", html, {}, status=200,
+                        subject_name="John Smith")
+    assert v["status"] == "indeterminate"
+
+
+def test_transport_blocked_status_stays_indeterminate():
+    v = verify_username("someone", "https://x/someone", None, {}, status=403)
+    assert v["status"] == "indeterminate"

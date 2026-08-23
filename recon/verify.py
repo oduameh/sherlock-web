@@ -74,6 +74,17 @@ _REMOVED = (
     "no longer available", "account deactivated", "account terminated",
 )
 
+# Anti-bot interstitials: we received *a* page, but it is not the profile —
+# neither confirm nor condemn. Scope-checked like soft-404 phrases (title /
+# heading / top of content) so a bio that jokes about captchas can't trigger it.
+_CHALLENGE = (
+    "just a moment", "attention required", "checking your browser",
+    "verifying you are human", "verify you are a human", "one more step",
+    "enable javascript and cookies", "ddos protection by", "ddos-guard",
+    "cf-challenge", "challenge-platform", "datadome", "perimeterx",
+    "px-captcha", "captcha-delivery",
+)
+
 # HTTP statuses that genuinely prove absence vs. merely block us.
 _ABSENT_STATUS = {404, 410}
 
@@ -224,6 +235,16 @@ def verify_username(username: Optional[str], url: Optional[str],
     text = _visible_text(html)
     headline = _page_headline(html, extracted)
 
+    # 0.5. Anti-bot interstitial: a challenge page must never be read as a
+    #      real profile ("unconfirmed") nor as absence — it is blockage.
+    top = text[:400]
+    for phrase in _CHALLENGE:
+        if phrase in headline or phrase in top:
+            return _verdict("indeterminate", 30,
+                            [f'anti-bot challenge page ("{phrase}") — '
+                             f"cannot determine existence"],
+                            control_probe=probe)
+
     # 1. Subject attribution first: a structured name match vetoes a stray
     #    soft-404 phrase (real profiles do say "this post is no longer
     #    available"), and it is the strongest evidence available.
@@ -272,7 +293,6 @@ def verify_username(username: Optional[str], url: Optional[str],
 
     # 6. Soft-404 stated at the top of the main content, with no corroborating
     #    handle in the metadata — e.g. a generic title over "User not found".
-    top = _visible_text(html, limit=400)
     for phrase in _SOFT_404:
         if phrase in top:
             return _verdict("likely_false_positive", 12,

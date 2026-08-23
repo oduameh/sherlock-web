@@ -27,6 +27,7 @@ import ipaddress
 import logging
 import socket
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -66,15 +67,22 @@ async def _resolve(host: str, port: Optional[int]) -> list[str]:
     return [info[4][0] for info in infos]
 
 
-async def _guard(request: httpx.Request) -> None:
-    """httpx request hook: block non-public destinations (initial + redirects)."""
-    if request.url.scheme not in _ALLOWED_SCHEMES:
-        raise BlockedRequestError(
-            f"blocked non-http(s) scheme: {request.url.scheme}", request=request
-        )
-    host = request.url.host
+async def assert_public_url(url: str) -> None:
+    """Raise :class:`BlockedRequestError` unless ``url`` is an http(s) URL to a
+    publicly routable host (resolved, all addresses checked).
+
+    This is the same check the request hook applies to httpx traffic, exposed
+    for callers whose fetch path bypasses httpx entirely — e.g. the optional
+    Scrapling-based stealth fetcher (:mod:`recon.stealthweb`) must pre-validate
+    every URL it hands to curl-cffi or a headless browser.
+    """
+    parts = urlparse(url)
+    scheme = (parts.scheme or "").lower()
+    if scheme not in _ALLOWED_SCHEMES:
+        raise BlockedRequestError(f"blocked non-http(s) scheme: {scheme}")
+    host = parts.hostname
     if not host:
-        raise BlockedRequestError("blocked request with no host", request=request)
+        raise BlockedRequestError("blocked request with no host")
 
     # If the host is already an IP literal, check it directly; otherwise resolve.
     try:
@@ -82,17 +90,21 @@ async def _guard(request: httpx.Request) -> None:
         ips = [host]
     except ValueError:
         try:
-            ips = await _resolve(host, request.url.port)
+            ips = await _resolve(host, parts.port)
         except socket.gaierror as exc:
             raise BlockedRequestError(
-                f"could not resolve host {host}: {exc}", request=request
-            )
+                f"could not resolve host {host}: {exc}"
+            ) from exc
     for ip in ips:
         if not _is_public_ip(ip):
             raise BlockedRequestError(
-                f"blocked non-public address {ip} for host {host}",
-                request=request,
+                f"blocked non-public address {ip} for host {host}"
             )
+
+
+async def _guard(request: httpx.Request) -> None:
+    """httpx request hook: block non-public destinations (initial + redirects)."""
+    await assert_public_url(str(request.url))
 
 
 def async_client(*, timeout: float = 10.0, headers: Optional[dict] = None,

@@ -1,0 +1,14 @@
+# Optional: the stealth fetch ladder (recon/stealthweb.py).
+#
+# Install on top of requirements.txt to let profile enrichment and
+# verification escalate blocked/empty fetches to browser-TLS-impersonated
+# requests, and (with the browsers installed) to a headless stealth browser:
+#
+#   ./venv/bin/pip install -r requirements-stealth.txt
+#   ./venv/bin/scrapling install        # once, only needed for tier 3
+#
+# Without this file everything still works — the ladder is inert and
+# behaviour is exactly as before. Set RECON_STEALTH=off to disable it even
+# when installed.
+
+scrapling[fetchers]>=0.4.14,<0.5

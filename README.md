@@ -146,6 +146,40 @@ Two honest caveats:
 Everything degrades gracefully: if the `site_health` table is unavailable the
 app logs one warning and scans run unrouted, exactly as before.
 
+## Stealth fetch ladder (optional)
+
+Plain-HTTP enrichment fails silently on modern sites: a non-browser TLS
+handshake gets reset, and JS-rendered or Cloudflare-fronted profiles return an
+empty shell or an interstitial — so verification degrades to "indeterminate"
+and runs lose leads they actually found. With [Scrapling](https://github.com/D4Vinci/Scrapling)
+installed, profile fetching (`recon/enrich.py`) escalates blocked or empty
+fetches up a three-tier ladder:
+
+1. **Guarded httpx** (always, unchanged) — fast path.
+2. **TLS impersonation** (`scrapling` `AsyncFetcher`, `impersonate='chrome'`)
+   — one cheap request with a real browser fingerprint; fixes TLS/JA3-class
+   blocks. No browser needed.
+3. **Headless stealth browser** (`AsyncStealthySession`, Cloudflare solving) —
+   seconds per page, so it's budgeted per run (`RECON_STEALTH_BUDGET`,
+   default 8 fetches).
+
+A tier result displaces the plain fetch only when it yields *real* content;
+a decisive status seen through a better fingerprint (e.g. a genuine 404) still
+upgrades the verdict. Verification also recognises anti-bot interstitials
+explicitly now ("indeterminate", not a misleading "unconfirmed").
+
+```bash
+./venv/bin/pip install -r requirements-stealth.txt
+./venv/bin/scrapling install   # once — downloads browsers for tier 3 only
+```
+
+Without this install the ladder is inert and behaviour is exactly as before;
+`RECON_STEALTH=off` disables it even when installed. Every URL handed to
+Scrapling is pre-validated by the same SSRF guard as plain traffic
+(`recon/safeweb.assert_public_url`). Railway note: tier 2 works in Nixpacks
+as-is; tier 3 needs the browser download plus headroom (~1 GB RAM) — test
+locally before enabling it on a small instance.
+
 ## Access gate (optional)
 
 Set the `APP_PASSWORD` environment variable to put the whole app behind HTTP

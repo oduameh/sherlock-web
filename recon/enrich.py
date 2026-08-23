@@ -11,13 +11,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
 import httpx
 
-from recon import adapters, policy, safeweb
+from recon import adapters, policy, safeweb, stealthweb
 from recon.verify import verify_username
 
 logger = logging.getLogger("recon.enrich")
@@ -26,6 +27,9 @@ MAX_BODY_BYTES = 512 * 1024  # stop reading after 512 KB
 MAX_ENRICH_PER_RUN = 80
 CONCURRENCY = 5
 TIMEOUT_S = 10
+
+# Per-run cap on tier-3 (headless browser) fetches — each one costs seconds.
+STEALTH_BROWSER_BUDGET = int(os.environ.get("RECON_STEALTH_BUDGET") or "8")
 
 # A handle that will not exist anywhere. Fetching a site at this handle gives a
 # "known-negative" page to compare each real hit against (soft-404 detection).
@@ -198,6 +202,33 @@ async def enrich_profiles(rows: list[dict],
     # One control fetch per site host, shared across every hit on that site.
     control_cache: dict[str, tuple] = {}
     control_locks: dict[str, asyncio.Lock] = {}
+    # Per-run budget for tier-3 (headless browser) fetches; decremented inline
+    # (single event loop, no await between read and write → no lost updates).
+    browser_budget = {"left": max(0, STEALTH_BROWSER_BUDGET)}
+    stealth_used = {"tls": 0, "browser": 0}
+
+    async def escalate(url: str) -> tuple[Optional[int], Optional[str], str]:
+        """Stealth ladder behind a failed/blocked plain fetch: tier-2
+        (TLS-impersonated request) first, then tier-3 (headless browser with
+        challenge solving) while budget lasts. Returns ``(status, html, via)``
+        — the best evidence found: full content from whichever tier produced
+        a usable page, else just the tier's decisive status (e.g. a real 404
+        seen through a browser fingerprint), else ``(None, None, ...)`` to
+        keep the plain result untouched."""
+        t2_status, t2_html = await stealthweb.fetch_tls(url)
+        if not stealthweb.should_escalate(t2_status, t2_html):
+            stealth_used["tls"] += 1
+            return t2_status, t2_html, "scrapling_tls"
+        fallback_status = t2_status
+        if browser_budget["left"] > 0:
+            browser_budget["left"] -= 1
+            t3_status, t3_html = await stealthweb.fetch_browser(url)
+            if t3_html and not stealthweb.should_escalate(t3_status, t3_html):
+                stealth_used["browser"] += 1
+                return t3_status, t3_html, "scrapling_browser"
+            if t3_status is not None:
+                fallback_status = t3_status
+        return fallback_status, None, "httpx"
 
     async with safeweb.async_client(timeout=TIMEOUT_S) as client:
 
@@ -275,6 +306,19 @@ async def enrich_profiles(rows: list[dict],
 
             async with sem:
                 status, html = await _fetch_page(client, row["url"])
+            # Stealth ladder: only when the plain fetch looks blocked or
+            # empty, and never for decisive absences (404/410).
+            if stealthweb.enabled() and stealthweb.should_escalate(status, html):
+                esc_status, esc_html, esc_via = await escalate(row["url"])
+                if esc_html is not None:
+                    status, html = esc_status, esc_html
+                    row["fetch_via"] = esc_via
+                    logger.info("stealth fetch rescued %s via %s",
+                                row["url"], esc_via)
+                elif esc_status is not None and not (status or 0) >= 400:
+                    # No content, but a tier answered decisively — upgrade
+                    # only the status evidence (e.g. a browser-seen 404).
+                    status = esc_status
             c_status, c_html, c_data = await control_for(
                 row["url"], row.get("username"))
             try:
@@ -297,4 +341,8 @@ async def enrich_profiles(rows: list[dict],
                 logger.exception("on_enriched callback failed")
 
         await asyncio.gather(*(work(r) for r in targets), return_exceptions=True)
+    if stealth_used["tls"] or stealth_used["browser"]:
+        logger.info("stealth ladder rescued %d profile(s) via TLS impersonation, "
+                    "%d via headless browser",
+                    stealth_used["tls"], stealth_used["browser"])
     return count
