@@ -9674,3 +9674,132 @@ input[type="checkbox"] { accent-color: var(--accent); }
   border: 2px solid var(--accent);
   transform: skewX(-8deg);
 }
+
+/* ---------- BLOCK 17c: graph workbench chrome ------------------------------ */
+.graph-stats {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+  padding: 0 6px;
+}
+
+/* right-click action menu */
+.gctx {
+  position: fixed;
+  z-index: var(--z-dropdown);
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-2);
+  padding: 4px;
+}
+.gctx button {
+  border: 0;
+  background: none;
+  color: var(--text-2);
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+.gctx button:hover { background: rgba(224, 166, 61, 0.1); color: var(--accent); }
+
+/* minimap (cytoscape-navigator) */
+#cyNav {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  width: 168px;
+  height: 112px;
+  display: none;                 /* revealed once the extension initialises */
+  border: 1px solid var(--border-strong);
+  background: var(--bg-0);
+  opacity: 0.92;
+  z-index: 5;
+}
+
+/* focus-mode breadcrumb chip */
+#graphFocusChip {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 4px 0 11px;
+  background: rgba(224, 166, 61, 0.12);
+  border: 1px solid rgba(224, 166, 61, 0.55);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+}
+#graphFocusChip .fc-label { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#graphFocusClose {
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 7px;
+  cursor: pointer;
+}
+#graphFocusClose:hover { color: var(--text-1); }
+
+/* keyboard/mouse help popover */
+#graphHelp {
+  position: absolute;
+  top: 44px;
+  right: 12px;
+  z-index: 6;
+  min-width: 300px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-2);
+  padding: 10px 12px;
+}
+#graphHelp .gh-row {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 10px;
+  padding: 4px 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-2);
+}
+#graphHelp .gh-row .k {
+  color: var(--accent);
+  letter-spacing: 0.04em;
+}
+
+/* fullscreen graph mode */
+#graphPanel.fs {
+  position: fixed;
+  inset: 0;
+  margin: 0;
+  z-index: var(--z-overlay);
+  background: var(--bg-0);
+  border-radius: 0;
+  padding: 12px;
+}
+#graphPanel.fs #cy { height: calc(100% - 96px) !important; }
+
+/* note editor inside the node drawer */
+.np-note { margin-top: 10px; display: grid; gap: 6px; }
+.np-note .k { font-family: var(--font-mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--text-3); }
+.np-note textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-sans);
+  font-size: 12px;
+}

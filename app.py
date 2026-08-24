@@ -1130,7 +1130,23 @@ if RECON_AVAILABLE:
         if not inv["summary"]:
             return JSONResponse({"error": "investigation has not run yet"},
                                 status_code=409)
-        return JSONResponse(build_graph(inv["summary"]))
+        # Run diff: the most recent earlier DONE investigation with identical
+        # inputs becomes the baseline, so re-scans surface new/gone accounts.
+        baseline = None
+        try:
+            with db_connect(DB_PATH) as conn:
+                row = conn.execute(
+                    "SELECT summary FROM investigations"
+                    " WHERE inputs = ? AND id < ? AND status = 'done'"
+                    "   AND summary IS NOT NULL"
+                    " ORDER BY id DESC LIMIT 1",
+                    (json.dumps(inv["inputs"]), inv_id),
+                ).fetchone()
+            if row and row[0]:
+                baseline = json.loads(row[0])
+        except Exception:
+            baseline = None
+        return JSONResponse(build_graph(inv["summary"], baseline=baseline))
 
     # --- investigation intelligence: exposure / timeline / connections -------
 

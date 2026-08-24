@@ -86,3 +86,44 @@ def test_empty_summary_yields_lone_person():
     g = build_graph(_summary())
     assert [n["type"] for n in g["nodes"]] == ["person"]
     assert g["edges"] == []
+
+
+def test_baseline_diff_flags_new_and_gone():
+    baseline = _summary(accounts=[
+        {"site": "GitHub", "username": "alice",
+         "url": "https://github.com/alice", "engines": ["sherlock"],
+         "verification": {"status": "confirmed"}},
+        {"site": "OldSite", "username": "alice",
+         "url": "https://oldsite.com/u/alice", "engines": ["wmn"]},
+    ])
+    current = _summary(accounts=[
+        # same account as baseline -> not new
+        {"site": "GitHub", "username": "alice",
+         "url": "https://github.com/alice", "engines": ["sherlock"]},
+        # absent from baseline -> is_new
+        {"site": "Mastodon", "username": "alice",
+         "url": "https://mastodon.social/@alice", "engines": ["wmn"]},
+    ])
+    g = build_graph(current, baseline=baseline)
+
+    gh = next(n for n in g["nodes"] if n["id"] == "acct:GitHub:alice")
+    assert "is_new" not in gh["data"]
+
+    mast = next(n for n in g["nodes"] if n["id"].startswith("acct:Mastodon"))
+    assert mast["data"]["is_new"] is True
+
+    gone = next(n for n in g["nodes"] if n["data"].get("gone"))
+    assert gone["id"] == "gone:OldSite:alice"
+    assert gone["url"] == "https://oldsite.com/u/alice"
+    edges = {(e["source"], e["target"]) for e in g["edges"]}
+    assert ("person", "gone:OldSite:alice") in edges
+
+
+def test_no_baseline_means_no_diff_markers():
+    g = build_graph(_summary(accounts=[
+        {"site": "GitHub", "username": "alice",
+         "url": "https://github.com/alice", "engines": ["sherlock"]},
+    ]))
+    node = next(n for n in g["nodes"] if n["type"] == "account")
+    assert "is_new" not in node["data"]
+    assert not any(n["data"].get("gone") for n in g["nodes"])

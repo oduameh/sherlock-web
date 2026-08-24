@@ -77,8 +77,19 @@ def _created_at(row: dict) -> Optional[str]:
     return (row.get("temporal") or {}).get("created_at") or None
 
 
-def build_graph(summary: dict) -> dict:
-    """summary: the stored investigation summary. Returns {nodes, edges}."""
+def _all_account_rows(summary: dict) -> list[dict]:
+    return ((summary.get("accounts") or [])
+            + (summary.get("variants") or [])
+            + (summary.get("name_accounts") or []))
+
+
+def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
+    """summary: the stored investigation summary. Returns {nodes, edges}.
+
+    ``baseline`` — a previous summary for the same subject inputs. When
+    given, accounts absent from the baseline are flagged ``is_new`` and
+    baseline-only accounts are emitted as ghost "gone" nodes, so a re-scan
+    reads as case intelligence rather than a flat snapshot."""
     params = summary.get("params") or {}
     nodes: list[dict] = []
     edges: list[dict] = []
@@ -113,9 +124,12 @@ def build_graph(summary: dict) -> dict:
     # person individually.
     url_to_id: dict[str, str] = {}
     acct_by_site: dict[str, str] = {}   # normalized site -> account node id
-    all_rows = ((summary.get("accounts") or [])
-                + (summary.get("variants") or [])
-                + (summary.get("name_accounts") or []))
+    all_rows = _all_account_rows(summary)
+    baseline_urls: Optional[set] = None
+    if baseline is not None:
+        baseline_urls = {
+            r.get("url") for r in _all_account_rows(baseline) if r.get("url")
+        }
     for row in all_rows:
         nid = f"acct:{row.get('site')}:{row.get('username')}"
         conf = account_confidence(row)
@@ -179,6 +193,40 @@ def build_graph(summary: dict) -> dict:
             add_edge(hid, f"acct:{r.get('site')}:{r.get('username')}",
                      account_confidence(r),
                      f"'{h}' on {r.get('site')}")
+
+    # --- run diff vs a baseline scan ----------------------------------------
+    if baseline_urls is not None:
+        current_urls = set(url_to_id)
+        by_id = {n["id"]: n for n in nodes}
+        for row in all_rows:
+            u = row.get("url")
+            if u is None or u in baseline_urls:
+                continue
+            n = by_id.get(f"acct:{row.get('site')}:{row.get('username')}")
+            if n is not None:
+                n["data"]["is_new"] = True
+        for r in _all_account_rows(baseline):
+            u = r.get("url")
+            if not u or u in current_urls:
+                continue
+            nid = f"gone:{r.get('site')}:{r.get('username')}"
+            add_node({
+                "id": nid, "type": "account",
+                "label": r.get("username"), "sublabel": r.get("site"),
+                "url": u, "avatar": _avatar(r),
+                "confidence": account_confidence(r),
+                "engines": r.get("engines") or [],
+                "verification": (r.get("verification") or {}).get("status"),
+                "created_at": _created_at(r),
+                "data": {
+                    "site": r.get("site"), "url": u, "gone": True,
+                    "category": r.get("category") or category_for(r.get("site")),
+                    "display_name": _display_name(r),
+                },
+            })
+            add_edge("person", nid,
+                     max(20, min(account_confidence(r), 50)),
+                     "present in an earlier scan of this subject; now absent")
 
     # --- email node + holehe registration nodes ------------------------------
     email_addr = params.get("email") or ""

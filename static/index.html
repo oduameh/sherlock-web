@@ -256,6 +256,21 @@
       <div id="graphPanel">
         <div id="graphWrap">
           <div id="cy"></div>
+          <div id="cyNav" aria-hidden="true"></div>
+          <div id="graphFocusChip" hidden>
+            <span class="fc-label"></span>
+            <button id="graphFocusClose" type="button" aria-label="Exit focus mode">&times;</button>
+          </div>
+          <div id="graphHelp" hidden>
+            <div class="gh-row"><span class="k">click</span><span>focus a node's neighborhood</span></div>
+            <div class="gh-row"><span class="k">click ×2 nodes</span><span>trace the evidence path between them</span></div>
+            <div class="gh-row"><span class="k">double-click</span><span>ego view — isolate 1 hop (⇧-double-click: 2 hops)</span></div>
+            <div class="gh-row"><span class="k">right-click</span><span>node actions (open, pivot, note, hide)</span></div>
+            <div class="gh-row"><span class="k">F / L / E / S</span><span>fit · labels · export PNG · search</span></div>
+            <div class="gh-row"><span class="k">1–4</span><span>toggle Accounts / Handles / Contacts / Infra</span></div>
+            <div class="gh-row"><span class="k">C / Esc</span><span>cluster by category · clear</span></div>
+            <div class="gh-row"><span class="k">drag</span><span>reposition nodes; pan with background</span></div>
+          </div>
           <div id="graphFallback">Graph library unavailable (static/vendor/cytoscape.min.js missing).</div>
           <div class="graph-legend" aria-label="Graph legend">
             <div class="legend-title">Entities</div>
@@ -279,7 +294,21 @@
             </span>
             <button id="graphFitBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Fit graph to view">Fit</button>
             <button id="graphLabelsBtn" class="btn btn-ghost btn-sm" type="button" aria-pressed="true" aria-label="Toggle node labels">Labels</button>
+            <select id="graphLayout" aria-label="Graph layout">
+              <option value="fcose" selected>force (fcose)</option>
+              <option value="concentric">rings</option>
+              <option value="breadthfirst">tree</option>
+              <option value="circle">circle</option>
+              <option value="grid">grid</option>
+            </select>
+            <button id="graphClusterBtn" class="gchip" type="button" aria-pressed="false" aria-label="Cluster accounts by category">Cluster</button>
+            <button id="graphChangesBtn" class="gchip" type="button" aria-pressed="false" aria-label="Show only changes since previous scan" hidden>Changes</button>
+            <span id="graphStats" class="graph-stats"></span>
             <button id="graphPngBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Download graph as PNG">PNG</button>
+            <button id="graphCsvBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Export nodes and edges as CSV">CSV</button>
+            <button id="graphGraphmlBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Export as GraphML">GraphML</button>
+            <button id="graphFsBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Toggle fullscreen graph">&#9974;</button>
+            <button id="graphHelpBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Keyboard and mouse help">?</button>
             <input type="text" id="graphSearch" placeholder="find node / site / category&hellip;" aria-label="Search graph nodes" spellcheck="false">
             <span class="toolbar-sep" aria-hidden="true"></span>
             <span class="graph-chip-row" role="group" aria-label="Node types">
@@ -413,6 +442,7 @@
 </div>
 
 <!-- Confirm modal -->
+<div id="graphCtx" class="gctx" hidden></div>
 <div id="modalWrap" class="modal-wrap" hidden>
   <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="modalTitle" aria-describedby="modalBody">
     <h3 id="modalTitle">Confirm</h3>
@@ -430,6 +460,8 @@
 <script src="/static/vendor/layout-base.js"></script>
 <script src="/static/vendor/cose-base.js"></script>
 <script src="/static/vendor/cytoscape-fcose.js"></script>
+<link rel="stylesheet" href="/static/vendor/cytoscape-navigator.css">
+<script src="/static/vendor/cytoscape-navigator.js"></script>
 <script>
 // The app no longer uses a service worker (it caused stale-UI bugs and offers no
 // value for a live, server-backed tool). Proactively remove any worker a browser

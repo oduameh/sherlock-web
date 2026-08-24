@@ -58,6 +58,20 @@
     graphPanel: document.getElementById("graphPanel"),
     graphPngBtn: document.getElementById("graphPngBtn"),
     graphSearch: document.getElementById("graphSearch"),
+    graphLayout: document.getElementById("graphLayout"),
+    graphClusterBtn: document.getElementById("graphClusterBtn"),
+    graphChangesBtn: document.getElementById("graphChangesBtn"),
+    graphStats: document.getElementById("graphStats"),
+    graphCsvBtn: document.getElementById("graphCsvBtn"),
+    graphGraphmlBtn: document.getElementById("graphGraphmlBtn"),
+    graphFsBtn: document.getElementById("graphFsBtn"),
+    graphHelpBtn: document.getElementById("graphHelpBtn"),
+    graphHelp: document.getElementById("graphHelp"),
+    cyNav: document.getElementById("cyNav"),
+    graphWrap: document.getElementById("graphWrap"),
+    graphFocusChip: document.getElementById("graphFocusChip"),
+    graphFocusClose: document.getElementById("graphFocusClose"),
+    graphCtx: document.getElementById("graphCtx"),
     graphFallback: document.getElementById("graphFallback"),
     cy: document.getElementById("cy"),
     confSlider: document.getElementById("confSlider"),
@@ -1836,7 +1850,8 @@
   });
 
   // ---- type chips ----------------------------------------------------------
-  Array.prototype.forEach.call(document.querySelectorAll(".gchip"), function (chip) {
+  Array.prototype.forEach.call(
+    document.querySelectorAll(".gchip[data-gtype]"), function (chip) {
     chip.addEventListener("click", function () {
       var g = chip.getAttribute("data-gtype");
       typeVis[g] = !typeVis[g];
@@ -2012,6 +2027,31 @@
         " (" + e.data("confidence") + "%: " + (e.data("rationale") || "") + ")";
     });
     if (inc.length) addField("links", inc.join("\n"));
+
+    // investigator note (persisted per investigation)
+    var notes = loadNotes();
+    var nwrap = document.createElement("div");
+    nwrap.className = "np-note";
+    var nlabel = document.createElement("div");
+    nlabel.className = "k";
+    nlabel.textContent = "note";
+    var nta = document.createElement("textarea");
+    nta.value = notes[n.id()] || "";
+    nta.placeholder = "Investigator note for this entity…";
+    nta.rows = 3;
+    var nsave = document.createElement("button");
+    nsave.type = "button";
+    nsave.className = "btn btn-ghost btn-sm";
+    nsave.textContent = "Save note";
+    nsave.addEventListener("click", function () {
+      saveNote(n.id(), nta.value);
+      toast(nta.value.trim() ? "Note saved" : "Note cleared", "success");
+    });
+    nwrap.appendChild(nlabel);
+    nwrap.appendChild(nta);
+    nwrap.appendChild(nsave);
+    body.appendChild(nwrap);
+
     els.nodePanel.classList.add("open");
   }
 
@@ -2034,7 +2074,9 @@
       catch (e) { /* fall back to cose below */ }
     }
     var elements = [];
+    var notes = loadNotes();
     data.nodes.forEach(function (n) {
+      if (dismissedIds[n.id]) return;   // hidden via right-click this session
       var nd = {
         id: n.id, type: n.type, label: n.label, sublabel: n.sublabel || "",
         url: n.url || "",
@@ -2049,6 +2091,10 @@
       // parsing "" as a background-image — which silently killed the graph.
       if (n.avatar) nd.avatar = n.avatar;
       var el = { data: nd, classes: "g-" + typeGroup(n.type) };
+      // Run-diff markers from the baseline scan.
+      if (nd.data.is_new) el.classes += " is-new";
+      if (nd.data.gone) { el.classes += " gone-node"; nd.labelText += "\n[GONE]"; }
+      if (notes[nd.id]) el.classes += " noted";
       // Age ring (underlay): neutral encoding — amber = fresh account,
       // greys = older. Undated nodes get no ring.
       var band = ageBand(nd.created_at);
@@ -2066,6 +2112,10 @@
     });
     if (cy) { cy.destroy(); cy = null; }
     selNode = null;
+    hideGraphCtx();
+    els.graphFocusChip.hidden = true;
+    var lname = els.graphLayout.value;
+    if (lname === "fcose" && !fcoseRegistered) lname = "cose";
     cy = cytoscape({
       container: els.cy,
       elements: elements,
@@ -2131,15 +2181,46 @@
         { selector: "node.hl", style: { "border-color": "#e8eee6", "border-width": 3, "border-opacity": 1 } },
         { selector: "edge.hl", style: { "line-color": "#e0a63d", "opacity": 1, "width": 3 } },
         { selector: ".dimmed", style: { "opacity": 0.12 } },
-        { selector: ".srch-out", style: { "opacity": 0.15 } }
+        { selector: ".srch-out", style: { "opacity": 0.15 } },
+        // run-diff markers
+        { selector: "node.is-new", style: {
+          "border-color": "#57d96a", "border-width": 3, "border-opacity": 1,
+          "color": "#57d96a"
+        }},
+        { selector: "node.gone-node", style: {
+          "border-style": "dashed", "border-color": "#e05a4e",
+          "background-color": "#e05a4e", "background-opacity": 0.35,
+          "color": "#e05a4e"
+        }},
+        // annotated nodes get an amber label tick via ✎ suffix (see saveNote)
+        { selector: 'node[type = "catparent"]', style: {
+          "shape": "round-rectangle",
+          "background-opacity": 0.04,
+          "border-width": 1, "border-color": "#2a352a", "border-opacity": 0.8,
+          "color": "#5f6b5f", "font-size": 10,
+          "text-valign": "top", "text-margin-y": -4,
+          "text-background-opacity": 0
+        }}
       ],
       layout: {
-        name: fcoseRegistered ? "fcose" : "cose",
+        name: lname,
         animate: true, animationDuration: 800,
         nodeRepulsion: 12000, idealEdgeLength: 100, gravity: 0.35,
-        padding: 40
+        padding: 40,
+        // concentric options
+        concentric: function (n) { return n.data("confidence") || 40; },
+        levelWidth: function () { return 25; },
+        // breadthfirst options
+        roots: "#person", directed: false
       }
     });
+    initNavigator();
+    updateGraphStats();
+    var hasDiff = data.nodes.some(function (n) {
+      return (n.data || {}).is_new || (n.data || {}).gone;
+    });
+    els.graphChangesBtn.hidden = !hasDiff;
+    if (!hasDiff) { changesOnly = false; els.graphChangesBtn.setAttribute("aria-pressed", "false"); els.graphChangesBtn.classList.remove("active"); }
     // Re-fit once painted and again when the animated layout settles — the
     // panel may still be sizing when cytoscape initializes.
     cy.on("layoutstop", function () { cy.fit(undefined, 40); });
@@ -2154,10 +2235,19 @@
 
     // Selecting a node focuses its neighborhood; selecting a SECOND node while
     // one is focused traces the strongest connection chain between them
-    // ("how does this registration tie back to the subject?"). Tapping the
-    // background clears everything.
+    // ("how does this registration tie back to the subject?"). Double-click
+    // isolates an ego view. Right-click opens the action menu.
+    var lastTap = { id: null, at: 0 };
     cy.on("tap", "node", function (evt) {
       var n = evt.target;
+      hideGraphCtx();
+      var now = Date.now();
+      if (lastTap.id === n.id() && now - lastTap.at < 350) {
+        focusEgo(n, evShifter() ? 2 : 1);
+        lastTap = { id: null, at: 0 };
+        return;
+      }
+      lastTap = { id: n.id(), at: now };
       if (selNode && selNode !== n && selNode.inside()) {
         highlightPath(selNode, n);
         return;
@@ -2171,9 +2261,16 @@
       n.connectedEdges().addClass("hl");
       showNodePanel(n);
     });
+    cy.on("cxttap", "node", function (evt) {
+      showGraphCtx(evt.target, evt.renderedPosition || evt.cyRenderedPosition);
+    });
+    cy.on("cxttap", function (evt) {
+      if (evt.target === cy) hideGraphCtx();
+    });
     cy.on("tap", function (evt) {
       if (evt.target === cy) {
         selNode = null;
+        exitEgo();
         cy.elements().removeClass("hl dimmed");
         els.nodePanel.classList.remove("open");
       }
@@ -2203,6 +2300,354 @@
       weakest + "%");
     selNode = null;
   }
+
+  /* ---------------- workbench: notes, dismiss, ego, cluster, exports ------ */
+
+  var dismissedIds = {};     // session-level: hidden via right-click
+  var changesOnly = false;
+  var clusterMode = false;
+
+  function evShifter() {
+    return window.event ? window.event.shiftKey : false;   // dblclick modifier
+  }
+
+  // ---- investigator notes (per investigation, in localStorage) ------------
+  function notesKey() { return "sop.notes." + (currentInvId || "none"); }
+  function loadNotes() {
+    try { return JSON.parse(localStorage.getItem(notesKey()) || "{}"); }
+    catch (e) { return {}; }
+  }
+  function saveNote(nodeId, text) {
+    var notes = loadNotes();
+    if (text && text.trim()) notes[nodeId] = text.trim();
+    else delete notes[nodeId];
+    try { localStorage.setItem(notesKey(), JSON.stringify(notes)); } catch (e) {}
+    if (cy) {
+      var n = cy.getElementById(nodeId);
+      if (n.nonempty()) {
+        n.toggleClass("noted", !!notes[nodeId]);
+        n.data("labelText",
+          (n.data("label") || "") + (n.data("sublabel") ? "\n" + n.data("sublabel") : "") +
+          (notes[nodeId] ? " ✎" : ""));
+      }
+    }
+  }
+
+  // ---- right-click action menu --------------------------------------------
+  function hideGraphCtx() {
+    els.graphCtx.hidden = true;
+  }
+  function showGraphCtx(node, rpos) {
+    if (!node.inside()) return;
+    var d = node.data();
+    var items = [];
+    if (d.url) items.push({ label: "Open profile ↗", act: function () {
+      window.open(d.url, "_blank", "noopener");
+    }});
+    if (d.url) items.push({ label: "Copy URL", act: function () {
+      (navigator.clipboard ? navigator.clipboard.writeText(d.url) :
+        Promise.reject()).then(function () { toast("URL copied", "success"); },
+          function () { toast("Clipboard unavailable", "error"); });
+    }});
+    var handle = d.type === "handle" ? d.label :
+      ((d.type === "account" && !d.gone && d.label) ? d.label : null);
+    if (handle) items.push({ label: "Investigate this handle", act: function () {
+      pivotToForm(handle);
+    }});
+    items.push({ label: "Trace path from here", act: function () {
+      selNode = node;
+      toast("Now click another node to trace the path between them", "info");
+    }});
+    items.push({ label: loadNotes()[node.id()] ? "Edit note" : "Add note",
+                 act: function () { showNodePanel(node); } });
+    if (!d.gone) items.push({ label: "Hide from graph", act: function () {
+      dismissedIds[node.id] = true;
+      node.remove();
+      updateGraphStats();
+      toast("Hidden for this session (returns on next render)", "info");
+    }});
+
+    var menu = els.graphCtx;
+    menu.innerHTML = "";
+    items.forEach(function (it) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.textContent = it.label;
+      b.addEventListener("click", function () {
+        hideGraphCtx();
+        it.act();
+      });
+      menu.appendChild(b);
+    });
+    menu.hidden = false;
+    var wrap = els.graphWrap.getBoundingClientRect();
+    var x = Math.min(rpos.x + wrap.left + 8, window.innerWidth - 190);
+    var y = Math.min(rpos.y + wrap.top + 8, window.innerHeight - 40 - items.length * 30);
+    menu.style.left = x + "px";
+    menu.style.top = y + "px";
+  }
+  document.addEventListener("click", function (ev) {
+    if (!els.graphCtx.hidden && !els.graphCtx.contains(ev.target)) hideGraphCtx();
+  });
+
+  function pivotToForm(handle) {
+    switchTab("investigate");
+    els.tabInv.click();                       // ensure Investigation mode
+    els.invUsernames.value = handle;
+    document.getElementById("controls").scrollIntoView({ behavior: "smooth" });
+    setTimeout(function () { els.invUsernames.focus(); }, 250);
+    toast("Handle loaded — review parameters, then Start investigation", "info");
+  }
+
+  // ---- ego view -------------------------------------------------------------
+  function focusEgo(n, depth) {
+    var hood = n.closedNeighborhood();
+    if (depth >= 2) hood = hood.union(hood.neighborhood().closedNeighborhood());
+    cy.elements().addClass("dimmed").removeClass("hl");
+    hood.removeClass("dimmed");
+    hood.nodes().addClass("hl");
+    els.graphFocusChip.hidden = false;
+    els.graphFocusChip.querySelector(".fc-label").textContent =
+      "ego ×" + depth + ": " + (n.data("label") || n.id());
+    cy.animate({ fit: { eles: hood, padding: 50 } }, { duration: 250 });
+    showNodePanel(n);
+  }
+  function exitEgo() {
+    if (els.graphFocusChip.hidden) return;
+    els.graphFocusChip.hidden = true;
+    cy.elements().removeClass("dimmed hl");
+    if (cy) cy.fit(undefined, 40);
+  }
+  els.graphFocusClose.addEventListener("click", exitEgo);
+
+  // ---- cluster by category (compound nodes) ---------------------------------
+  function setCluster(on) {
+    clusterMode = on;
+    els.graphClusterBtn.classList.toggle("active", on);
+    els.graphClusterBtn.setAttribute("aria-pressed", String(on));
+    if (!cy) return;
+    var parents = {};
+    cy.batch(function () {
+      cy.nodes('[type = "account"], [type = "registration"]').forEach(function (n) {
+        var cat = (n.data("data") || {}).category;
+        var pid = cat ? "cat:" + cat : null;
+        if (on && !pid) { n.move({ parent: null }); return; }
+        if (on && !parents[pid]) {
+          parents[pid] = true;
+          cy.add({ group: "nodes", data: { id: pid, type: "catparent",
+                   label: String(cat).toUpperCase(),
+                   labelText: String(cat).toUpperCase() },
+                   classes: "g-catparent" });
+        }
+        n.move({ parent: on ? pid : null });
+      });
+      if (!on) cy.nodes('[type = "catparent"]').remove();
+    });
+    runLayout();
+  }
+
+  // Re-run the current layout without refetching.
+  function runLayout() {
+    if (!cy) return;
+    var lname = els.graphLayout.value;
+    if (lname === "fcose" && !fcoseRegistered) lname = "cose";
+    var opts = {
+      name: lname, animate: true, animationDuration: 600,
+      nodeRepulsion: 12000, idealEdgeLength: 100, gravity: 0.35,
+      padding: 40,
+      concentric: function (n) { return n.data("confidence") || 40; },
+      levelWidth: function () { return 25; },
+      roots: "#person", directed: false
+    };
+    cy.layout(opts).one("layoutstop", function () { cy.fit(undefined, 40); }).run();
+  }
+
+  els.graphLayout.addEventListener("change", runLayout);
+  els.graphClusterBtn.addEventListener("click", function () {
+    setCluster(!clusterMode);
+  });
+
+  // ---- changes-only filter ----------------------------------------------------
+  els.graphChangesBtn.addEventListener("click", function () {
+    changesOnly = !changesOnly;
+    els.graphChangesBtn.classList.toggle("active", changesOnly);
+    els.graphChangesBtn.setAttribute("aria-pressed", String(changesOnly));
+    applyGraphFilters();
+    if (changesOnly) {
+      var interesting = cy.nodes(".is-new, .gone-node");
+      if (interesting.nonempty()) {
+        cy.animate({ fit: { eles: interesting.closedNeighborhood(), padding: 70 } },
+                   { duration: 250 });
+      }
+    }
+  });
+
+  // extend visibility with the changes-only gate
+  var _nodeVisibleBase = nodeVisible;
+  nodeVisible = function (n) {
+    if (changesOnly) {
+      var dd = n.data();
+      var isNew = (dd.data || {}).is_new, gone = (dd.data || {}).gone;
+      if (!(isNew || gone || dd.type === "person")) return false;
+    }
+    return _nodeVisibleBase(n);
+  };
+
+  // ---- stats strip --------------------------------------------------------------
+  function updateGraphStats() {
+    if (!cy) { els.graphStats.textContent = ""; return; }
+    var confirmed = 0, flagged = 0, fresh = 0, gone = 0;
+    cy.nodes().forEach(function (n) {
+      var v = (n.data("verification") || (n.data("data") || {}).verification);
+      if (v === "confirmed") confirmed++;
+      if (v === "likely_false_positive") flagged++;
+      if ((n.data("data") || {}).is_new) fresh++;
+      if ((n.data("data") || {}).gone) gone++;
+    });
+    var parts = [
+      cy.nodes().length + "N",
+      cy.edges().length + "E",
+      confirmed + "✓",
+      flagged ? flagged + "⚠" : null,
+      fresh ? "+" + fresh + " new" : null,
+      gone ? gone + " gone" : null
+    ].filter(Boolean);
+    els.graphStats.textContent = parts.join(" · ");
+  }
+
+  // ---- minimap --------------------------------------------------------------------
+  var navigatorReady = false;
+  function initNavigator() {
+    if (navigatorReady || typeof cy.navigator !== "function") return;
+    try {
+      cy.navigator({ container: els.cyNav, viewLiveFramerate: 0 });
+      navigatorReady = true;
+      els.cyNav.style.display = "block";
+    } catch (e) { /* never block the graph on a minimap */ }
+  }
+
+  // ---- exports: CSV + GraphML -------------------------------------------------------
+  function download(name, mime, content) {
+    var blob = new Blob([content], { type: mime });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  }
+
+  function csvCell(v) {
+    if (v === null || v === undefined) return "";
+    v = String(v);
+    return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+  }
+
+  els.graphCsvBtn.addEventListener("click", function () {
+    if (!graphData) return;
+    var rows = [["id", "type", "label", "site", "url", "confidence",
+                 "verification", "category", "created_at", "is_new", "gone"]];
+    graphData.nodes.forEach(function (n) {
+      var d = n.data || {};
+      rows.push([n.id, n.type, n.label, d.site || n.sublabel || "", n.url || "",
+        n.confidence, d.verification || n.verification || "",
+        d.category || "", n.created_at || "", d.is_new ? "yes" : "",
+        d.gone ? "yes" : ""]);
+    });
+    graphData.edges.forEach(function (e) {
+      rows.push([e.id, "edge", e.rationale || "", "", "",
+        e.confidence, "", "", "", "", ""]);
+    });
+    download("signals-ops-graph.csv", "text/csv",
+      rows.map(function (r) { return r.map(csvCell).join(","); }).join("\n"));
+    toast("Graph exported as CSV", "success");
+  });
+
+  els.graphGraphmlBtn.addEventListener("click", function () {
+    if (!graphData) return;
+    var esc = function (s) {
+      return String(s === null || s === undefined ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    };
+    var keys = ["label", "type", "site", "url", "confidence",
+                "verification", "category", "created_at"];
+    var xml = '<?xml version="1.0" encoding="UTF-8"?>\n' +
+      '<graphml xmlns="http://graphml.graphdrawing.org/xmlns">\n';
+    keys.forEach(function (k) {
+      xml += '  <key id="d_' + k + '" for="node" attr.name="' + k +
+             '" attr.type="string"/>\n';
+    });
+    xml += '  <key id="d_conf" for="edge" attr.name="confidence" attr.type="double"/>\n' +
+           '  <key id="d_rat" for="edge" attr.name="rationale" attr.type="string"/>\n' +
+           '  <graph id="G" edgedefault="undirected">\n';
+    graphData.nodes.forEach(function (n) {
+      var d = n.data || {};
+      xml += '    <node id="' + esc(n.id) + '">\n';
+      var vals = { label: n.label, type: n.type, site: d.site || n.sublabel || "",
+                   url: n.url || "", confidence: n.confidence,
+                   verification: d.verification || n.verification || "",
+                   category: d.category || "", created_at: n.created_at || "" };
+      keys.forEach(function (k) {
+        if (vals[k] !== "" && vals[k] !== null && vals[k] !== undefined) {
+          xml += '      <data key="d_' + k + '">' + esc(vals[k]) + '</data>\n';
+        }
+      });
+      xml += '    </node>\n';
+    });
+    graphData.edges.forEach(function (e) {
+      xml += '    <edge source="' + esc(e.source) + '" target="' + esc(e.target) + '">\n' +
+             '      <data key="d_conf">' + esc(e.confidence) + '</data>\n' +
+             (e.rationale ? '      <data key="d_rat">' + esc(e.rationale) + '</data>\n' : "") +
+             '    </edge>\n';
+    });
+    xml += '  </graph>\n</graphml>\n';
+    download("signals-ops-graph.graphml", "application/xml", xml);
+    toast("GraphML exported — imports into Gephi/yEd", "success");
+  });
+
+  // ---- fullscreen ---------------------------------------------------------------------
+  els.graphFsBtn.addEventListener("click", function () {
+    els.graphPanel.classList.toggle("fs");
+    setTimeout(function () {
+      if (cy) { cy.resize(); cy.fit(undefined, 40); }
+    }, 80);
+  });
+
+  // ---- help ------------------------------------------------------------------------------
+  els.graphHelpBtn.addEventListener("click", function () {
+    els.graphHelp.hidden = !els.graphHelp.hidden;
+  });
+
+  // ---- keyboard shortcuts (ignored while typing) ------------------------------------------
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape") {
+      if (!els.graphCtx.hidden) { hideGraphCtx(); return; }
+      if (!els.graphHelp.hidden) { els.graphHelp.hidden = true; return; }
+      if (els.graphPanel.classList.contains("fs")) {
+        els.graphFsBtn.click();
+        return;
+      }
+      exitEgo();
+      return;
+    }
+    var tag = (ev.target.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea" || tag === "select") return;
+    if (els.graphPanel.style.display !== "block") return;
+    switch (ev.key.toLowerCase()) {
+      case "f": if (cy) cy.fit(undefined, 40); break;
+      case "l": els.graphLabelsBtn.click(); break;
+      case "e": els.graphPngBtn.click(); break;
+      case "s": ev.preventDefault(); els.graphSearch.focus(); break;
+      case "c": setCluster(!clusterMode); break;
+      case "1": case "2": case "3": case "4": {
+        var chips = document.querySelectorAll(".gchip");
+        var chip = chips[parseInt(ev.key, 10) - 1];
+        if (chip) chip.click();
+        break;
+      }
+    }
+  });
 
   els.graphBtn.addEventListener("click", function () {
     if (!currentInvId) { toast("No investigation selected", "error"); return; }

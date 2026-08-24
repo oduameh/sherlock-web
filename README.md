@@ -348,18 +348,22 @@ identity graph → professional dossier → continuous monitoring.**
   pivot, phone intel, enrichment, correlation. Name candidates are fanned out
   across 3 Sherlock threads / 3 concurrent Maigret scans to keep wall time
   sane.
-- **Identity graph** (`recon/graph.py` + vendored Cytoscape 3.30.4 and the
-  fcose layout chain in `static/vendor/`) — person node in the center;
-  **handle pivot nodes** group accounts reusing the same handle across
-  sites; account nodes sized by confidence, colored by verification verdict,
-  with **age rings** when an adapter reported an creation date; email/
-  phone/registration nodes; edges carry confidence + rationale from the
-  correlator. Toolbar instruments: node search, type-group toggles
-  (accounts / handles / contacts / infra), two-click path tracing between
-  any nodes, PNG export, confidence sliders, and a **timeline scrubber**
-  that grows the graph as dated accounts were created (appears at ≥3 dated
-  nodes). Click a node for a detail panel; sliders hide low-confidence
-  edges.
+- **Identity graph** (`recon/graph.py` + vendored Cytoscape 3.30.4, the fcose
+  layout chain and cytoscape-navigator in `static/vendor/`) — a link-analysis
+  workbench: person node in the center; **handle pivot nodes** group accounts
+  reusing the same handle; account nodes sized by confidence, colored by
+  verification verdict, with **age rings** when an adapter reported a creation
+  date; email/phone/registration/infrastructure nodes; edges carry confidence
+  + rationale. Tools: right-click node actions (open/copy URL,
+  **investigate-this-handle pivot**, notes persisted per case, session hide),
+  **run-diffing against the previous scan of the same subject** (green `is-new`
+  rings, red dashed `[GONE]` ghosts, changes-only filter), node search with
+  fly-to, type-group toggles, two-click path tracing with weakest-link
+  readout, ego view on double-click, cluster-by-category compound layout,
+  five layout modes, minimap, PNG/CSV/GraphML export, fullscreen mode,
+  keyboard shortcuts (`?` popover), confidence sliders, and a **timeline
+  scrubber** that grows the graph as dated accounts were created (appears at
+  ≥3 dated nodes).
 - **Dossier report** (`recon/dossier.py`) — print-friendly
   (`@media print`, no external assets) professional report: CONFIDENTIAL cover
   block, auto-generated executive summary, digital-footprint score (0-100,
