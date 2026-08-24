@@ -104,3 +104,76 @@ def test_adapter_check_handles_transport_failure(monkeypatch):
     monkeypatch.setattr(adapters.safeweb, "async_client", lambda **k: _Boom())
     out = asyncio.run(adapters.adapter_for("GitHub").check("someone"))
     assert out["status"] == adapters.BLOCKED
+
+
+# --- Mastodon adapter + discovery engine -----------------------------------
+
+def test_mastodon_adapter_registered_and_predicates():
+    m = adapters.adapter_for("mastodon.social")
+    assert m is not None and m.name == "mastodon.social"
+    assert m.exists_when({"id": "1", "username": "Gargron"}) is True
+    assert not m.exists_when({"error": "Record not found"})
+    assert m.profile_url("Gargron") == "https://mastodon.social/@Gargron"
+
+
+def test_profile_url_falls_back_to_api_url():
+    a = adapters.Adapter("X", ("x",), "https://api.x/{username}",
+                         exists_when=lambda d: True)
+    assert a.profile_url("bob") == "https://api.x/bob"
+
+
+class _Resp:
+    def __init__(self, status, payload):
+        self.status_code, self._payload = status, payload
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("not json")
+        return self._payload
+
+
+class _Client:
+    """Stub transport: routes each URL to a canned response."""
+    def __init__(self, router):
+        self._router = router
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def get(self, url, **k):
+        return self._router(url)
+
+
+def test_discover_returns_only_exists_hits_with_profile_urls(monkeypatch):
+    def router(url):
+        if "api.github.com" in url:
+            return _Resp(200, {"id": 1, "login": "torvalds",
+                               "name": "Linus Torvalds", "avatar_url": "a",
+                               "created_at": "2011-09-03T15:26:22Z"})
+        return _Resp(404, None)   # every other adapter → absent
+    monkeypatch.setattr(adapters.safeweb, "async_client",
+                        lambda **k: _Client(router))
+    hits = asyncio.run(adapters.discover("torvalds"))
+    assert len(hits) == 1
+    gh = hits[0]
+    assert gh["site"] == "GitHub"
+    assert gh["url"] == "https://github.com/torvalds"        # human profile, not API
+    assert gh["identity"]["display_name"] == "Linus Torvalds"
+    assert gh["temporal"]["created_at"].startswith("2011")
+
+
+def test_discover_empty_username_is_noop():
+    assert asyncio.run(adapters.discover("")) == []
+
+
+def test_discover_never_raises_on_adapter_failure(monkeypatch):
+    class _Boom:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, *a, **k): raise RuntimeError("dns")
+    monkeypatch.setattr(adapters.safeweb, "async_client", lambda **k: _Boom())
+    # Every adapter errors → discovery yields nothing, but does not raise.
+    assert asyncio.run(adapters.discover("someone")) == []

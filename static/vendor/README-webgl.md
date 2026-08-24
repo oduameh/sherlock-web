@@ -1,0 +1,12 @@
+# Vendored WebGL graph libraries (Case-graph workspace)
+
+All MIT-licensed, fetched as prebuilt UMD browser bundles (no build step).
+Loaded via <script> tags in static/index.html; expose window globals.
+
+| File | Package | Version | Global | Origin |
+|------|---------|---------|--------|--------|
+| sigma.min.js | sigma | 2.4.0 | `Sigma` | cdnjs.cloudflare.com/ajax/libs/sigma.js/2.4.0/sigma.min.js |
+| graphology.umd.min.js | graphology | 0.25.4 | `graphology` | cdnjs.cloudflare.com/ajax/libs/graphology/0.25.4/graphology.umd.min.js |
+| graphology-library.min.js | graphology-library | 0.8.0 | `graphologyLibrary` | unpkg.com/graphology-library@0.8.0/dist/graphology-library.min.js |
+
+sigma.js © Alexis Jacomy et al. — MIT.  graphology © Guillaume Plique — MIT.

@@ -22,7 +22,7 @@ from sherlock_project.notify import QueryNotify
 from sherlock_project.result import QueryStatus
 from sherlock_project.sherlock import sherlock
 
-from recon import engines
+from recon import adapters, detectors, engines
 from recon.confidence import account_confidence, bucket_counts
 from recon.correlate import correlate
 from recon.email_pivot import (annotate_recovery, gravatar_lookup,
@@ -383,7 +383,7 @@ async def run_pipeline(
                 try:
                     await whatsmyname.whatsmyname_scan(
                         scanned_name, sites_list, timeout, on_result,
-                        proxy=router.proxy)
+                        proxy=router.proxy, stealth_retry=True)
                 except Exception as exc:
                     _engine_lifecycle("engine_error", "whatsmyname",
                                       f"{type(exc).__name__}: {exc}")
@@ -407,6 +407,37 @@ async def run_pipeline(
                             scanned_name)
                 _engine_lifecycle("engine_done", "whatsmyname", scanned_name,
                                   group)
+
+        await asyncio.gather(*(one(n, g) for n, g in items))
+
+    async def signals_worker(items):
+        """SIGNALS — our own discovery engine: query the public-API adapters
+        (recon.adapters) directly for each real handle, independent of the
+        third-party engines. A hit is a definitive API answer with identity +
+        dates, not a page guess, so it discovers accounts the flaky engines miss
+        and never invents false positives. Bounded to base/variant handles —
+        never fanned across name candidates — so it is at most
+        len(ADAPTERS) + len(DETECTORS) checks per handle."""
+        total = len(adapters.ADAPTERS) + len(detectors.DETECTORS)
+
+        async def one(scanned_name, group):
+            _engine_lifecycle("engine_start", "signals", scanned_name,
+                              total, group)
+            try:
+                api_hits, html_hits = await asyncio.gather(
+                    adapters.discover(scanned_name),
+                    detectors.discover(scanned_name),
+                )
+                found = list(api_hits) + list(html_hits)
+            except Exception as exc:
+                _engine_lifecycle("engine_error", "signals",
+                                  f"{type(exc).__name__}: {exc}")
+                found = []
+            for hit in found:
+                _handle_found("signals", scanned_name, hit["site"],
+                              hit["url"], None, group)
+            _handle_progress("signals", scanned_name, total, total, group)
+            _engine_lifecycle("engine_done", "signals", scanned_name, group)
 
         await asyncio.gather(*(one(n, g) for n, g in items))
 
@@ -520,10 +551,13 @@ async def run_pipeline(
         base_events = start_sherlock(base_items, sher_data)
         mai_base = asyncio.create_task(maigret_worker(base_items, mai_all))
         wmn_base = asyncio.create_task(whatsmyname_worker(base_items, wmn_all))
+        # Our own discovery engine runs on the real handles, concurrently.
+        sig_base = asyncio.create_task(signals_worker(base_items))
     else:
         base_events = []
         mai_base = None
         wmn_base = None
+        sig_base = None
 
     # Name-candidate scans (tri-engine, curated high-value sites, fanned out).
     cand_items = [
@@ -561,6 +595,8 @@ async def run_pipeline(
         await mai_base
     if wmn_base is not None:
         await wmn_base
+    if sig_base is not None:
+        await sig_base
 
     # Username variants (reduced high-value site list), like deep recon.
     if variants and usernames:
@@ -575,6 +611,7 @@ async def run_pipeline(
             v_events = start_sherlock(v_items, sher_reduced)
             await maigret_worker(v_items, mai_reduced)
             await whatsmyname_worker(v_items, wmn_reduced)
+            await signals_worker(v_items)
             await wait_all(v_events)
 
     await wait_all(cand_events)

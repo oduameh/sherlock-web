@@ -97,3 +97,32 @@ def bucket_counts(rows) -> dict:
     for row in rows:
         counts[verdict_bucket(row)] += 1
     return counts
+
+
+# --- investigative triage tier (used by the case graph) --------------------
+# The graph groups accounts into four tiers so an analyst can read signal from
+# noise at a glance. Tiers derive entirely from the model above — they are a
+# presentation of verdict_bucket + account_confidence, not a fourth opinion:
+#
+#   confirmed  verification tied the page to the subject (bucket "found").
+#   strong     a real, fetched page (bucket "lead") that also cleared a
+#              corroboration bar — enough to be worth chasing next.
+#   weak       a bare lead, a blocked/never-examined hit, or a speculative
+#              name/variant candidate — shown, but recessed.
+#   refuted    likely false positive (bucket "flagged": 404/soft-404/serves-all).
+#
+# "blocked" and "never looked" stay out of `strong` on purpose: they carry no
+# evidential weight, exactly as verdict_bucket keeps them out of `lead`.
+STRONG_TIER_MIN = 40         # a "lead" needs >= this confidence to be strong
+
+
+def account_tier(row: dict) -> str:
+    """One of ``confirmed`` | ``strong`` | ``weak`` | ``refuted`` for ``row``."""
+    bucket = verdict_bucket(row)
+    if bucket == "found":
+        return "confirmed"
+    if bucket == "flagged":
+        return "refuted"
+    if bucket == "lead" and account_confidence(row) >= STRONG_TIER_MIN:
+        return "strong"
+    return "weak"

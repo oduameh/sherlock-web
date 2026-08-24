@@ -79,6 +79,7 @@ class Adapter:
                  temporal: Optional[dict] = None,
                  absent_status: tuple = (404,),
                  headers: Optional[dict] = None,
+                 profile: str = "",
                  note: str = ""):
         self.name = name
         self.sites = {normalize_site(s) for s in sites}
@@ -88,7 +89,15 @@ class Adapter:
         self.temporal = temporal or {}
         self.absent_status = absent_status
         self.headers = headers or {}
+        # Human profile URL template (for discovery). Falls back to the API URL.
+        self.profile = profile
         self.note = note
+
+    def profile_url(self, username: str) -> str:
+        try:
+            return (self.profile or self.url).format(username=username)
+        except Exception:
+            return self.url.format(username=username)
 
     def handles(self, site: str) -> bool:
         return normalize_site(site or "") in self.sites
@@ -157,6 +166,7 @@ ADAPTERS: list[Adapter] = [
                   "public_repos": "public_repos"},
         temporal={"created_at": "created_at", "last_profile_update": "updated_at"},
         headers={"Accept": "application/vnd.github+json"},
+        profile="https://github.com/{username}",
         note="Unauthenticated limit is 60 requests/hour per source IP — enrichment only, never a scan-wide sweep.",
     ),
     Adapter(
@@ -169,6 +179,7 @@ ADAPTERS: list[Adapter] = [
                   "posts": "postsCount"},
         temporal={"created_at": "createdAt", "indexed_at": "indexedAt"},
         absent_status=(400, 404),
+        profile="https://bsky.app/profile/{username}",
         note="Bluesky returns 400 InvalidRequest for an unresolvable actor.",
     ),
     Adapter(
@@ -180,6 +191,7 @@ ADAPTERS: list[Adapter] = [
                   "bio": "summary", "location": "location",
                   "github": "github_username", "website": "website_url"},
         temporal={"created_at": "joined_at"},
+        profile="https://dev.to/{username}",
         note="Documented public Forem API.",
     ),
     Adapter(
@@ -190,6 +202,7 @@ ADAPTERS: list[Adapter] = [
                   "display_name": "full_name", "avatar": "gravatar_url",
                   "location": "location", "company": "company"},
         temporal={"created_at": "date_joined"},
+        profile="https://hub.docker.com/u/{username}",
     ),
     Adapter(
         "Keybase", ("Keybase",),
@@ -203,6 +216,7 @@ ADAPTERS: list[Adapter] = [
                   "bio": "them.0.profile.bio",
                   "location": "them.0.profile.location"},
         temporal={"created_at": "them.0.basics.ctime"},
+        profile="https://keybase.io/{username}",
         note="Proof chain (them.0.proofs_summary) carries self-declared, "
              "cryptographically-signed cross-platform links.",
     ),
@@ -214,8 +228,24 @@ ADAPTERS: list[Adapter] = [
                   "display_name": "display_name", "avatar": "portrait_huge",
                   "bio": "bio", "location": "location"},
         temporal={"created_at": "created_on"},
+        profile="https://vimeo.com/{username}",
         note="Use the API, not the HTML page: vimeo.com/staff returns 410 while "
              "the API proves the account is live.",
+    ),
+    Adapter(
+        "mastodon.social", ("mastodon.social", "Mastodon"),
+        "https://mastodon.social/api/v1/accounts/lookup?acct={username}",
+        exists_when=lambda d: isinstance(d, dict) and bool(d.get("id")),
+        identity={"canonical_handle": "acct", "account_id": "id",
+                  "display_name": "display_name", "avatar": "avatar",
+                  "bio": "note", "url": "url",
+                  "followers": "followers_count", "posts": "statuses_count"},
+        temporal={"created_at": "created_at", "last_active": "last_status_at"},
+        profile="https://mastodon.social/@{username}",
+        note="Public account lookup on the flagship instance; robots.txt permits "
+             "/api/v1/accounts/lookup (only /media_proxy/ and /interact/ are "
+             "disallowed). Verified real vs fake 2026-08-24. Other instances "
+             "are separate hosts and are NOT covered by this adapter.",
     ),
 ]
 # Deliberately NOT registered until each is verified end-to-end the same way:
@@ -242,6 +272,41 @@ async def check_account(site: str, username: str) -> Optional[dict]:
     if a is None or not username:
         return None
     return await a.check(username)
+
+
+async def discover(username: str) -> list[dict]:
+    """DISCOVERY: query every adapter's public API for ``username`` directly,
+    independent of the third-party engines. Each hit is a definitive API answer
+    — far higher signal than a page guess — carrying identity + dates. Returns a
+    list of ``{site, url, identity, temporal, source_url}`` for EXISTS results
+    only. Never raises; failures and absences are simply omitted.
+
+    This is bounded to a real handle (never fan it across name candidates): it
+    is at most ``len(ADAPTERS)`` public-API calls, one per platform.
+    """
+    import asyncio
+
+    if not username:
+        return []
+
+    async def _one(a: Adapter) -> Optional[dict]:
+        try:
+            res = await a.check(username)
+        except Exception:
+            return None
+        if res.get("status") != EXISTS:
+            return None
+        return {
+            "site": a.name,
+            "url": a.profile_url(username),
+            "identity": res.get("identity") or {},
+            "temporal": res.get("temporal") or {},
+            "source_url": res.get("source_url"),
+        }
+
+    results = await asyncio.gather(*(_one(a) for a in ADAPTERS),
+                                   return_exceptions=True)
+    return [r for r in results if isinstance(r, dict)]
 
 
 # --- mapping adapter results onto verification verdicts --------------------

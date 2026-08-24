@@ -88,6 +88,86 @@ def test_empty_summary_yields_lone_person():
     assert g["edges"] == []
 
 
+def test_account_nodes_carry_a_triage_tier():
+    g = build_graph(_summary(accounts=[
+        {"site": "GitHub", "username": "alice",
+         "url": "https://github.com/alice", "engines": ["sherlock", "maigret"],
+         "verification": {"status": "confirmed"}},
+        {"site": "Foobar", "username": "alice",
+         "url": "https://foobar.com/alice", "engines": ["wmn"],
+         "verification": {"status": "likely_false_positive"}},
+    ]))
+    gh = next(n for n in g["nodes"] if n["id"] == "acct:GitHub:alice")
+    fb = next(n for n in g["nodes"] if n["id"] == "acct:Foobar:alice")
+    assert gh["tier"] == "confirmed"
+    assert fb["tier"] == "refuted"
+
+
+def test_gone_account_also_carries_a_tier():
+    baseline = _summary(accounts=[
+        {"site": "OldSite", "username": "alice",
+         "url": "https://oldsite.com/u/alice", "engines": ["wmn"],
+         "verification": {"status": "confirmed"}},
+    ])
+    g = build_graph(_summary(accounts=[]), baseline=baseline)
+    gone = next(n for n in g["nodes"] if n["data"].get("gone"))
+    assert gone["tier"] == "confirmed"
+
+
+def test_every_edge_carries_a_kind():
+    g = build_graph(_summary(accounts=[
+        {"site": "GitHub", "username": "alice",
+         "url": "https://github.com/alice", "engines": ["sherlock", "maigret"]},
+        {"site": "Dribbble", "username": "alice",
+         "url": "https://dribbble.com/alice", "engines": ["wmn"]},
+    ]))
+    assert g["edges"]
+    assert all("kind" in e for e in g["edges"])
+    # a reused handle wires as handle-kind edges
+    assert any(e["kind"] == "handle" for e in g["edges"])
+
+
+def _correlated_summary():
+    summary = _summary(accounts=[
+        {"site": "GitHub", "username": "alice",
+         "url": "https://github.com/alice", "engines": ["sherlock"]},
+        {"site": "Devto", "username": "alicedev",
+         "url": "https://dev.to/alicedev", "engines": ["sherlock"]},
+    ])
+    summary["correlation"] = [{
+        "members": [
+            {"username": "alice", "site": "GitHub",
+             "url": "https://github.com/alice"},
+            {"username": "alicedev", "site": "Devto",
+             "url": "https://dev.to/alicedev"},
+        ],
+        "confidence": 70,
+        "links": [{
+            "a": "GitHub (https://github.com/alice)",
+            "b": "Devto (https://dev.to/alicedev)",
+            "score": 70,
+            "rationale": "avatars match (hash distance 2); bios share 40% of words",
+            "signals": {"avatar_distance": 2, "bio_overlap": 0.4},
+        }],
+    }]
+    return summary
+
+
+def test_correlation_edge_has_kind_and_structured_evidence():
+    g = build_graph(_correlated_summary())
+    corr = [e for e in g["edges"] if e.get("kind") == "correlation"]
+    assert len(corr) == 1
+    assert corr[0]["evidence"] == {"avatar_distance": 2, "bio_overlap": 0.4}
+
+
+def test_correlated_accounts_share_a_cluster_id():
+    g = build_graph(_correlated_summary())
+    a = next(n for n in g["nodes"] if n["id"] == "acct:GitHub:alice")
+    b = next(n for n in g["nodes"] if n["id"] == "acct:Devto:alicedev")
+    assert a.get("cluster")
+    assert a["cluster"] == b["cluster"]
+
+
 def test_baseline_diff_flags_new_and_gone():
     baseline = _summary(accounts=[
         {"site": "GitHub", "username": "alice",

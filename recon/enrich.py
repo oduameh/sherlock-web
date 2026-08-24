@@ -9,6 +9,7 @@ streamed and capped so memory stays bounded.
 from __future__ import annotations
 
 import asyncio
+import html as _html
 import json
 import logging
 import os
@@ -51,62 +52,171 @@ def _clean(text: Optional[str]) -> Optional[str]:
     if not text:
         return None
     text = _TAG_RE.sub(" ", text)
+    text = _html.unescape(text)   # decode &amp; &#233; &quot; — was silently kept
     return re.sub(r"\s+", " ", text).strip() or None
 
 
-def _extract(html: str) -> dict:
-    data: dict[str, Any] = {}
+def _clean_url(url: Optional[str]) -> Optional[str]:
+    """Image/URL fields: decode entities but keep the URL intact (no tag strip)."""
+    if not url:
+        return None
+    return _html.unescape(url).strip() or None
 
-    m = _TITLE_RE.search(html)
+
+def _person_fields(obj: Any, data: dict) -> None:
+    """Recursively pull name/description/image from JSON-LD Person/ProfilePage."""
+    if isinstance(obj, list):
+        for item in obj:
+            _person_fields(item, data)
+        return
+    if not isinstance(obj, dict):
+        return
+    types = obj.get("@type")
+    if isinstance(types, str):
+        types = [types]
+    if types and any(str(t).lower() in ("person", "profilepage") for t in types):
+        if obj.get("name") and not data.get("jsonld_name"):
+            data["jsonld_name"] = _clean(str(obj["name"]))
+        if obj.get("description") and not data.get("jsonld_description"):
+            data["jsonld_description"] = _clean(str(obj["description"]))
+        img = obj.get("image")
+        if isinstance(img, dict):
+            img = img.get("url")
+        if isinstance(img, list) and img:
+            img = img[0].get("url") if isinstance(img[0], dict) else img[0]
+        if img and not data.get("jsonld_image"):
+            data["jsonld_image"] = _clean_url(str(img))
+    for v in obj.values():
+        if isinstance(v, (dict, list)):
+            _person_fields(v, data)
+
+
+def _extract_regex(html_text: str) -> dict:
+    """Pure-stdlib fallback extractor (used when Scrapling is unavailable)."""
+    data: dict[str, Any] = {}
+    m = _TITLE_RE.search(html_text)
     if m:
         data["title"] = _clean(m.group(1))
-
-    for tag_m in _META_OG_RE.finditer(html):
+    for tag_m in _META_OG_RE.finditer(html_text):
         prop = tag_m.group(1).lower()
         c = _CONTENT_ATTR_RE.search(tag_m.group(0))
         if not c:
             continue
-        val = _clean(c.group(1))
         if prop == "og:title":
-            data["og_title"] = val
+            data["og_title"] = _clean(c.group(1))
         elif prop == "og:description":
-            data["og_description"] = val
+            data["og_description"] = _clean(c.group(1))
         elif prop == "og:image":
-            data["og_image"] = c.group(1).strip()
-
-    def person_fields(obj: Any) -> None:
-        if not isinstance(obj, dict):
-            return
-        types = obj.get("@type")
-        if isinstance(types, str):
-            types = [types]
-        if types and any(str(t).lower() in ("person", "profilepage") for t in types):
-            if obj.get("name") and not data.get("jsonld_name"):
-                data["jsonld_name"] = _clean(str(obj["name"]))
-            if obj.get("description") and not data.get("jsonld_description"):
-                data["jsonld_description"] = _clean(str(obj["description"]))
-            img = obj.get("image")
-            if isinstance(img, dict):
-                img = img.get("url")
-            if img and not data.get("jsonld_image"):
-                data["jsonld_image"] = str(img)
-        for v in obj.values():
-            if isinstance(v, (dict, list)):
-                person_fields(v) if isinstance(v, dict) else [
-                    person_fields(i) for i in v
-                ]
-
-    for m in _JSONLD_RE.finditer(html):
+            data["og_image"] = _clean_url(c.group(1))
+    for m in _JSONLD_RE.finditer(html_text):
         try:
             parsed = json.loads(m.group(1).strip())
-            if isinstance(parsed, list):
-                for item in parsed:
-                    person_fields(item)
-            else:
-                person_fields(parsed)
         except Exception:
             continue
+        _person_fields(parsed, data)
+    return data
 
+
+_SELECTOR = None
+_selector_tried = False
+
+
+def _get_selector():
+    """Lazy, optional Scrapling parser (lxml-backed). None if not installed."""
+    global _SELECTOR, _selector_tried
+    if not _selector_tried:
+        _selector_tried = True
+        try:
+            from scrapling import Selector
+            _SELECTOR = Selector
+        except Exception:
+            _SELECTOR = None
+    return _SELECTOR
+
+
+def _extract_scrapling(html_text: str, url: str) -> Optional[dict]:
+    """Scrapling/lxml extraction — tolerant of malformed HTML, decodes entities,
+    and reaches fields the regex path never captured (``<meta name=description>``,
+    Twitter cards). Returns None if Scrapling is unavailable or the parse fails."""
+    Selector = _get_selector()
+    if Selector is None:
+        return None
+    try:
+        sel = Selector(html_text, url=url or "")
+    except Exception:
+        return None
+
+    def one(query: str, clean: bool = True) -> Optional[str]:
+        try:
+            res = sel.css(query)
+            val = res.get() if res is not None else None
+        except Exception:
+            return None
+        if not val:
+            return None
+        return _clean(val) if clean else _clean_url(val)
+
+    data: dict[str, Any] = {}
+    title = one("title::text")
+    if title:
+        data["title"] = title
+    ogt = (one('meta[property="og:title"]::attr(content)')
+           or one('meta[name="og:title"]::attr(content)'))
+    if ogt:
+        data["og_title"] = ogt
+    ogd = (one('meta[property="og:description"]::attr(content)')
+           or one('meta[name="og:description"]::attr(content)'))
+    if ogd:
+        data["og_description"] = ogd
+    ogi = (one('meta[property="og:image"]::attr(content)', clean=False)
+           or one('meta[name="og:image"]::attr(content)', clean=False))
+    if ogi:
+        data["og_image"] = ogi
+    # Fallbacks the old regex extractor missed entirely.
+    if not data.get("og_title"):
+        data["og_title"] = one('meta[name="twitter:title"]::attr(content)')
+    if not data.get("og_description"):
+        data["og_description"] = (
+            one('meta[name="description"]::attr(content)')
+            or one('meta[name="twitter:description"]::attr(content)'))
+    if not data.get("og_image"):
+        data["og_image"] = (
+            one('meta[name="twitter:image"]::attr(content)', clean=False)
+            or one('meta[property="twitter:image"]::attr(content)', clean=False))
+    # JSON-LD via Scrapling's one-call JSON parse, with a text->json fallback.
+    try:
+        for script in sel.css('script[type="application/ld+json"]'):
+            parsed = None
+            try:
+                parsed = script.json()
+            except Exception:
+                try:
+                    raw = script.text
+                    parsed = json.loads(str(raw)) if raw else None
+                except Exception:
+                    parsed = None
+            if parsed is not None:
+                _person_fields(parsed, data)
+    except Exception:
+        pass
+    return {k: v for k, v in data.items() if v}
+
+
+def _extract(html: str, url: str = "") -> dict:
+    """Extract identity fields from a profile page. Prefers Scrapling's lxml
+    parser (resilient, entity-decoding); falls back to regex when Scrapling is
+    absent, and backfills any gap with the regex path either way."""
+    data = None
+    try:
+        data = _extract_scrapling(html, url)
+    except Exception:
+        data = None
+    if not data:
+        return _extract_regex(html)
+    rx = _extract_regex(html)
+    for k, v in rx.items():
+        if v and not data.get(k):
+            data[k] = v
     return data
 
 
@@ -322,7 +432,7 @@ async def enrich_profiles(rows: list[dict],
             c_status, c_html, c_data = await control_for(
                 row["url"], row.get("username"))
             try:
-                data = _extract(html) if html else {}
+                data = _extract(html, row.get("url") or "") if html else {}
             except Exception:
                 logger.exception("enrichment parse failed for %s", row["url"])
                 data = {}

@@ -54,6 +54,10 @@
       <span class="tab-callsign" aria-hidden="true">[SRC]</span>
       <span>Health</span>
     </button>
+    <button class="app-tab" data-tab="casegraph" type="button" role="tab" aria-selected="false" aria-controls="tabCasegraph">
+      <span class="tab-callsign" aria-hidden="true">[GRAPH]</span>
+      <span>Case graph</span>
+    </button>
   </nav>
 
   <div class="side-foot">
@@ -438,6 +442,42 @@
       <div id="healthList"><div class="hint">No source observations yet.</div></div>
     </section>
   </main>
+
+  <!-- ============ CASE GRAPH (WebGL workspace) ============ -->
+  <main id="tabCasegraph" class="page" role="tabpanel" aria-label="Case graph">
+    <div id="cgCockpit">
+      <div class="cg-triage" aria-label="Case graph controls">
+        <div id="cgTriage" class="cg-triage-chips"></div>
+        <div class="cg-tools">
+          <input id="cgSearch" class="cg-search" type="text" spellcheck="false"
+                 placeholder="find handle / site&hellip;" aria-label="Search the case graph">
+          <button id="cgChangesBtn" class="btn btn-ghost btn-sm" type="button" aria-pressed="false" aria-label="Show only changes since last scan" hidden>Changes</button>
+          <button id="cgFitBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Fit graph to view">Fit</button>
+          <button id="cgResetBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Show all tiers">Reset</button>
+          <button id="cgPngBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Export graph as PNG">PNG</button>
+          <button id="cgCsvBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Export nodes and edges as CSV">CSV</button>
+          <button id="cgGraphmlBtn" class="btn btn-ghost btn-sm" type="button" aria-label="Export as GraphML">GraphML</button>
+        </div>
+      </div>
+      <div id="cgBody">
+        <div id="cgStage">
+          <div id="cgEmpty" class="cg-empty">Open or load an investigation, then switch to this tab to see its case graph.</div>
+          <div id="cgFallback" class="cg-empty" hidden>WebGL graph library unavailable (static/vendor/sigma.min.js missing).</div>
+          <div id="cgCanvas"></div>
+          <canvas id="cgHulls" class="cg-hulls" aria-hidden="true"></canvas>
+          <div id="cgCards" class="cg-cards" aria-hidden="true"></div>
+          <div id="cgTimeline" class="cg-timeline" hidden>
+            <button id="cgTlPlay" class="btn btn-ghost btn-sm" type="button" aria-label="Play timeline">&#9654;</button>
+            <input id="cgTlScrub" type="range" min="0" max="1000" value="1000" aria-label="Timeline position">
+            <span id="cgTlDate" class="cg-tl-date">now</span>
+          </div>
+        </div>
+        <aside id="cgInspector" class="cg-inspector" aria-label="Selected entity">
+          <div class="cg-insp-empty">Select an entity to see its evidence trail.</div>
+        </aside>
+      </div>
+    </div>
+  </main>
   </div>
 </div>
 
@@ -462,6 +502,9 @@
 <script src="/static/vendor/cytoscape-fcose.js"></script>
 <link rel="stylesheet" href="/static/vendor/cytoscape-navigator.css">
 <script src="/static/vendor/cytoscape-navigator.js"></script>
+<!-- WebGL case-graph workspace (MIT; see vendor/README-webgl.md) -->
+<script src="/static/vendor/graphology.umd.min.js"></script>
+<script src="/static/vendor/sigma.min.js"></script>
 <script>
 // The app no longer uses a service worker (it caused stale-UI bugs and offers no
 // value for a live, server-backed tool). Proactively remove any worker a browser

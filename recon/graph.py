@@ -32,7 +32,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from recon.confidence import account_confidence
+from recon.confidence import account_confidence, account_tier
 from recon.engines import normalize_site
 
 _WMN_DATA = Path(__file__).resolve().parent / "data" / "wmn-data.json"
@@ -101,13 +101,18 @@ def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
             nodes.append(node)
 
     def add_edge(source: str, target: str, confidence: int,
-                 rationale: str) -> None:
-        edges.append({
+                 rationale: str, kind: str = "link",
+                 evidence: Optional[dict] = None) -> None:
+        edge = {
             "id": f"e{len(edges)}",
             "source": source, "target": target,
             "confidence": max(0, min(100, int(confidence))),
             "rationale": rationale,
-        })
+            "kind": kind,
+        }
+        if evidence:
+            edge["evidence"] = evidence
+        edges.append(edge)
 
     # --- central person node ------------------------------------------------
     label = (params.get("name") or (params.get("usernames") or [""])[0]
@@ -143,6 +148,7 @@ def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
             "url": row.get("url"), "avatar": _avatar(row),
             "confidence": conf, "engines": row.get("engines") or [],
             "verification": verification,
+            "tier": account_tier(row),
             "created_at": created,
             "data": {
                 "site": row.get("site"), "url": row.get("url"),
@@ -178,7 +184,7 @@ def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
         if len(ids) < 2:
             r0 = rows[0]
             add_edge("person", ids[0], account_confidence(r0),
-                     f"username match on {r0.get('site')}")
+                     f"username match on {r0.get('site')}", kind="account")
             continue
         hid = f"handle:{h}"
         top_conf = max(account_confidence(r) for r in rows)
@@ -188,11 +194,12 @@ def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
             "confidence": top_conf,
             "data": {"handle": h, "sites": [r.get("site") for r in rows]},
         })
-        add_edge("person", hid, top_conf, f"handle '{h}' reused across platforms")
+        add_edge("person", hid, top_conf,
+                 f"handle '{h}' reused across platforms", kind="handle")
         for r in rows:
             add_edge(hid, f"acct:{r.get('site')}:{r.get('username')}",
                      account_confidence(r),
-                     f"'{h}' on {r.get('site')}")
+                     f"'{h}' on {r.get('site')}", kind="handle")
 
     # --- run diff vs a baseline scan ----------------------------------------
     if baseline_urls is not None:
@@ -217,6 +224,7 @@ def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
                 "confidence": account_confidence(r),
                 "engines": r.get("engines") or [],
                 "verification": (r.get("verification") or {}).get("status"),
+                "tier": account_tier(r),
                 "created_at": _created_at(r),
                 "data": {
                     "site": r.get("site"), "url": u, "gone": True,
@@ -226,7 +234,8 @@ def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
             })
             add_edge("person", nid,
                      max(20, min(account_confidence(r), 50)),
-                     "present in an earlier scan of this subject; now absent")
+                     "present in an earlier scan of this subject; now absent",
+                     kind="account")
 
     # --- email node + holehe registration nodes ------------------------------
     email_addr = params.get("email") or ""
@@ -244,7 +253,7 @@ def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
                     if h.get("exists")),
             },
         })
-        add_edge("person", "email", 100, "input email")
+        add_edge("person", "email", 100, "input email", kind="input")
         for h in email_state.get("holehe") or []:
             if not h.get("exists"):
                 continue
@@ -260,7 +269,8 @@ def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
                          "corroborates_phone": h.get("corroborates_phone")},
             })
             add_edge("email", nid, 70,
-                     "registered-account check positive (holehe)")
+                     "registered-account check positive (holehe)",
+                     kind="registration")
 
     # --- phone node + phone-registration nodes -------------------------------
     phone = summary.get("phone")
@@ -271,7 +281,7 @@ def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
             "confidence": 100,
             "data": phone,
         })
-        add_edge("person", "phone", 100, "input phone")
+        add_edge("person", "phone", 100, "input phone", kind="input")
         # Trail stitching: an email-derived account whose masked recovery phone
         # matches this number links straight to the phone (phone↔email↔account).
         for h in (summary.get("email") or {}).get("holehe") or []:
@@ -279,7 +289,8 @@ def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
                 reg_id = f"reg:{h.get('site')}"
                 if reg_id in node_ids:
                     add_edge(reg_id, "phone", 80,
-                             "account's recovery phone matches the subject number")
+                             "account's recovery phone matches the subject number",
+                             kind="trail")
         # Account-existence hits (ignorant): each positive platform becomes a
         # registration node hanging off the phone — the same pattern as holehe
         # email registrations. Where the platform matches a username-discovered
@@ -297,11 +308,13 @@ def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
                          "method": a.get("method"),
                          "category": category_for(site)},
             })
-            add_edge("phone", nid, 70, "registered by phone (ignorant)")
+            add_edge("phone", nid, 70, "registered by phone (ignorant)",
+                     kind="registration")
             acct_id = acct_by_site.get(normalize_site(site or ""))
             if acct_id:
                 add_edge("phone", acct_id, 60,
-                         "number registered on a discovered account's platform")
+                         "number registered on a discovered account's platform",
+                         kind="trail")
 
     # --- domain / infrastructure nodes ---------------------------------------
     domain_state = summary.get("domain")
@@ -324,23 +337,27 @@ def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
         # Attach the domain to the email node when it was derived from one,
         # otherwise to the person.
         if "email" in node_ids:
-            add_edge("email", dom_id, 90, "email domain")
+            add_edge("email", dom_id, 90, "email domain", kind="infra")
         else:
-            add_edge("person", dom_id, 90, "subject domain")
+            add_edge("person", dom_id, 90, "subject domain", kind="infra")
         # A-record IPs and nameservers as their own infrastructure nodes.
         for ip in (dns.get("A") or [])[:3]:
             ip_id = f"ip:{ip}"
             add_node({"id": ip_id, "type": "ip", "label": ip,
                       "confidence": 80, "data": {"ip": ip}})
-            add_edge(dom_id, ip_id, 80, "A record")
+            add_edge(dom_id, ip_id, 80, "A record", kind="infra")
         for ns in (rdap.get("nameservers") or dns.get("NS") or [])[:4]:
             ns_id = f"ns:{ns}"
             add_node({"id": ns_id, "type": "nameserver", "label": ns,
                       "confidence": 70, "data": {"nameserver": ns}})
-            add_edge(dom_id, ns_id, 70, "nameserver")
+            add_edge(dom_id, ns_id, 70, "nameserver", kind="infra")
 
     # --- correlation edges between accounts ----------------------------------
-    for cluster in summary.get("correlation") or []:
+    # These avatar/name/bio matches are the "same person" evidence, so they get
+    # their own kind (elevated in the UI), a structured evidence breakdown, and
+    # a shared ``cluster`` id on their member nodes so the UI can hull them.
+    node_by_id = {n["id"]: n for n in nodes}
+    for ci, cluster in enumerate(summary.get("correlation") or []):
         members = cluster.get("members") or []
         member_ids = [url_to_id.get(m.get("url")) for m in members]
         member_ids = [m for m in member_ids if m]
@@ -355,7 +372,8 @@ def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
                     ids.append(nid)
             if len(ids) == 2 and ids[0] != ids[1]:
                 add_edge(ids[0], ids[1], link.get("score", 50),
-                         link.get("rationale") or "correlated profiles")
+                         link.get("rationale") or "correlated profiles",
+                         kind="correlation", evidence=link.get("signals"))
         # Fallback: if no links resolved, connect members in a chain.
         if len(member_ids) >= 2 and not any(
             e["source"] in member_ids and e["target"] in member_ids
@@ -363,6 +381,13 @@ def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
         ):
             for a, b in zip(member_ids, member_ids[1:]):
                 add_edge(a, b, cluster.get("confidence", 50),
-                         "same correlation cluster")
+                         "same correlation cluster", kind="correlation")
+        # Stamp a shared cluster id on every resolved member (>= 2 = a person).
+        if len(member_ids) >= 2:
+            cid = f"cluster:{ci}"
+            for mid in member_ids:
+                n = node_by_id.get(mid)
+                if n is not None:
+                    n["cluster"] = cid
 
     return {"nodes": nodes, "edges": edges}

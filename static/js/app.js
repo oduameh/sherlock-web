@@ -261,7 +261,8 @@
     investigate: document.getElementById("tabInvestigate"),
     watchlist: document.getElementById("tabWatchlist"),
     history: document.getElementById("tabHistory"),
-    health: document.getElementById("tabHealth")
+    health: document.getElementById("tabHealth"),
+    casegraph: document.getElementById("tabCasegraph")
   };
 
   /* topbar contextual title/subtitle per section */
@@ -269,7 +270,8 @@
     investigate: { title: "Investigate", sub: "One clue in → a full identity out" },
     watchlist: { title: "Watchlist", sub: "Continuous monitoring with change alerts" },
     history: { title: "History", sub: "Reload any past investigation or scan" },
-    health: { title: "Source Health", sub: "Adaptive routing, reliability & circuit breakers" }
+    health: { title: "Source Health", sub: "Adaptive routing, reliability & circuit breakers" },
+    casegraph: { title: "Case graph", sub: "The investigation as a live entity graph" }
   };
   var sectionTitleEl = document.getElementById("sectionTitle");
   var sectionSubEl = document.getElementById("sectionSub");
@@ -312,6 +314,7 @@
       if (tab === "watchlist") { loadWatchlist(); loadAllAlerts(); }
       if (tab === "history") { loadHistory(); }
       if (tab === "health") { loadHealthSources(); }
+      if (tab === "casegraph") { openCaseGraph(); }
       closeSidebar();
     });
   });
@@ -2649,19 +2652,1034 @@
     }
   });
 
+  // The "Graph" action is now the promoted first-class Case graph workspace.
+  // (renderGraph / the inline Cytoscape panel remain for the fallback path but
+  // are no longer the primary surface.)
   els.graphBtn.addEventListener("click", function () {
     if (!currentInvId) { toast("No investigation selected", "error"); return; }
-    if (els.graphPanel.style.display === "block") {
-      els.graphPanel.style.display = "none";
-      return;
+    switchTab("casegraph");
+  });
+
+  /* ==================== case graph (WebGL workspace) ==================== */
+  // Increment 0 — substrate proof. Renders the EXISTING /graph payload with
+  // sigma.js (WebGL) on a deterministic radial layout (BFS hops from the
+  // person node). Reuses nodeColor()/nodeSize() so the SIGNALS OPS colour
+  // discipline (green = verified only) carries over unchanged. Tiers, on-canvas
+  // cards, correlation bonds and the full evidence trail arrive in later
+  // increments. Fully additive: the inline Cytoscape panel above is untouched.
+  var cgSigma = null;
+  var cgData = null;   // last-rendered payload (for filter re-application)
+  var cgEls = {
+    stage: document.getElementById("cgStage"),
+    canvas: document.getElementById("cgCanvas"),
+    empty: document.getElementById("cgEmpty"),
+    fallback: document.getElementById("cgFallback"),
+    inspector: document.getElementById("cgInspector"),
+    triage: document.getElementById("cgTriage"),
+    cards: document.getElementById("cgCards"),
+    hulls: document.getElementById("cgHulls"),
+    search: document.getElementById("cgSearch"),
+    fitBtn: document.getElementById("cgFitBtn"),
+    resetBtn: document.getElementById("cgResetBtn"),
+    csvBtn: document.getElementById("cgCsvBtn"),
+    pngBtn: document.getElementById("cgPngBtn"),
+    graphmlBtn: document.getElementById("cgGraphmlBtn"),
+    changesBtn: document.getElementById("cgChangesBtn"),
+    tlBar: document.getElementById("cgTimeline"),
+    tlPlay: document.getElementById("cgTlPlay"),
+    tlScrub: document.getElementById("cgTlScrub"),
+    tlDate: document.getElementById("cgTlDate")
+  };
+  var cgChangesOnly = false;   // diff filter: show only new/gone since last scan
+  var cgEgoSet = null;         // when set, isolate this neighbourhood (ego view)
+  var cgTl = { dates: [], minT: 0, maxT: 1, playing: false, raf: null };
+  var cgDepth = {};          // node id -> hops from the subject (for provenance)
+
+  // Entity-card overlay state. Cards are pooled by node id and only mounted for
+  // on-screen nodes, so panning a 500-node graph never floods the DOM.
+  var cgNodeById = {};       // id -> raw payload node (rich fields for cards)
+  var cgCardPool = {};       // id -> card element currently mounted
+  var cgSelectedId = null;
+  var CG_CARD_TYPES = { account: 1, email: 1, phone: 1 };
+  var CG_CARD_W = 168, CG_CARD_H = 46, CG_CARD_MAX = 44;
+
+  // Triage tiers — the reading order for an account. Colour keeps the SIGNALS
+  // OPS discipline: green = verified (confirmed) only, amber = working lead,
+  // grey = recessed noise, red = refuted. `rank` drives the radial band (the
+  // confirmed core hugs the subject; refuted is flung to the rim) and `sizeK`
+  // makes signal bigger than noise.
+  var CG_TIER = {
+    confirmed: { color: "#4cc38a", rank: 0, sizeK: 1.35, label: "Confirmed" },
+    strong:    { color: "#e0a63d", rank: 1, sizeK: 1.12, label: "Strong" },
+    weak:      { color: "#6c786c", rank: 2, sizeK: 0.82, label: "Weak" },
+    refuted:   { color: "#f0615d", rank: 3, sizeK: 0.90, label: "Refuted" }
+  };
+  var CG_TIER_ORDER = ["confirmed", "strong", "weak", "refuted"];
+  var cgTierVis = { confirmed: true, strong: true, weak: true, refuted: true };
+
+  function cgNodeColor(n) {
+    if (n.type === "account" && n.tier && CG_TIER[n.tier]) {
+      return CG_TIER[n.tier].color;
     }
+    return nodeColor(n);
+  }
+  function cgNodeSize(n) {
+    var k = (n.type === "account" && n.tier && CG_TIER[n.tier])
+      ? CG_TIER[n.tier].sizeK : 1;
+    return Math.max(4, Math.round(nodeSize(n) * 0.32 * k));
+  }
+
+  // Single source of truth for node visibility — every active filter (tier,
+  // changes-only, ego, timeline). The sigma reducer AND the DOM card/hull
+  // overlays AND the fit routine all consult this so they never disagree.
+  function cgNodeHidden(id, attrs) {
+    if (attrs.cgType === "account" && attrs.cgTier && !cgTierVis[attrs.cgTier]) {
+      return true;
+    }
+    if (cgChangesOnly && !attrs.cgNew && !attrs.cgGone &&
+        attrs.cgType !== "person") {
+      return true;
+    }
+    if (cgEgoSet && !cgEgoSet[id]) return true;
+    if (cgTlActive() && attrs.cgCreated && attrs.cgCreated > cgTlCursor()) {
+      return true;
+    }
+    return false;
+  }
+
+  // Resolve the UMD globals defensively — the browser build may expose the
+  // constructor as a namespace member (Sigma.Sigma) or the default export.
+  function cgLibs() {
+    var G = window.graphology &&
+      (window.graphology.Graph || window.graphology.default || window.graphology);
+    var S = window.Sigma &&
+      (window.Sigma.Sigma || window.Sigma.default || window.Sigma);
+    return (typeof G === "function" && typeof S === "function")
+      ? { Graph: G, Sigma: S } : null;
+  }
+
+  function cgShow(what) {
+    if (!cgEls.stage) return;
+    cgEls.empty.hidden = what !== "empty";
+    cgEls.fallback.hidden = what !== "fallback";
+    cgEls.canvas.style.display = what === "graph" ? "block" : "none";
+  }
+
+  function openCaseGraph() {
+    if (!currentInvId) { cgShow("empty"); return; }
+    if (!cgLibs()) { cgShow("fallback"); return; }
     fetch("/api/investigate/" + currentInvId + "/graph")
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        if (data.error) { toast(data.error, "error"); return; }
-        renderGraph(data);
+        if (data.error) { toast(data.error, "error"); cgShow("empty"); return; }
+        cgRender(data);
       })
-      .catch(function () { toast("Failed to load graph", "error"); });
+      .catch(function () {
+        toast("Failed to load case graph", "error"); cgShow("empty");
+      });
+  }
+
+  // Layout encodes triage: ACCOUNTS sit in radial bands by tier — confirmed
+  // hugs the subject, refuted is flung to the rim — so signal reads inside,
+  // noise outside. Structural nodes (person, handles, contacts, infra) keep a
+  // BFS hop-distance placement so the scaffolding still makes sense.
+  var CG_TIER_RADIUS = { confirmed: 250, strong: 440, weak: 660, refuted: 880 };
+
+  function cgLayout(data) {
+    var adj = {};
+    data.nodes.forEach(function (n) { adj[n.id] = []; });
+    data.edges.forEach(function (e) {
+      if (adj[e.source] && adj[e.target]) {
+        adj[e.source].push(e.target); adj[e.target].push(e.source);
+      }
+    });
+    var root = adj.person ? "person" : (data.nodes[0] && data.nodes[0].id);
+    var depth = {}, queue = [];
+    if (root) { depth[root] = 0; queue.push(root); }
+    for (var i = 0; i < queue.length; i++) {
+      var cur = queue[i];
+      adj[cur].forEach(function (nb) {
+        if (depth[nb] === undefined) { depth[nb] = depth[cur] + 1; queue.push(nb); }
+      });
+    }
+    var maxD = 0;
+    Object.keys(depth).forEach(function (k) { if (depth[k] > maxD) maxD = depth[k]; });
+    data.nodes.forEach(function (n) {
+      if (depth[n.id] === undefined) depth[n.id] = maxD + 1;
+    });
+    cgDepth = depth;   // provenance: hops from the subject, for the inspector
+
+    var pos = {};
+    // Structural (non-account) nodes → hop-distance rings.
+    var structural = data.nodes.filter(function (n) { return n.type !== "account"; });
+    var byDepth = {};
+    structural.forEach(function (n) {
+      var d = depth[n.id]; (byDepth[d] = byDepth[d] || []).push(n.id);
+    });
+    Object.keys(byDepth).forEach(function (d) {
+      var ids = byDepth[d], dn = Number(d), R = dn === 0 ? 0 : 120 + dn * 60;
+      ids.forEach(function (id, idx) {
+        if (dn === 0) { pos[id] = { x: 0, y: 0 }; return; }
+        var ang = (idx / ids.length) * Math.PI * 2 + dn * 0.7;
+        pos[id] = { x: Math.cos(ang) * R, y: Math.sin(ang) * R };
+      });
+    });
+    // Account nodes → tier bands. A dense tier is spread across a ~90px-thick
+    // band (radius jitter) so hundreds of candidates read as a band, not a
+    // single overplotted ring.
+    var byTier = {};
+    data.nodes.forEach(function (n) {
+      if (n.type !== "account") return;
+      var t = (n.tier && CG_TIER_RADIUS[n.tier]) ? n.tier : "weak";
+      (byTier[t] = byTier[t] || []).push(n.id);
+    });
+    CG_TIER_ORDER.forEach(function (t) {
+      var ids = byTier[t] || [], base = CG_TIER_RADIUS[t], n = ids.length;
+      ids.forEach(function (id, idx) {
+        var ang = (idx / Math.max(1, n)) * Math.PI * 2 + CG_TIER[t].rank * 0.6;
+        var r = base + (idx % 7) * 14;
+        pos[id] = { x: Math.cos(ang) * r, y: Math.sin(ang) * r };
+      });
+    });
+    return pos;
+  }
+
+  function cgRender(data) {
+    var libs = cgLibs();
+    if (!libs) { cgShow("fallback"); return; }
+    cgData = data;
+    cgNodeById = {};
+    data.nodes.forEach(function (n) { cgNodeById[n.id] = n; });
+    cgClearCards();
+    cgSelectedId = null;
+    // Fresh case → clear any tier filter and camera framing carried over from
+    // the previous one.
+    cgTierVis = { confirmed: true, strong: true, weak: true, refuted: true };
+    cgShow("graph");
+    if (cgSigma) { try { cgSigma.setCustomBBox(null); } catch (e) {} cgSigma.kill(); cgSigma = null; }
+    var g = new libs.Graph();
+    var pos = cgLayout(data);
+    var hasDiff = false;
+    data.nodes.forEach(function (n) {
+      var p = pos[n.id] || { x: 0, y: 0 };
+      var d = n.data || {};
+      if (d.is_new || d.gone) hasDiff = true;
+      var created = n.created_at ? Date.parse(n.created_at) : NaN;
+      g.addNode(n.id, {
+        x: p.x, y: p.y,
+        size: cgNodeSize(n),
+        color: d.gone ? "#e05a4e" : cgNodeColor(n),
+        label: n.label || n.id,
+        cgType: n.type,
+        cgTier: n.type === "account" ? (n.tier || "weak") : null,
+        cgNew: !!d.is_new,
+        cgGone: !!d.gone,
+        cgCreated: isNaN(created) ? null : created
+      });
+    });
+    // Run-diff toolbar affordance: only offered when this scan diffs a baseline.
+    if (cgEls.changesBtn) {
+      cgEls.changesBtn.hidden = !hasDiff;
+      if (!hasDiff) {
+        cgChangesOnly = false;
+        cgEls.changesBtn.setAttribute("aria-pressed", "false");
+        cgEls.changesBtn.classList.remove("active");
+      }
+    }
+    data.edges.forEach(function (e) {
+      if (!g.hasNode(e.source) || !g.hasNode(e.target)) return;
+      if (e.source === e.target || g.hasEdge(e.source, e.target)) return;
+      // Correlation bonds (same-avatar/name/bio) are the identity backbone, so
+      // they're elevated: thick amber (the working accent, like handle pivots).
+      // Everything else is a neutral grey spoke whose lightness — never hue —
+      // encodes confidence, keeping green reserved for verified signals.
+      var isCorr = e.kind === "correlation";
+      try {
+        g.addEdge(e.source, e.target, {
+          size: isCorr ? 2.6 : Math.max(0.6, (e.confidence || 40) / 42),
+          color: isCorr ? "#e0a63d"
+            : ((e.confidence || 0) >= 60 ? "#33402f" : "#20271f"),
+          cgKind: e.kind || "link"
+        });
+      } catch (err) { /* skip parallel/invalid edge */ }
+    });
+    cgUpdateTriage(data);
+    cgSetupTimeline(data);
+    // Defer construction one tick so the freshly-activated panel has laid out
+    // (the container needs real dimensions). setTimeout — not rAF — because
+    // rAF is suspended while the document is hidden (a backgrounded tab would
+    // otherwise leave the graph unbuilt until refocused).
+    setTimeout(function () {
+      cgSigma = new libs.Sigma(g, cgEls.canvas, {
+        renderLabels: true,
+        labelColor: { color: "#c9d3c7" },
+        labelSize: 11,
+        labelFont: "'JetBrains Mono', ui-monospace, monospace",
+        labelWeight: "500",
+        defaultEdgeColor: "#20271f",
+        minCameraRatio: 0.15,
+        maxCameraRatio: 8
+      });
+      cgSigma.on("clickNode", function (ev) {
+        cgSelectedId = ev.node;
+        cgInspect(ev.node, data);
+        cgSyncOverlays();
+      });
+      cgSigma.on("clickStage", function () {
+        cgSelectedId = null;
+        if (cgEgoSet) { cgExitEgo(); }
+        cgEls.inspector.innerHTML =
+          '<div class="cg-insp-empty">Select an entity to see its evidence trail.</div>';
+        cgSyncOverlays();
+      });
+      // Keep the DOM cards + hull canvas glued to the WebGL camera every frame.
+      cgSigma.on("afterRender", cgSyncOverlays);
+      // Tier filter: hide accounts whose tier chip is off. Hiding a node also
+      // hides its labels and connected edges, so toggling "Weak" off collapses
+      // the noise ring and leaves the confirmed/strong core.
+      cgSigma.setSetting("nodeReducer", function (node, attrs) {
+        if (cgNodeHidden(node, attrs)) {
+          return Object.assign({}, attrs, { hidden: true });
+        }
+        // New nodes get a highlight ring (sigma's base circle has no border).
+        if (attrs.cgNew) {
+          return Object.assign({}, attrs, { highlighted: true });
+        }
+        return attrs;
+      });
+      cgSigma.setSetting("edgeReducer", function (edge, attrs) {
+        if (cgEgoSet) {
+          var ext = cgSigma.getGraph().extremities(edge);
+          if (!cgEgoSet[ext[0]] || !cgEgoSet[ext[1]]) {
+            return Object.assign({}, attrs, { hidden: true });
+          }
+        }
+        return attrs;
+      });
+      // Double-click a node → ego view: isolate its neighbourhood.
+      cgSigma.on("doubleClickNode", function (ev) {
+        if (ev.event && ev.event.original) ev.event.original.preventDefault();
+        cgFocusEgo(ev.node);
+      });
+      cgSigma.refresh();
+      cgSigma.getCamera().animatedReset({ duration: 300 });
+      cgSyncOverlays();   // don't wait a render frame for the first overlays
+    }, 0);
+  }
+
+  // Toggle a tier's visibility and refresh (the reducer does the hiding).
+  function cgToggleTier(tier) {
+    cgTierVis[tier] = !cgTierVis[tier];
+    if (cgSigma) { cgFitVisible(); cgSigma.refresh(); cgSyncOverlays(); }
+    if (cgData) cgUpdateTriage(cgData);
+  }
+
+  // Reframe the camera onto whatever tiers are still shown, so hiding the noise
+  // zooms into the survivors (and their cards spread out) instead of leaving
+  // them tiny in the middle. Uses sigma's custom bbox = the visible extent.
+  function cgFitVisible() {
+    if (!cgSigma) return;
+    var g = cgSigma.getGraph();
+    var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, any = false;
+    g.forEachNode(function (id, a) {
+      if (cgNodeHidden(id, a)) return;
+      any = true;
+      if (a.x < minX) minX = a.x;
+      if (a.x > maxX) maxX = a.x;
+      if (a.y < minY) minY = a.y;
+      if (a.y > maxY) maxY = a.y;
+    });
+    if (!any) return;
+    var padX = (maxX - minX) * 0.12 + 60, padY = (maxY - minY) * 0.12 + 60;
+    try {
+      cgSigma.setCustomBBox({ x: [minX - padX, maxX + padX], y: [minY - padY, maxY + padY] });
+      cgSigma.getCamera().animatedReset({ duration: 350 });
+    } catch (e) { /* sigma version without custom bbox — skip the reframe */ }
+  }
+
+  /* ---- entity cards: DOM overlay synced to sigma's camera --------------- */
+  function cgClearCards() {
+    Object.keys(cgCardPool).forEach(function (id) { cgCardPool[id].remove(); });
+    cgCardPool = {};
+    if (cgEls.cards) cgEls.cards.innerHTML = "";
+    if (cgEls.hulls) {
+      var ctx = cgEls.hulls.getContext("2d");
+      ctx.clearRect(0, 0, cgEls.hulls.width, cgEls.hulls.height);
+    }
+  }
+
+  function cgBuildCard(node) {
+    var tier = (node.type === "account" && node.tier) ? CG_TIER[node.tier] : null;
+    var accent = tier ? tier.color : (NODE_COLORS[node.type] || "#8b968a");
+    var el = document.createElement("div");
+    el.className = "cg-card";
+    if (node.id) el.dataset.nid = node.id;
+
+    var av = document.createElement("div");
+    av.className = "cg-card-av";
+    if (node.avatar) {
+      av.style.backgroundImage = 'url("' + node.avatar + '")';
+    } else {
+      av.textContent = (node.label || node.id || "?").slice(0, 1).toUpperCase();
+      av.style.color = accent;
+    }
+    el.appendChild(av);
+
+    var main = document.createElement("div");
+    main.className = "cg-card-main";
+    var handle = document.createElement("div");
+    handle.className = "cg-card-handle";
+    handle.appendChild(document.createTextNode(node.label || node.id));
+    var pip = document.createElement("span");
+    pip.className = "cg-card-pip";
+    pip.style.background = accent;
+    handle.appendChild(pip);
+    main.appendChild(handle);
+
+    var site = document.createElement("div");
+    site.className = "cg-card-site";
+    site.textContent = (node.sublabel || node.type) +
+      (tier ? " · " + tier.label : "");
+    main.appendChild(site);
+
+    if (node.confidence != null) {
+      var bar = document.createElement("div");
+      bar.className = "cg-card-bar";
+      var fill = document.createElement("i");
+      fill.style.width = Math.max(4, Math.min(100, node.confidence)) + "%";
+      fill.style.background = accent;
+      bar.appendChild(fill);
+      main.appendChild(bar);
+    }
+    el.appendChild(main);
+    return el;
+  }
+
+  // Runs every frame: mount cards for on-screen card-type nodes, but only when
+  // few enough are visible (i.e. zoomed in) so it reads as Gotham cards, not a
+  // wall of boxes. The selected node always keeps its card. When cards are
+  // showing, sigma's own labels step aside to avoid double text.
+  function cgSyncCards() {
+    if (!cgSigma || !cgEls.cards) return;
+    var g = cgSigma.getGraph();
+    var W = cgEls.canvas.offsetWidth, H = cgEls.canvas.offsetHeight;
+    var onscreen = [];
+    g.forEachNode(function (id, attrs) {
+      if (!CG_CARD_TYPES[attrs.cgType]) return;
+      // Mirror every reducer filter — it hides at render time without touching
+      // the graph attribute, so the overlay must re-check the same predicate.
+      if (cgNodeHidden(id, attrs)) return;
+      var vp = cgSigma.graphToViewport({ x: attrs.x, y: attrs.y });
+      if (vp.x < -CG_CARD_W || vp.x > W + CG_CARD_W ||
+          vp.y < -CG_CARD_H || vp.y > H + CG_CARD_H) return;
+      onscreen.push({ id: id, vp: vp });
+    });
+    var useCards = onscreen.length > 0 && onscreen.length <= CG_CARD_MAX;
+    var show = {};
+    if (useCards) { onscreen.forEach(function (e) { show[e.id] = e.vp; }); }
+    if (cgSelectedId && g.hasNode(cgSelectedId)) {
+      var a = g.getNodeAttributes(cgSelectedId);
+      if (!cgNodeHidden(cgSelectedId, a)) {
+        show[cgSelectedId] = cgSigma.graphToViewport({ x: a.x, y: a.y });
+      }
+    }
+    // sigma labels off while cards carry the text; back on when zoomed out.
+    var wantLabels = !useCards;
+    if (cgSigma.getSetting("renderLabels") !== wantLabels) {
+      cgSigma.setSetting("renderLabels", wantLabels);
+    }
+    Object.keys(cgCardPool).forEach(function (id) {
+      if (!show[id]) { cgCardPool[id].remove(); delete cgCardPool[id]; }
+    });
+    Object.keys(show).forEach(function (id) {
+      var el = cgCardPool[id];
+      if (!el) {
+        el = cgBuildCard(cgNodeById[id] || { id: id });
+        cgEls.cards.appendChild(el);
+        cgCardPool[id] = el;
+      }
+      var vp = show[id];
+      el.style.transform = "translate(" + Math.round(vp.x + 12) + "px," +
+        Math.round(vp.y - CG_CARD_H / 2) + "px)";
+      el.classList.toggle("sel", id === cgSelectedId);
+    });
+  }
+
+  function cgSyncOverlays() { cgSyncHulls(); cgSyncCards(); }
+
+  // Convex hull (monotone chain) of a small point set, for same-person hulls.
+  function cgHull(points) {
+    if (points.length < 3) return points.slice();
+    var pts = points.slice().sort(function (a, b) {
+      return a.x === b.x ? a.y - b.y : a.x - b.x;
+    });
+    function cross(o, a, b) {
+      return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    }
+    var lower = [];
+    for (var i = 0; i < pts.length; i++) {
+      while (lower.length >= 2 &&
+             cross(lower[lower.length - 2], lower[lower.length - 1], pts[i]) <= 0)
+        lower.pop();
+      lower.push(pts[i]);
+    }
+    var upper = [];
+    for (var j = pts.length - 1; j >= 0; j--) {
+      while (upper.length >= 2 &&
+             cross(upper[upper.length - 2], upper[upper.length - 1], pts[j]) <= 0)
+        upper.pop();
+      upper.push(pts[j]);
+    }
+    lower.pop(); upper.pop();
+    return lower.concat(upper);
+  }
+
+  // Draw a translucent amber shape around each correlation cluster's visible
+  // members — the visual "these accounts are one person". A 2-member cluster is
+  // a rounded capsule; 3+ is an expanded convex hull.
+  function cgSyncHulls() {
+    if (!cgSigma || !cgEls.hulls) return;
+    var cv = cgEls.hulls;
+    var W = cgEls.canvas.offsetWidth, H = cgEls.canvas.offsetHeight;
+    if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+    var ctx = cv.getContext("2d");
+    ctx.clearRect(0, 0, W, H);
+    if (!cgData) return;
+    var g = cgSigma.getGraph();
+    var clusters = {};
+    g.forEachNode(function (id, a) {
+      var node = cgNodeById[id];
+      if (!node || !node.cluster) return;
+      if (cgNodeHidden(id, a)) return;
+      var vp = cgSigma.graphToViewport({ x: a.x, y: a.y });
+      (clusters[node.cluster] = clusters[node.cluster] || []).push(vp);
+    });
+    var PAD = 28;
+    Object.keys(clusters).forEach(function (cid) {
+      var pts = clusters[cid];
+      if (pts.length < 2) return;
+      ctx.save();
+      ctx.fillStyle = "rgba(224,166,61,0.07)";
+      ctx.strokeStyle = "rgba(224,166,61,0.34)";
+      ctx.lineWidth = 1.25;
+      ctx.lineJoin = "round";
+      if (pts.length === 2) {
+        // capsule: a thick round-capped stroke between the two points
+        ctx.strokeStyle = "rgba(224,166,61,0.10)";
+        ctx.lineCap = "round";
+        ctx.lineWidth = PAD * 2;
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        ctx.lineTo(pts[1].x, pts[1].y);
+        ctx.stroke();
+        ctx.strokeStyle = "rgba(224,166,61,0.34)";
+        ctx.lineWidth = 1.25;
+        ctx.stroke();
+      } else {
+        var hull = cgHull(pts);
+        var cx = 0, cy = 0;
+        hull.forEach(function (p) { cx += p.x; cy += p.y; });
+        cx /= hull.length; cy /= hull.length;
+        ctx.beginPath();
+        hull.forEach(function (p, i) {
+          var dx = p.x - cx, dy = p.y - cy;
+          var len = Math.sqrt(dx * dx + dy * dy) || 1;
+          var ex = p.x + (dx / len) * PAD, ey = p.y + (dy / len) * PAD;
+          if (i === 0) ctx.moveTo(ex, ey); else ctx.lineTo(ex, ey);
+        });
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      }
+      ctx.restore();
+    });
+  }
+
+  // Triage bar: one clickable chip per tier (count + colour). Clicking a chip
+  // hides/shows that tier on the canvas so an analyst can collapse the noise
+  // and read the confirmed/strong core in seconds.
+  function cgUpdateTriage(data) {
+    if (!cgEls.triage) return;
+    var counts = { confirmed: 0, strong: 0, weak: 0, refuted: 0 };
+    var fresh = 0, gone = 0;
+    data.nodes.forEach(function (n) {
+      if (n.type === "account") {
+        var t = (n.tier && counts[n.tier] !== undefined) ? n.tier : "weak";
+        counts[t]++;
+      }
+      if ((n.data || {}).is_new) fresh++;
+      if ((n.data || {}).gone) gone++;
+    });
+    cgEls.triage.innerHTML = "";
+    var lead = document.createElement("span");
+    lead.className = "cg-triage-hint";
+    lead.textContent = "Triage";
+    cgEls.triage.appendChild(lead);
+
+    CG_TIER_ORDER.forEach(function (t) {
+      var chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "cg-tier-chip" + (cgTierVis[t] ? " on" : " off");
+      chip.setAttribute("aria-pressed", String(cgTierVis[t]));
+      chip.title = (cgTierVis[t] ? "Hide" : "Show") + " " + CG_TIER[t].label + " accounts";
+      var dot = document.createElement("span");
+      dot.className = "cg-tier-dot";
+      dot.style.background = CG_TIER[t].color;
+      chip.appendChild(dot);
+      chip.appendChild(document.createTextNode(
+        CG_TIER[t].label + " " + counts[t]));
+      chip.addEventListener("click", function () { cgToggleTier(t); });
+      cgEls.triage.appendChild(chip);
+    });
+
+    if (fresh || gone) {
+      var diff = document.createElement("span");
+      diff.className = "cg-triage-diff";
+      diff.textContent = (fresh ? "+" + fresh + " new" : "") +
+        (fresh && gone ? " · " : "") + (gone ? gone + " gone" : "");
+      cgEls.triage.appendChild(diff);
+    }
+  }
+
+  function cgInspect(id, data) {
+    var node = null;
+    for (var i = 0; i < data.nodes.length; i++) {
+      if (data.nodes[i].id === id) { node = data.nodes[i]; break; }
+    }
+    if (!node) return;
+    var d = node.data || {};
+    var box = document.createElement("div");
+    var h = document.createElement("div");
+    h.className = "cg-insp-title";
+    h.textContent = node.label || id;
+    box.appendChild(h);
+    var t = document.createElement("div");
+    t.className = "cg-insp-type";
+    t.textContent = node.type + (node.sublabel ? " · " + node.sublabel : "");
+    box.appendChild(t);
+    // Tier badge (accounts only) — the headline triage verdict.
+    if (node.type === "account" && node.tier && CG_TIER[node.tier]) {
+      var badge = document.createElement("span");
+      badge.className = "cg-tier-badge";
+      badge.textContent = CG_TIER[node.tier].label;
+      badge.style.color = CG_TIER[node.tier].color;
+      badge.style.borderColor = CG_TIER[node.tier].color;
+      box.appendChild(badge);
+    }
+
+    function row(k, v, link) {
+      if (v === null || v === undefined || v === "") return;
+      var r = document.createElement("div");
+      r.className = "cg-insp-row";
+      var kk = document.createElement("div");
+      kk.className = "k"; kk.textContent = k;
+      var vv = document.createElement("div");
+      vv.className = "v";
+      if (link) {
+        var a = document.createElement("a");
+        a.href = v; a.target = "_blank"; a.rel = "noopener noreferrer";
+        a.textContent = v; vv.appendChild(a);
+      } else {
+        vv.textContent = typeof v === "object" ? JSON.stringify(v) : String(v);
+      }
+      r.appendChild(kk); r.appendChild(vv);
+      box.appendChild(r);
+    }
+    row("confidence", node.confidence != null ? node.confidence + "%" : null);
+    row("verification", node.verification || d.verification);
+    row("category", d.category);
+    row("engines", (node.engines || []).join(", "));
+    row("created", node.created_at ? String(node.created_at).slice(0, 10) : null);
+    if (d.is_new) row("status", "new since last scan");
+    if (d.gone) row("status", "gone since last scan");
+
+    // ---- evidence trail: how this ties to the subject, in plain language ----
+    function section(title) {
+      var s = document.createElement("div");
+      s.className = "cg-insp-section";
+      var st = document.createElement("div");
+      st.className = "cg-insp-sectitle";
+      st.textContent = title;
+      s.appendChild(st);
+      box.appendChild(s);
+      return s;
+    }
+    function line(sec, text, accent) {
+      var l = document.createElement("div");
+      l.className = "cg-insp-line";
+      if (accent) l.style.borderLeftColor = accent;
+      l.textContent = text;
+      sec.appendChild(l);
+    }
+    function pct(x) { return Math.round(x * 100) + "%"; }
+    function otherLabel(oid) {
+      var o = cgNodeById[oid];
+      if (!o) return oid;
+      return (o.label || oid) + (o.sublabel ? " on " + o.sublabel : "");
+    }
+
+    // Same-person evidence from correlation edges touching this node.
+    var corr = (data.edges || []).filter(function (e) {
+      return e.kind === "correlation" && (e.source === id || e.target === id);
+    });
+    if (corr.length) {
+      var sec = section("Same-person evidence");
+      corr.forEach(function (e) {
+        var oid = e.source === id ? e.target : e.source;
+        var ev = e.evidence || {};
+        var said = false;
+        if (ev.avatar_distance != null) {
+          line(sec, "Same avatar as " + otherLabel(oid) +
+            " (hash distance " + ev.avatar_distance + ")", "#e0a63d"); said = true;
+        }
+        if (ev.name_sim != null) {
+          line(sec, "Display name " + pct(ev.name_sim) + " similar to " +
+            otherLabel(oid), "#e0a63d"); said = true;
+        }
+        if (ev.bio_overlap != null) {
+          line(sec, "Bio shares " + pct(ev.bio_overlap) + " of words with " +
+            otherLabel(oid), "#e0a63d"); said = true;
+        }
+        if (!said) {
+          line(sec, (e.rationale || "correlated") + " — " + otherLabel(oid),
+            "#e0a63d");
+        }
+      });
+      if (node.cluster) {
+        var members = data.nodes.filter(function (n) {
+          return n.cluster === node.cluster;
+        }).length;
+        if (members > 1) line(sec, "Part of a " + members +
+          "-account identity cluster");
+      }
+    }
+
+    // Provenance: how far this sits from the subject, and how it was derived.
+    var prov = section("Provenance");
+    var hops = cgDepth[id];
+    if (hops === 0) {
+      line(prov, "This is the subject");
+    } else if (hops != null && hops < 900) {
+      line(prov, hops + (hops === 1 ? " hop" : " hops") + " from the subject");
+    } else if (hops != null) {
+      line(prov, "Not connected to the subject in this graph");
+    }
+    if (d.source === "name") line(prov, "Name-derived candidate (speculative)");
+    else if (d.source === "variant") line(prov, "Handle variant of the subject");
+    else if (node.type === "account") line(prov, "Discovered by username match");
+    if ((node.engines || []).length >= 2) {
+      line(prov, "Corroborated by " + node.engines.length + " engines: " +
+        node.engines.join(", "));
+    }
+
+    if (node.url) {
+      var link = section("Profile");
+      var a = document.createElement("a");
+      a.className = "cg-insp-link";
+      a.href = node.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+      a.textContent = node.url;
+      link.appendChild(a);
+    }
+
+    // Investigator note (persisted per investigation, shared with the inline
+    // graph's notes via the same localStorage key).
+    var nsec = section("Note");
+    var notes = loadNotes();
+    var ta = document.createElement("textarea");
+    ta.className = "cg-insp-note";
+    ta.rows = 3;
+    ta.value = notes[id] || "";
+    ta.placeholder = "Investigator note for this entity…";
+    var save = document.createElement("button");
+    save.type = "button";
+    save.className = "btn btn-ghost btn-sm";
+    save.textContent = "Save note";
+    save.addEventListener("click", function () {
+      saveNote(id, ta.value);
+      toast(ta.value.trim() ? "Note saved" : "Note cleared", "success");
+    });
+    nsec.appendChild(ta);
+    nsec.appendChild(save);
+
+    cgEls.inspector.innerHTML = "";
+    cgEls.inspector.appendChild(box);
+  }
+
+  window.addEventListener("resize", function () {
+    if (cgSigma && tabEls.casegraph && tabEls.casegraph.classList.contains("active")) {
+      cgSigma.refresh();
+    }
+  });
+
+  // Escape exits the ego view (when the Case graph is active and not typing).
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key !== "Escape" || !cgEgoSet) return;
+    if (!tabEls.casegraph || !tabEls.casegraph.classList.contains("active")) return;
+    var tag = (ev.target.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea") return;
+    cgExitEgo();
+  });
+
+  /* ---- case-graph toolbar: search / fit / reset / export ---------------- */
+  function cgSearchVisible(n) {
+    return !(n.type === "account" && n.tier && !cgTierVis[n.tier]);
+  }
+  function cgSearchJump() {
+    if (!cgSigma || !cgData) return;
+    var q = (cgEls.search.value || "").trim().toLowerCase();
+    if (!q) return;
+    var match = null;
+    for (var i = 0; i < cgData.nodes.length; i++) {
+      var n = cgData.nodes[i];
+      if (!cgSearchVisible(n)) continue;
+      var hay = ((n.label || "") + " " + (n.sublabel || "") + " " +
+        ((n.data || {}).category || "")).toLowerCase();
+      if (hay.indexOf(q) !== -1) { match = n; break; }
+    }
+    if (!match) { toast('No entity matches “' + q + '”', "error"); return; }
+    cgSelectedId = match.id;
+    cgInspect(match.id, cgData);
+    try {
+      var dd = cgSigma.getNodeDisplayData(match.id);
+      if (dd) {
+        cgSigma.getCamera().animate(
+          { x: dd.x, y: dd.y, ratio: Math.min(cgSigma.getCamera().ratio, 0.4) },
+          { duration: 400 });
+      }
+    } catch (e) { /* camera helper unavailable — selection still stands */ }
+    cgSyncOverlays();
+  }
+  if (cgEls.search) {
+    cgEls.search.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter") cgSearchJump();
+      else if (ev.key === "Escape") { cgEls.search.value = ""; cgEls.search.blur(); }
+    });
+  }
+
+  function cgFit() {
+    if (!cgSigma) return;
+    try { cgSigma.setCustomBBox(null); } catch (e) {}
+    cgSigma.refresh();
+    cgSigma.getCamera().animatedReset({ duration: 350 });
+    cgSyncOverlays();
+  }
+  if (cgEls.fitBtn) cgEls.fitBtn.addEventListener("click", cgFit);
+
+  if (cgEls.resetBtn) cgEls.resetBtn.addEventListener("click", function () {
+    cgTierVis = { confirmed: true, strong: true, weak: true, refuted: true };
+    cgFit();
+    if (cgData) cgUpdateTriage(cgData);
+  });
+
+  if (cgEls.csvBtn) cgEls.csvBtn.addEventListener("click", function () {
+    if (!cgData) { toast("Nothing to export", "error"); return; }
+    function cell(v) {
+      if (v === null || v === undefined) return "";
+      v = String(v);
+      return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+    }
+    var rows = [["id", "type", "label", "site", "url", "confidence", "tier",
+                 "verification", "category", "cluster", "created_at"]];
+    cgData.nodes.forEach(function (n) {
+      var d = n.data || {};
+      rows.push([n.id, n.type, n.label, d.site || n.sublabel || "", n.url || "",
+        n.confidence, n.tier || "", n.verification || d.verification || "",
+        d.category || "", n.cluster || "", n.created_at || ""]);
+    });
+    cgData.edges.forEach(function (e) {
+      rows.push([e.id, "edge", e.rationale || "", "", "", e.confidence,
+        e.kind || "", "", "", "", ""]);
+    });
+    var csv = rows.map(function (r) { return r.map(cell).join(","); }).join("\n");
+    var blob = new Blob([csv], { type: "text/csv" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "case-graph.csv";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+    toast("Case graph exported as CSV", "success");
+  });
+
+  // ---- ego view (double-click) ------------------------------------------
+  function cgFitToNodes(ids) {
+    if (!cgSigma || !ids.length) return;
+    var g = cgSigma.getGraph();
+    var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, any = false;
+    ids.forEach(function (id) {
+      if (!g.hasNode(id)) return;
+      var a = g.getNodeAttributes(id); any = true;
+      if (a.x < minX) minX = a.x; if (a.x > maxX) maxX = a.x;
+      if (a.y < minY) minY = a.y; if (a.y > maxY) maxY = a.y;
+    });
+    if (!any) return;
+    var padX = (maxX - minX) * 0.15 + 80, padY = (maxY - minY) * 0.15 + 80;
+    try {
+      cgSigma.setCustomBBox({ x: [minX - padX, maxX + padX], y: [minY - padY, maxY + padY] });
+      cgSigma.getCamera().animatedReset({ duration: 350 });
+    } catch (e) {}
+  }
+  function cgFocusEgo(nodeId) {
+    if (!cgSigma) return;
+    var g = cgSigma.getGraph();
+    if (!g.hasNode(nodeId)) return;
+    var set = {}; set[nodeId] = true;
+    g.forEachNeighbor(nodeId, function (nb) { set[nb] = true; });
+    cgEgoSet = set;
+    cgSelectedId = nodeId;
+    cgInspect(nodeId, cgData);
+    cgFitToNodes(Object.keys(set));
+    cgSigma.refresh();
+    cgSyncOverlays();
+  }
+  function cgExitEgo() {
+    cgEgoSet = null;
+    if (cgSigma) cgFit();
+  }
+
+  // ---- timeline scrubber (grow the graph by account creation date) ------
+  function cgTlActive() {
+    return cgEls.tlBar && !cgEls.tlBar.hidden &&
+      (cgTl.playing || parseInt(cgEls.tlScrub.value, 10) < 1000);
+  }
+  function cgTlCursor() {
+    var v = parseInt(cgEls.tlScrub.value, 10);
+    return cgTl.minT + (cgTl.maxT - cgTl.minT) * (v / 1000);
+  }
+  function cgSetupTimeline(data) {
+    if (!cgEls.tlBar) return;
+    cgStopTlPlay();
+    cgTl.dates = data.nodes
+      .map(function (n) { return n.created_at ? Date.parse(n.created_at) : NaN; })
+      .filter(function (t) { return !isNaN(t); })
+      .sort(function (a, b) { return a - b; });
+    // Fewer than three dated sources is not a story — hide the control.
+    cgEls.tlBar.hidden = cgTl.dates.length < 3;
+    if (cgEls.tlBar.hidden) return;
+    cgTl.minT = cgTl.dates[0];
+    cgTl.maxT = Date.now();
+    cgEls.tlScrub.value = "1000";
+    cgUpdateTlReadout();
+  }
+  function cgUpdateTlReadout() {
+    if (!cgEls.tlBar || cgEls.tlBar.hidden) return;
+    var v = parseInt(cgEls.tlScrub.value, 10);
+    cgEls.tlDate.textContent = v >= 1000 ? "now"
+      : new Date(cgTlCursor()).toISOString().slice(0, 7);
+    cgEls.tlPlay.innerHTML = cgTl.playing ? "&#10074;&#10074;" : "&#9654;";
+  }
+  function cgStopTlPlay() {
+    cgTl.playing = false;
+    if (cgTl.raf) cancelAnimationFrame(cgTl.raf);
+    cgTl.raf = null;
+    cgUpdateTlReadout();
+  }
+  function cgApplyTimeline() {
+    if (cgSigma) cgSigma.refresh();
+    cgSyncOverlays();
+    cgUpdateTlReadout();
+  }
+  if (cgEls.tlScrub) cgEls.tlScrub.addEventListener("input", function () {
+    cgStopTlPlay();
+    cgApplyTimeline();
+  });
+  if (cgEls.tlPlay) cgEls.tlPlay.addEventListener("click", function () {
+    if (cgTl.playing) { cgStopTlPlay(); return; }
+    cgTl.playing = true;
+    var start = null, dur = 12000, from = parseInt(cgEls.tlScrub.value, 10);
+    if (from >= 1000) from = 0;
+    function step(ts) {
+      if (!cgTl.playing) return;
+      if (!start) start = ts;
+      var k = Math.min(1000, from + ((ts - start) / dur) * 1000);
+      cgEls.tlScrub.value = String(Math.round(k));
+      cgApplyTimeline();
+      if (k >= 1000) { cgStopTlPlay(); return; }
+      cgTl.raf = requestAnimationFrame(step);
+    }
+    cgTl.raf = requestAnimationFrame(step);
+  });
+
+  // ---- changes-only (run diff) filter -----------------------------------
+  if (cgEls.changesBtn) cgEls.changesBtn.addEventListener("click", function () {
+    cgChangesOnly = !cgChangesOnly;
+    cgEls.changesBtn.classList.toggle("active", cgChangesOnly);
+    cgEls.changesBtn.setAttribute("aria-pressed", String(cgChangesOnly));
+    if (cgSigma) { cgFitVisible(); cgSigma.refresh(); cgSyncOverlays(); }
+  });
+
+  // ---- PNG export (composite the WebGL + hull layers) -------------------
+  if (cgEls.pngBtn) cgEls.pngBtn.addEventListener("click", function () {
+    if (!cgSigma) { toast("Nothing to export", "error"); return; }
+    try {
+      cgSigma.refresh();
+      var W = cgEls.canvas.offsetWidth, H = cgEls.canvas.offsetHeight;
+      var out = document.createElement("canvas");
+      out.width = W; out.height = H;
+      var ctx = out.getContext("2d");
+      ctx.fillStyle = "#0a0c0a"; ctx.fillRect(0, 0, W, H);
+      cgEls.canvas.querySelectorAll("canvas").forEach(function (c) {
+        try { ctx.drawImage(c, 0, 0, W, H); } catch (e) {}
+      });
+      if (cgEls.hulls) { try { ctx.drawImage(cgEls.hulls, 0, 0, W, H); } catch (e) {} }
+      var url = out.toDataURL("image/png");
+      var a = document.createElement("a");
+      a.href = url; a.download = "case-graph.png";
+      document.body.appendChild(a); a.click(); a.remove();
+      toast("Case graph exported as PNG", "success");
+    } catch (e) { toast("PNG export failed", "error"); }
+  });
+
+  // ---- GraphML export (imports into Gephi/yEd) --------------------------
+  if (cgEls.graphmlBtn) cgEls.graphmlBtn.addEventListener("click", function () {
+    if (!cgData) { toast("Nothing to export", "error"); return; }
+    var esc = function (s) {
+      return String(s === null || s === undefined ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    };
+    var keys = ["label", "type", "site", "url", "confidence", "tier",
+                "verification", "category", "cluster", "created_at"];
+    var xml = '<?xml version="1.0" encoding="UTF-8"?>\n' +
+      '<graphml xmlns="http://graphml.graphdrawing.org/xmlns">\n';
+    keys.forEach(function (k) {
+      xml += '  <key id="d_' + k + '" for="node" attr.name="' + k +
+             '" attr.type="string"/>\n';
+    });
+    xml += '  <key id="d_conf" for="edge" attr.name="confidence" attr.type="double"/>\n' +
+           '  <key id="d_kind" for="edge" attr.name="kind" attr.type="string"/>\n' +
+           '  <key id="d_rat" for="edge" attr.name="rationale" attr.type="string"/>\n' +
+           '  <graph id="G" edgedefault="undirected">\n';
+    cgData.nodes.forEach(function (n) {
+      var d = n.data || {};
+      var vals = { label: n.label, type: n.type, site: d.site || n.sublabel || "",
+                   url: n.url || "", confidence: n.confidence, tier: n.tier || "",
+                   verification: n.verification || d.verification || "",
+                   category: d.category || "", cluster: n.cluster || "",
+                   created_at: n.created_at || "" };
+      xml += '    <node id="' + esc(n.id) + '">\n';
+      keys.forEach(function (k) {
+        if (vals[k] !== "" && vals[k] !== null && vals[k] !== undefined) {
+          xml += '      <data key="d_' + k + '">' + esc(vals[k]) + '</data>\n';
+        }
+      });
+      xml += '    </node>\n';
+    });
+    cgData.edges.forEach(function (e) {
+      xml += '    <edge source="' + esc(e.source) + '" target="' + esc(e.target) + '">\n' +
+             '      <data key="d_conf">' + esc(e.confidence) + '</data>\n' +
+             '      <data key="d_kind">' + esc(e.kind || "link") + '</data>\n' +
+             (e.rationale ? '      <data key="d_rat">' + esc(e.rationale) + '</data>\n' : "") +
+             '    </edge>\n';
+    });
+    xml += '  </graph>\n</graphml>\n';
+    var blob = new Blob([xml], { type: "application/xml" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "case-graph.graphml";
+    document.body.appendChild(a); a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+    toast("GraphML exported — imports into Gephi/yEd", "success");
   });
 
   /* ============================ export ============================ */
