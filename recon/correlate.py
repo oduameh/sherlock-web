@@ -150,25 +150,30 @@ async def correlate(rows: list[dict]) -> list[dict]:
             a, b = candidates[i], candidates[j]
             score = 0
             reasons = []
+            signals: dict = {}   # structured breakdown for the graph's evidence trail
             ha, hb = a.get("avatar_hash"), b.get("avatar_hash")
             if ha is not None and hb is not None:
                 d = hamming(ha, hb)
                 if d <= AVATAR_HAMMING_MAX:
                     score += AVATAR_WEIGHT
                     reasons.append(f"avatars match (hash distance {d})")
+                    signals["avatar_distance"] = d
             nsim = name_similarity(_display_name(a), _display_name(b))
             if nsim >= NAME_SIM_MIN:
                 score += round(NAME_WEIGHT * nsim)
                 reasons.append(f"display names {nsim:.0%} similar")
+                signals["name_sim"] = round(nsim, 2)
             bsim = bio_similarity(_bio(a), _bio(b))
             if bsim >= BIO_JACCARD_MIN:
                 score += round(BIO_WEIGHT * min(1.0, bsim / BIO_JACCARD_MIN))
                 reasons.append(f"bios share {bsim:.0%} of words")
+                signals["bio_overlap"] = round(bsim, 2)
             if score >= CORRELATION_LINK_MIN:  # below this, too speculative
                 links.append({
                     "a": label(a), "b": label(b),
                     "score": min(100, score),
                     "rationale": "; ".join(reasons),
+                    "signals": signals,
                 })
                 union(i, j)
 

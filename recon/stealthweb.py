@@ -75,6 +75,10 @@ _TIER2_TIMEOUT_S = 15.0
 _TIER3_TIMEOUT_S = 45.0
 _MAX_HTML_BYTES = 512 * 1024
 
+# Rotate the TLS/JA3 fingerprint per request so a WAF can't pin us to one
+# Chrome fingerprint. All four are valid curl_cffi aliases (resolve to latest).
+_TLS_IMPERSONATE = ["chrome", "firefox", "safari", "edge"]
+
 
 # ---------------------------------------------------------------------------
 # Escalation decision (pure functions — unit-tested, no network)
@@ -177,9 +181,14 @@ async def fetch_tls(url: str, timeout: float = _TIER2_TIMEOUT_S,
         resp = await asyncio.wait_for(
             AsyncFetcher.get(
                 url,
-                impersonate="chrome",
+                # A list rotates the JA3/TLS fingerprint per request (Scrapling
+                # picks one at random) so a WAF can't pin us to one fingerprint.
+                impersonate=_TLS_IMPERSONATE,
                 stealthy_headers=True,
-                follow_redirects=True,
+                # "safe" follows redirects but refuses hops resolving to
+                # internal/private IPs — defence in depth for the redirect-SSRF
+                # residual (assert_public_url above stays the primary gate).
+                follow_redirects="safe",
                 timeout=timeout,
             ),
             timeout=timeout + 5.0,
@@ -216,6 +225,11 @@ async def _get_session():
                     max_pages=2,
                     headless=True,
                     solve_cloudflare=True,
+                    # We only ever read the HTML for identity fields, so drop
+                    # images/media/fonts and ad/tracker domains — big latency
+                    # and bandwidth cut per browser page, no effect on results.
+                    disable_resources=True,
+                    block_ads=True,
                     timeout=int(_TIER3_TIMEOUT_S * 1000),
                 )
             except Exception as exc:

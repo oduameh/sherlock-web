@@ -1,6 +1,7 @@
 from recon.confidence import (
     CORRELATION_LINK_MIN,
     account_confidence,
+    account_tier,
     bucket_counts,
     verdict_bucket,
 )
@@ -101,3 +102,39 @@ def test_unexamined_never_outranks_examined():
     never_looked = account_confidence(
         {"engines": ["s"], "verification": {"status": "not_examined"}})
     assert examined_weak > never_looked
+
+
+def test_account_tier_maps_onto_verdicts():
+    # confirmed page → confirmed tier; false positive → refuted.
+    assert account_tier({"verification": {"status": "confirmed"}}) == "confirmed"
+    assert account_tier(
+        {"verification": {"status": "likely_false_positive"}}) == "refuted"
+
+
+def test_strong_tier_needs_a_corroborated_lead():
+    # A real fetched page (lead) that also clears the corroboration bar
+    # (two engines + a parsed identity) is a strong lead.
+    strong = {
+        "engines": ["sherlock", "maigret"],
+        "enrichment": {"jsonld_name": "Alice Example"},
+        "verification": {"status": "unconfirmed"},
+    }
+    assert account_confidence(strong) >= 40
+    assert account_tier(strong) == "strong"
+
+
+def test_weak_tier_covers_bare_leads_and_speculation():
+    # A bare unconfirmed single-engine hit is a lead but not a strong one.
+    assert account_tier(
+        {"engines": ["sherlock"], "verification": {"status": "unconfirmed"}}) == "weak"
+    # Speculative name-derived candidate.
+    assert account_tier(
+        {"engines": ["sherlock"], "source": "name",
+         "verification": {"status": "unconfirmed"}}) == "weak"
+
+
+def test_blocked_and_unexamined_are_weak_not_strong():
+    # No evidential weight → weak, never strong (mirrors verdict_bucket).
+    assert account_tier({"verification": {"status": "indeterminate"}}) == "weak"
+    assert account_tier({"verification": {"status": "not_examined"}}) == "weak"
+    assert account_tier({}) == "weak"

@@ -21,11 +21,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from recon import safeweb
+from recon import policy, safeweb, stealthweb
 from recon.engines import HIGH_VALUE_SITES, normalize_site
 
 logger = logging.getLogger("recon.whatsmyname")
@@ -35,6 +36,11 @@ _NSFW_CAT = "xx nsfw xx"
 
 MAX_BODY_BYTES = 512 * 1024
 WMN_CONCURRENCY = 20
+
+# High-value sites (normalized) eligible for a stealth retry on UNKNOWN.
+_HV_NORM = {normalize_site(n) for n in HIGH_VALUE_SITES}
+# Per-scan cap on tier-2 stealth retries — bounds cost even on a full fan-out.
+_STEALTH_RETRY_BUDGET = int(os.environ.get("RECON_WMN_STEALTH_BUDGET") or "10")
 
 # Status strings mirror the other engines' vocabulary so the router's classifier
 # and the pipeline's merge logic treat all three the same way.
@@ -124,14 +130,38 @@ async def _get_capped(client, url: str) -> tuple[Optional[int], str]:
         return resp.status_code, body
 
 
-async def _check_site(client, site: dict, username: str) -> WmnResult:
+async def _check_site(client, site: dict, username: str,
+                      stealth_retry: bool = False,
+                      budget: Optional[dict] = None) -> WmnResult:
     template = site.get("uri_check") or ""
     url = template.replace("{account}", username)
     name = site.get("name", "?")
     cat = site.get("cat")
+    # Robots-disallowed host — never fetch it, and never let the stealth retry
+    # touch it. Reported as "not examined", never as available/absent.
+    reason = policy.denied_reason(url)
+    if reason:
+        return WmnResult(UNKNOWN, name, url, cat, f"policy: {reason}")
     try:
         status_code, body = await _get_capped(client, url)
         status = classify_response(site, status_code, body)
+        # A blocked/ambiguous response on a HIGH-VALUE site is often a WAF/JS
+        # interstitial. Spend one budgeted tier-2 stealth fetch (TLS-impersonated,
+        # still SSRF-guarded, never tier-3) to try to recover the vote. Gated so
+        # it never fans out across the ~700-site dataset.
+        if (status == UNKNOWN and stealth_retry and budget is not None
+                and budget.get("left", 0) > 0
+                and normalize_site(name) in _HV_NORM
+                and stealthweb.enabled()):
+            budget["left"] -= 1
+            try:
+                st2, body2 = await stealthweb.fetch_tls(url)
+            except Exception:
+                st2, body2 = None, None
+            if st2 is not None and body2:
+                status2 = classify_response(site, st2, body2)
+                if status2 != UNKNOWN:
+                    return WmnResult(status2, name, url, cat, "stealth-recovered")
         context = "" if status != UNKNOWN else f"HTTP {status_code}"
         return WmnResult(status, name, url, cat, context)
     except Exception as exc:
@@ -140,15 +170,19 @@ async def _check_site(client, site: dict, username: str) -> WmnResult:
 
 async def whatsmyname_scan(username: str, sites: list[dict], timeout: int,
                            on_result: Callable[[WmnResult], None],
-                           proxy: Optional[str] = None) -> None:
+                           proxy: Optional[str] = None,
+                           stealth_retry: bool = False) -> None:
     """Scan ``username`` across ``sites``, calling ``on_result`` per site.
 
     Bounded concurrency, all through the SSRF-guarded client. Never raises;
-    a failed site check yields an UNKNOWN result.
+    a failed site check yields an UNKNOWN result. Robots-denied hosts are
+    skipped. With ``stealth_retry`` and the ladder enabled, an UNKNOWN on a
+    high-value site gets one budgeted tier-2 stealth retry.
     """
     if not sites:
         return
     sem = asyncio.Semaphore(WMN_CONCURRENCY)
+    budget = {"left": _STEALTH_RETRY_BUDGET} if stealth_retry else None
     client_kwargs: dict[str, Any] = {"timeout": float(timeout)}
     if proxy:
         client_kwargs["proxy"] = proxy
@@ -156,7 +190,9 @@ async def whatsmyname_scan(username: str, sites: list[dict], timeout: int,
     async with safeweb.async_client(**client_kwargs) as client:
         async def one(site: dict) -> None:
             async with sem:
-                result = await _check_site(client, site, username)
+                result = await _check_site(client, site, username,
+                                           stealth_retry=stealth_retry,
+                                           budget=budget)
             try:
                 on_result(result)
             except Exception:
