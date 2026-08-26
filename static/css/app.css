@@ -9966,3 +9966,48 @@ input[type="checkbox"] { accent-color: var(--accent); }
   #cgCockpit { height: auto; }
   #cgStage { height: 62vh; }
 }
+
+/* ===================================================================== */
+/* God's Eye View — embedded geospatial workspace (additive)             */
+/* ===================================================================== */
+#tabGodseye.page.active { max-width: none; display: block; padding: 0; }
+#gevWrap {
+  position: relative; height: calc(100vh - 128px); min-height: 520px;
+  background: radial-gradient(circle at 50% 40%, #0d110d 0%, #0a0c0a 72%);
+  overflow: hidden;
+}
+#gevFrame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.gev-setup {
+  position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; padding: 24px;
+}
+.gev-setup-card {
+  max-width: 580px; background: #111511; border: 1px solid #1b211b;
+  border-radius: 4px; padding: 22px 26px 20px;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.4);
+}
+.gev-setup-card h2 {
+  margin: 0 0 8px; font-size: 19px; color: #e8eee6;
+  font-family: var(--font-sans, Inter, system-ui, sans-serif);
+  display: flex; align-items: center; gap: 10px;
+}
+.gev-badge {
+  font: 10px/1 'JetBrains Mono', ui-monospace, monospace; color: #e0a63d;
+  border: 1px solid #e0a63d; border-radius: 2px; padding: 3px 6px;
+  text-transform: uppercase; letter-spacing: .06em;
+}
+.gev-lead { color: #9aa79a; font-size: 13px; line-height: 1.5; margin: 0 0 14px; }
+.gev-status {
+  font: 12px/1.4 'JetBrains Mono', ui-monospace, monospace; color: #9aa79a;
+  padding: 8px 10px; border: 1px solid #1b211b; border-radius: 2px;
+  background: #0c100b; margin-bottom: 14px;
+}
+.gev-status.down { color: #e0a63d; border-color: #3a3320; }
+.gev-steps { margin: 0 0 16px; padding-left: 18px; color: #cdd6cb; }
+.gev-steps li { font-size: 13px; line-height: 1.7; }
+.gev-steps code, .gev-note code {
+  font: 11px/1.3 'JetBrains Mono', ui-monospace, monospace;
+  color: #e0a63d; background: #0c100b; padding: 1px 5px; border-radius: 2px;
+}
+.gev-actions { display: flex; gap: 8px; margin-bottom: 14px; }
+.gev-note { color: #6c786c; font-size: 11px; line-height: 1.5; margin: 0; }

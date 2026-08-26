@@ -11,3 +11,6 @@ local.properties
 *.apk
 .DS_Store
 .claude/
+
+# God's Eye View app clone (run scripts/godseye.sh)
+godseye/
