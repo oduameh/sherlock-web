@@ -58,6 +58,10 @@
       <span class="tab-callsign" aria-hidden="true">[GRAPH]</span>
       <span>Case graph</span>
     </button>
+    <button class="app-tab" data-tab="godseye" type="button" role="tab" aria-selected="false" aria-controls="tabGodseye">
+      <span class="tab-callsign" aria-hidden="true">[GEO]</span>
+      <span>God's Eye</span>
+    </button>
   </nav>
 
   <div class="side-foot">
@@ -475,6 +479,34 @@
         <aside id="cgInspector" class="cg-inspector" aria-label="Selected entity">
           <div class="cg-insp-empty">Select an entity to see its evidence trail.</div>
         </aside>
+      </div>
+    </div>
+  </main>
+
+  <!-- ============ GOD'S EYE VIEW (geospatial workspace) ============ -->
+  <main id="tabGodseye" class="page" role="tabpanel" aria-label="God's Eye View">
+    <div id="gevWrap">
+      <iframe id="gevFrame" title="God's Eye View" hidden
+              referrerpolicy="no-referrer"
+              allow="microphone; xr-spatial-tracking; fullscreen"></iframe>
+      <div id="gevSetup" class="gev-setup">
+        <div class="gev-setup-card">
+          <h2>God&rsquo;s Eye View <span class="gev-badge">geospatial</span></h2>
+          <p class="gev-lead">A photorealistic 3D globe of live open-source spatial intelligence &mdash;
+             flights, vessels, satellites, fires, quakes and more. It runs as its own
+             service; this workspace embeds it.</p>
+          <div id="gevStatus" class="gev-status">Checking for a running instance&hellip;</div>
+          <ol class="gev-steps">
+            <li>From the project root, run <code>./scripts/godseye.sh</code> (clones &amp; installs it once).</li>
+            <li>Add your <code>GOOGLE_MAPS_API_KEY</code> to <code>godseye/.env</code> (Google Cloud &rarr; Map Tiles API) &mdash; the only required key; everything else is optional.</li>
+            <li>It starts on <code id="gevUrl">http://localhost:4173</code>. Click recheck.</li>
+          </ol>
+          <div class="gev-actions">
+            <button id="gevRecheck" class="btn btn-ghost btn-sm" type="button">Recheck</button>
+            <a id="gevOpen" class="btn btn-ghost btn-sm" href="#" target="_blank" rel="noopener">Open in new tab &#8599;</a>
+          </div>
+          <p class="gev-note">Runs separately with its own keys, which stay on your machine. Set <code>GODSEYE_URL</code> if you host it elsewhere. Third-party app (MIT) by Bilawal Sidhu.</p>
+        </div>
       </div>
     </div>
   </main>

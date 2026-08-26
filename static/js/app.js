@@ -262,7 +262,8 @@
     watchlist: document.getElementById("tabWatchlist"),
     history: document.getElementById("tabHistory"),
     health: document.getElementById("tabHealth"),
-    casegraph: document.getElementById("tabCasegraph")
+    casegraph: document.getElementById("tabCasegraph"),
+    godseye: document.getElementById("tabGodseye")
   };
 
   /* topbar contextual title/subtitle per section */
@@ -271,7 +272,8 @@
     watchlist: { title: "Watchlist", sub: "Continuous monitoring with change alerts" },
     history: { title: "History", sub: "Reload any past investigation or scan" },
     health: { title: "Source Health", sub: "Adaptive routing, reliability & circuit breakers" },
-    casegraph: { title: "Case graph", sub: "The investigation as a live entity graph" }
+    casegraph: { title: "Case graph", sub: "The investigation as a live entity graph" },
+    godseye: { title: "God's Eye View", sub: "Live geospatial intelligence on a 3D globe" }
   };
   var sectionTitleEl = document.getElementById("sectionTitle");
   var sectionSubEl = document.getElementById("sectionSub");
@@ -315,12 +317,51 @@
       if (tab === "history") { loadHistory(); }
       if (tab === "health") { loadHealthSources(); }
       if (tab === "casegraph") { openCaseGraph(); }
+      if (tab === "godseye") { openGodseye(); }
       closeSidebar();
     });
   });
   function switchTab(tab) {
     document.querySelector('.app-tab[data-tab="' + tab + '"]').click();
   }
+
+  /* ============ God's Eye View (embedded geospatial workspace) ============ */
+  // The full app runs as its own service; we embed it when reachable, else show
+  // setup instructions. Keys live in that app, never here.
+  var gevFrameUrl = null;
+  function openGodseye() {
+    var frame = document.getElementById("gevFrame");
+    var setup = document.getElementById("gevSetup");
+    var statusEl = document.getElementById("gevStatus");
+    var urlEl = document.getElementById("gevUrl");
+    var openEl = document.getElementById("gevOpen");
+    function showSetup(msg, cls) {
+      if (frame) frame.hidden = true;
+      if (setup) setup.style.display = "flex";
+      if (statusEl) {
+        statusEl.textContent = msg;
+        statusEl.className = "gev-status" + (cls ? " " + cls : "");
+      }
+    }
+    if (statusEl) { statusEl.textContent = "Checking for a running instance…"; statusEl.className = "gev-status"; }
+    fetch("/api/godseye/status").then(function (r) { return r.json(); })
+      .then(function (s) {
+        if (urlEl) urlEl.textContent = s.url;
+        if (openEl) openEl.href = s.url;
+        if (s.reachable && frame) {
+          if (gevFrameUrl !== s.url) { frame.src = s.url; gevFrameUrl = s.url; }
+          frame.hidden = false;
+          if (setup) setup.style.display = "none";
+        } else {
+          showSetup("Not running at " + s.url + " — start it with ./scripts/godseye.sh, then recheck.", "down");
+        }
+      })
+      .catch(function () { showSetup("Could not reach the status check.", "down"); });
+  }
+  (function () {
+    var rc = document.getElementById("gevRecheck");
+    if (rc) rc.addEventListener("click", openGodseye);
+  })();
 
   /* ==================== adaptive routing / source health ==================== */
   var ERROR_LABELS = {

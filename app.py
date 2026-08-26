@@ -18,6 +18,7 @@ Sherlock library API used (sherlock-project 0.16.0):
 import asyncio
 import base64
 import json
+import socket
 import logging
 import os
 import re
@@ -1450,6 +1451,33 @@ def service_worker() -> FileResponse:
         media_type="text/javascript",
         headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"},
     )
+
+
+# --- God's Eye View geospatial workspace ---------------------------------
+# The full app (github.com/bilawalsidhu/gods-eye-view, MIT) runs as its own
+# service — a Vite/Node server proxying ~15 live geospatial feeds — and the
+# frontend's [GODSEYE] tab embeds it. We only report whether that server is up
+# so the tab can show the globe or setup instructions. Keys stay in that app.
+GODSEYE_URL = os.environ.get("GODSEYE_URL", "http://localhost:4173").rstrip("/")
+
+
+def _godseye_reachable(url: str) -> bool:
+    """A cheap TCP connect check — no HTTP fetch, no data leaves this machine."""
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(url)
+        host = p.hostname or "localhost"
+        port = p.port or (443 if p.scheme == "https" else 80)
+        with socket.create_connection((host, port), timeout=1.0):
+            return True
+    except Exception:
+        return False
+
+
+@app.get("/api/godseye/status")
+def godseye_status() -> JSONResponse:
+    return JSONResponse({"url": GODSEYE_URL,
+                         "reachable": _godseye_reachable(GODSEYE_URL)})
 
 
 # Icons and any other static assets.
