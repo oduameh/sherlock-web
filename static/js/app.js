@@ -36,6 +36,7 @@
     rerunBtn: document.getElementById("rerunBtn"),
     dossierBtn: document.getElementById("dossierBtn"),
     graphBtn: document.getElementById("graphBtn"),
+    breachBtn: document.getElementById("breachBtn"),
     watchBtn: document.getElementById("watchBtn"),
     watchInterval: document.getElementById("watchInterval"),
     clearBtn: document.getElementById("clearBtn"),
@@ -263,6 +264,7 @@
     history: document.getElementById("tabHistory"),
     health: document.getElementById("tabHealth"),
     casegraph: document.getElementById("tabCasegraph"),
+    footprint: document.getElementById("tabFootprint"),
     godseye: document.getElementById("tabGodseye")
   };
 
@@ -273,6 +275,7 @@
     history: { title: "History", sub: "Reload any past investigation or scan" },
     health: { title: "Source Health", sub: "Adaptive routing, reliability & circuit breakers" },
     casegraph: { title: "Case graph", sub: "The investigation as a live entity graph" },
+    footprint: { title: "Footprint", sub: "Where this identity claims and appears to be" },
     godseye: { title: "God's Eye View", sub: "Live geospatial intelligence on a 3D globe" }
   };
   var sectionTitleEl = document.getElementById("sectionTitle");
@@ -317,6 +320,7 @@
       if (tab === "history") { loadHistory(); }
       if (tab === "health") { loadHealthSources(); }
       if (tab === "casegraph") { openCaseGraph(); }
+      if (tab === "footprint") { openFootprint(); }
       if (tab === "godseye") { openGodseye(); }
       closeSidebar();
     });
@@ -324,6 +328,203 @@
   function switchTab(tab) {
     document.querySelector('.app-tab[data-tab="' + tab + '"]').click();
   }
+
+  /* ==================== subject footprint map ==================== */
+  // Plots every geographic CLAIM the investigation produced — the investigator's
+  // stated location, per-platform profile locations, Gravatar, phone geography,
+  // and domain infrastructure — so corroboration (one metro) or contradiction
+  // (three continents) is visible at a glance. Infrastructure is drawn but is
+  // never treated as the person's own location; the backend enforces that too.
+  var fpMap = null, fpLayer = null, fpData = null, fpMarkers = {};
+  var FP_KIND = {
+    subject:  { color: "#e8eee6", label: "Claimed by investigator" },
+    profile:  { color: "#4cc38a", label: "Profile locations" },
+    gravatar: { color: "#4cc38a", label: "Gravatar" },
+    phone:    { color: "#5aa9c9", label: "Phone geography" },
+    infra:    { color: "#b18cff", label: "Infrastructure (server, not person)" }
+  };
+
+  function openFootprint() {
+    if (!currentInvId) { fpShowEmpty("No investigation selected — load one first."); return; }
+    if (typeof L === "undefined") { fpShowEmpty("Map library unavailable (static/vendor/leaflet.js missing)."); return; }
+    fpShowEmpty("Resolving locations…");
+    fetch("/api/investigate/" + currentInvId + "/footprint")
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.error) { fpShowEmpty(d.error); return; }
+        fpRender(d);
+      })
+      .catch(function () { fpShowEmpty("Failed to load the footprint."); });
+  }
+
+  function fpShowEmpty(msg) {
+    var el = document.getElementById("fpEmpty");
+    if (el) { el.textContent = msg; el.hidden = false; }
+  }
+
+  function fpRender(d) {
+    fpData = d;
+    var empty = document.getElementById("fpEmpty");
+    var pts = d.points || [];
+    if (!pts.length) {
+      fpShowEmpty("No locations could be resolved for this investigation.");
+      fpRenderList(d);
+      return;
+    }
+    if (empty) empty.hidden = true;
+
+    if (!fpMap) {
+      fpMap = L.map("fpMap", { zoomControl: true, worldCopyJump: true })
+               .setView([20, 0], 2);
+      // Standard OpenStreetMap tiles — genuinely free and key-less. They are
+      // light, so a CSS filter (see .fp-dark-tiles) inverts them into the
+      // console's dark palette rather than depending on a keyed dark basemap.
+      L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        className: "fp-dark-tiles",
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+      }).addTo(fpMap);
+    }
+    if (fpLayer) { fpLayer.remove(); }
+    fpLayer = L.layerGroup().addTo(fpMap);
+    fpMarkers = {};
+
+    pts.forEach(function (p, i) {
+      var kind = FP_KIND[p.kind] || { color: "#9aa79a", label: p.kind };
+      var m = L.circleMarker([p.lat, p.lon], {
+        radius: p.kind === "subject" ? 9 : 7,
+        color: kind.color, weight: 2,
+        fillColor: kind.color, fillOpacity: 0.35
+      });
+      var site = p.site ? '<div class="fp-pop-kind">' + fpEsc(p.site) + "</div>" : "";
+      m.bindPopup(
+        '<div class="fp-pop-kind">' + fpEsc(kind.label) + "</div>" +
+        "<b>" + fpEsc(p.label || "") + "</b><br>" +
+        fpEsc(p.display || "") + (p.org ? "<br>" + fpEsc(p.org) : "") + site
+      );
+      m.addTo(fpLayer);
+      fpMarkers[i] = m;
+    });
+    fpFit();
+    fpRenderVerdict(d.stats || {});
+    fpRenderList(d);
+    // Leaflet needs a size recalculation when its panel was hidden at init.
+    setTimeout(function () { if (fpMap) fpMap.invalidateSize(); }, 60);
+  }
+
+  function fpEsc(s) {
+    return String(s === null || s === undefined ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function fpFit() {
+    if (!fpMap || !fpData || !(fpData.points || []).length) return;
+    var bounds = L.latLngBounds(fpData.points.map(function (p) {
+      return [p.lat, p.lon];
+    }));
+    fpMap.fitBounds(bounds, { padding: [50, 50], maxZoom: 11 });
+  }
+
+  function fpRenderVerdict(stats) {
+    var v = document.getElementById("fpVerdict");
+    var a = document.getElementById("fpAssessment");
+    if (v) {
+      v.textContent = stats.consistency || "";
+      v.className = "fp-verdict " + (stats.consistency || "");
+    }
+    if (a) {
+      var bits = [stats.assessment || ""];
+      if (stats.max_spread_km) bits.push("spread " + stats.max_spread_km + " km");
+      a.textContent = bits.filter(Boolean).join(" · ");
+    }
+  }
+
+  function fpRenderList(d) {
+    var list = document.getElementById("fpList");
+    if (!list) return;
+    list.innerHTML = "";
+    var byKind = {};
+    (d.points || []).forEach(function (p, i) {
+      (byKind[p.kind] = byKind[p.kind] || []).push({ p: p, i: i });
+    });
+    Object.keys(FP_KIND).forEach(function (kind) {
+      var items = byKind[kind];
+      if (!items || !items.length) return;
+      var h = document.createElement("div");
+      h.className = "fp-group-title";
+      h.textContent = FP_KIND[kind].label + " (" + items.length + ")";
+      list.appendChild(h);
+      items.forEach(function (entry) {
+        var p = entry.p;
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "fp-item";
+        var dot = document.createElement("span");
+        dot.className = "fp-dot";
+        dot.style.background = FP_KIND[kind].color;
+        var main = document.createElement("div");
+        main.className = "fp-item-main";
+        var lab = document.createElement("div");
+        lab.className = "fp-item-label";
+        lab.textContent = p.label || p.display || "";
+        var sub = document.createElement("div");
+        sub.className = "fp-item-sub";
+        sub.textContent = [p.site, p.display].filter(Boolean).join(" · ");
+        main.appendChild(lab); main.appendChild(sub);
+        btn.appendChild(dot); btn.appendChild(main);
+        btn.addEventListener("click", function () {
+          if (!fpMap) return;
+          fpMap.setView([p.lat, p.lon], Math.max(fpMap.getZoom(), 9));
+          var m = fpMarkers[entry.i];
+          if (m) m.openPopup();
+        });
+        list.appendChild(btn);
+      });
+    });
+    var un = (d.unresolved || []);
+    if (un.length) {
+      var uh = document.createElement("div");
+      uh.className = "fp-group-title";
+      uh.textContent = "Unresolved (" + un.length + ")";
+      list.appendChild(uh);
+      un.forEach(function (u) {
+        var row = document.createElement("div");
+        row.className = "fp-unresolved";
+        row.textContent = (u.label || u.place || u.ip || "") +
+          (u.reason ? " — " + u.reason : "");
+        list.appendChild(row);
+      });
+    }
+  }
+
+  (function () {
+    var fit = document.getElementById("fpFitBtn");
+    if (fit) fit.addEventListener("click", fpFit);
+    var csv = document.getElementById("fpCsvBtn");
+    if (csv) csv.addEventListener("click", function () {
+      if (!fpData || !(fpData.points || []).length) {
+        toast("Nothing to export", "error"); return;
+      }
+      function cell(v) {
+        if (v === null || v === undefined) return "";
+        v = String(v);
+        return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+      }
+      var rows = [["kind", "label", "site", "resolved_place", "country", "lat", "lon", "org"]];
+      fpData.points.forEach(function (p) {
+        rows.push([p.kind, p.label || "", p.site || "", p.display || "",
+                   p.country || "", p.lat, p.lon, p.org || ""]);
+      });
+      var blob = new Blob([rows.map(function (r) { return r.map(cell).join(","); }).join("\n")],
+                          { type: "text/csv" });
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "subject-footprint.csv";
+      document.body.appendChild(a); a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+      toast("Footprint exported as CSV", "success");
+    });
+  })();
 
   /* ============ God's Eye View (embedded geospatial workspace) ============ */
   // The full app runs as its own service; we embed it when reachable, else show
@@ -1420,6 +1621,103 @@
     });
   }
 
+  // ---- infostealer exposure (Hudson Rock, on demand) ---------------------
+  // Reports that a machine carrying this identity was compromised — never the
+  // harvested credentials (the backend strips them before they reach here).
+  function renderBreachExposure(d) {
+    var c = invSection("breach", "Infostealer exposure", "breach");
+    c.status.textContent = "done";
+    c.found.style.display = "none";
+    c.rows.innerHTML = "";
+
+    if (!d.checked) {
+      var un = document.createElement("div");
+      un.className = "rrow";
+      un.innerHTML = '<span class="dim">' +
+        (d.note ? esc(d.note)
+                : "Could not reach the exposure service — this is <b>not</b> a clean result.") +
+        "</span>";
+      c.rows.appendChild(un);
+      return;
+    }
+
+    var head = document.createElement("div");
+    head.className = "dim";
+    head.style.padding = "2px 16px 8px";
+    head.textContent = d.compromised_count + " of " + d.identifiers_checked +
+      " identifier(s) found in infostealer logs · source: " +
+      (d.source || "Hudson Rock");
+    c.rows.appendChild(head);
+
+    (d.results || []).forEach(function (r) {
+      var row = document.createElement("div");
+      row.className = "rrow" + (r.compromised ? " error" : "");
+      var who = document.createElement("span");
+      who.className = "site";
+      who.textContent = r.identifier + " (" + r.kind + ")";
+      var badge = document.createElement("span");
+      badge.className = "badge " + (r.compromised ? "b-listed" : "b-none");
+      badge.textContent = r.compromised
+        ? r.infections + " infection" + (r.infections === 1 ? "" : "s")
+        : "no exposure found";
+      row.appendChild(who);
+      row.appendChild(badge);
+      if (r.compromised) {
+        var when = document.createElement("span");
+        when.className = "engine";
+        when.textContent = "last " + String(r.last_compromise || "").slice(0, 10);
+        row.appendChild(when);
+      }
+      c.rows.appendChild(row);
+      (r.stealers || []).slice(0, 4).forEach(function (s) {
+        var det = document.createElement("div");
+        det.className = "rrow";
+        det.style.paddingLeft = "34px";
+        var bits = [
+          String(s.date_compromised || "").slice(0, 10),
+          s.operating_system, s.computer_name,
+          s.user_services ? s.user_services + " user services" : null,
+          s.corporate_services ? s.corporate_services + " corporate" : null
+        ].filter(Boolean);
+        det.innerHTML = '<span class="dim">' + esc(bits.join(" · ")) + "</span>";
+        c.rows.appendChild(det);
+      });
+    });
+
+    var note = document.createElement("div");
+    note.className = "dim";
+    note.style.padding = "8px 16px 2px";
+    note.textContent = "Exposure only — no credentials are retrieved or stored.";
+    c.rows.appendChild(note);
+  }
+
+  function esc(s) {
+    return String(s === null || s === undefined ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  els.breachBtn.addEventListener("click", function () {
+    if (!currentInvId) { toast("No investigation selected", "error"); return; }
+    els.breachBtn.disabled = true;
+    toast("Checking infostealer exposure…", "info");
+    fetch("/api/investigate/" + currentInvId + "/breach")
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        els.breachBtn.disabled = false;
+        if (d.error) { toast(d.error, "error"); return; }
+        renderBreachExposure(d);
+        var sec = invCards.breach;
+        if (sec && sec.rows) sec.rows.scrollIntoView({ behavior: "smooth", block: "center" });
+        toast(d.compromised_count
+          ? d.compromised_count + " identifier(s) found in infostealer logs"
+          : "No infostealer exposure found", d.compromised_count ? "error" : "success");
+      })
+      .catch(function () {
+        els.breachBtn.disabled = false;
+        toast("Breach check failed", "error");
+      });
+  });
+
   function renderCorrelation(clusters) {
     var c = invSection("correlation", "Correlation", "clusters");
     c.status.textContent = "done";
@@ -1493,6 +1791,7 @@
     els.rerunBtn.style.display = "";
     els.dossierBtn.style.display = "";
     els.graphBtn.style.display = "";
+    els.breachBtn.style.display = "";
     els.watchBtn.style.display = "";
   }
 
