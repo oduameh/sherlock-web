@@ -1250,6 +1250,42 @@ if RECON_AVAILABLE:
             "exposure": exposure_summary(inv["summary"] or {}),
         })
 
+    @app.get("/api/investigate/{inv_id}/breach")
+    async def investigate_breach(inv_id: int) -> JSONResponse:
+        """Infostealer exposure for the subject's identifiers (never secrets)."""
+        inv = _get_investigation(inv_id)
+        if inv is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if not inv["summary"]:
+            return JSONResponse({"error": "investigation has not run yet"},
+                                status_code=409)
+        from recon.breach import breach_exposure
+        try:
+            data = await breach_exposure(inv["summary"])
+        except Exception:
+            logging.getLogger("app").exception(
+                "breach exposure failed for %s", inv_id)
+            data = {"checked": False, "results": [], "compromised_count": 0}
+        return JSONResponse({"investigation_id": inv_id, **data})
+
+    @app.get("/api/investigate/{inv_id}/footprint")
+    async def investigate_footprint(inv_id: int) -> JSONResponse:
+        """Geographic footprint: every location claim resolved to map points."""
+        inv = _get_investigation(inv_id)
+        if inv is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if not inv["summary"]:
+            return JSONResponse({"error": "investigation has not run yet"},
+                                status_code=409)
+        from recon.geo import build_footprint
+        try:
+            data = await build_footprint(inv["summary"])
+        except Exception:
+            logging.getLogger("app").exception(
+                "footprint build failed for %s", inv_id)
+            data = {"points": [], "unresolved": [], "stats": {}}
+        return JSONResponse({"investigation_id": inv_id, **data})
+
     @app.get("/api/investigate/{inv_id}/timeline")
     async def investigate_timeline(inv_id: int) -> JSONResponse:
         inv = _get_investigation(inv_id)
