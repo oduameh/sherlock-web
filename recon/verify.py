@@ -85,6 +85,15 @@ _CHALLENGE = (
     "px-captcha", "captcha-delivery",
 )
 
+# Consent / cookie walls: a real page was served, but it is the platform's
+# GDPR interstitial, not the profile. Google-family sites ("Before you continue
+# to YouTube") do this for every logged-out datacenter request. Same class of
+# outcome as a challenge page — blockage, never absence and never a lead.
+_CONSENT_WALL = (
+    "before you continue to", "consent.google", "consent.youtube",
+    "we use cookies to continue", "accept all cookies to continue",
+)
+
 # HTTP statuses that genuinely prove absence vs. merely block us.
 _ABSENT_STATUS = {404, 410}
 
@@ -242,6 +251,12 @@ def verify_username(username: Optional[str], url: Optional[str],
         if phrase in headline or phrase in top:
             return _verdict("indeterminate", 30,
                             [f'anti-bot challenge page ("{phrase}") — '
+                             f"cannot determine existence"],
+                            control_probe=probe)
+    for phrase in _CONSENT_WALL:
+        if phrase in headline or phrase in top:
+            return _verdict("indeterminate", 30,
+                            [f'consent/cookie wall ("{phrase}") — '
                              f"cannot determine existence"],
                             control_probe=probe)
 

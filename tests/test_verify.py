@@ -195,3 +195,17 @@ def test_challenge_page_does_not_veto_identity_confirmation():
 def test_transport_blocked_status_stays_indeterminate():
     v = verify_username("someone", "https://x/someone", None, {}, status=403)
     assert v["status"] == "indeterminate"
+
+
+def test_consent_wall_is_indeterminate_not_a_lead():
+    """YouTube's GDPR interstitial ("Before you continue to YouTube") is served
+    for every logged-out datacenter request. It is blockage — never absence,
+    and never an "unconfirmed" lead that reads as a real profile."""
+    html = ("<html><head><title>Before you continue to YouTube</title></head>"
+            "<body><h1>Before you continue to YouTube</h1>"
+            "<p>We use cookies and data to deliver and maintain Google "
+            "services...</p></body></html>")
+    v = verify_username("carmenpop", "https://www.youtube.com/@carmenpop", html,
+                        {"title": "Before you continue to YouTube"}, status=200)
+    assert v["status"] == "indeterminate"
+    assert "consent/cookie wall" in v["signals"][0]

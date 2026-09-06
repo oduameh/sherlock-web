@@ -25,7 +25,9 @@ from recon.verify import verify_username
 logger = logging.getLogger("recon.enrich")
 
 MAX_BODY_BYTES = 512 * 1024  # stop reading after 512 KB
-MAX_ENRICH_PER_RUN = 80
+# Verification budget: how many distinct profile URLs get fetched+verified per
+# run. Policy-denied hosts are resolved without a fetch and do not count.
+MAX_ENRICH_PER_RUN = int(os.environ.get("RECON_VERIFY_BUDGET") or "120")
 CONCURRENCY = 5
 TIMEOUT_S = 10
 
@@ -269,6 +271,29 @@ def _verify_priority(row: dict) -> tuple:
             -len(row.get("engines") or []))
 
 
+# Metadata fields a site may stamp identically on every page, profile or not.
+_TEMPLATE_CANDIDATES = ("og_image", "og_title", "og_description",
+                        "jsonld_name", "jsonld_description", "jsonld_image",
+                        "title")
+
+
+def strip_template_fields(data: dict, control: dict) -> dict:
+    """Drop every field whose value is identical on the control page (a fetch
+    of a known-nonexistent handle on the same site): such a value describes
+    the site, never the person. Pure; returns a new dict with the names of
+    the dropped fields under ``template_fields`` (omitted when none)."""
+    out = {k: v for k, v in data.items()}
+    dropped = []
+    for key in _TEMPLATE_CANDIDATES:
+        v = out.get(key)
+        if v and control.get(key) and str(v).strip() == str(control[key]).strip():
+            out.pop(key)
+            dropped.append(key)
+    if dropped:
+        out["template_fields"] = dropped
+    return out
+
+
 async def enrich_profiles(rows: list[dict],
                           on_enriched: Callable[[dict, dict], Any],
                           limit: int = MAX_ENRICH_PER_RUN,
@@ -287,13 +312,21 @@ async def enrich_profiles(rows: list[dict],
     seen_urls: set[str] = set()
     targets: list[dict] = []
     skipped: list[dict] = []
+    budgeted = 0
     for row in sorted(rows, key=_verify_priority):
         url = row.get("url")
         if not url or url in seen_urls:
             continue
         seen_urls.add(url)
-        if len(targets) < limit:
+        # Denied hosts are answered from policy without a fetch — they cost
+        # nothing, so they must not consume the budget that real fetches need.
+        # (Before this, 28 Instagram/Pinterest/Twitter rows in one run ate a
+        # third of the budget and 105 fetchable rows went unexamined.)
+        if policy.denied_reason(url):
             targets.append(row)
+        elif budgeted < limit:
+            targets.append(row)
+            budgeted += 1
         else:
             skipped.append(row)
     # Anything we never fetched must say so explicitly. An unexamined row is not
@@ -444,6 +477,13 @@ async def enrich_profiles(rows: list[dict],
                 row.get("username"), row.get("url"), html, data,
                 status=status, control_html=c_html, control_extracted=c_data,
                 subject_name=subject_name)
+            # Template fields: metadata that is byte-identical on the page of
+            # a handle that does not exist is the site's, not the person's
+            # (a site logo as og:image, "Patreon" as og:title). Stripped only
+            # AFTER verification, which needs the raw title for its own
+            # control comparison; recorded so the UI can say what was dropped.
+            if data and c_data:
+                data = strip_template_fields(data, c_data)
             if data:
                 row["enrichment"] = data
             count += 1

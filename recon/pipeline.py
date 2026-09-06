@@ -27,7 +27,7 @@ from recon.confidence import account_confidence, bucket_counts
 from recon.correlate import correlate
 from recon.email_pivot import (annotate_recovery, gravatar_lookup,
                                 holehe_available, holehe_scan)
-from recon.enrich import enrich_profiles
+from recon.enrich import enrich_profiles, MAX_ENRICH_PER_RUN
 from recon.domain_pivot import domain_from_email, domain_intel
 from recon.names import generate_name_candidates
 from recon.permutations import generate_variants
@@ -622,7 +622,8 @@ async def run_pipeline(
 
     # Enrichment over everything found.
     all_rows = accounts + variant_rows + name_rows
-    emit("phase", {"phase": "enriching", "targets": min(40, len(all_rows))})
+    emit("phase", {"phase": "enriching",
+                   "targets": min(MAX_ENRICH_PER_RUN, len(all_rows))})
 
     def on_enriched(row, data):
         emit("enriched", {

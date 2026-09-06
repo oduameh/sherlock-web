@@ -9862,6 +9862,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
   color: #cdd6cb; font-size: 12px; line-height: 1.45;
   padding: 4px 0 4px 9px; border-left: 2px solid #2a352a; margin-bottom: 3px;
 }
+.cg-insp-line.is-muted { color: var(--text-3); font-style: italic; }
 .cg-insp-link {
   color: #e0a63d; font: 11px/1.4 'JetBrains Mono', ui-monospace, monospace;
   word-break: break-all;
