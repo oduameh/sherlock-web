@@ -18,7 +18,7 @@ import io
 import re
 
 THUMB_PX = 56                    # 2× the 28 px avatar the report's CSS shows
-MAX_PIXELS = 24_000_000          # decode cap: a 24 MP frame is ~96 MiB of RGBA
+MAX_PIXELS = 4_000_000           # decode cap: a 4 MP frame is ~16 MiB of RGBA
 DATA_URI_PREFIX = "data:image/png;base64,"
 _B64 = re.compile(r"[A-Za-z0-9+/]+={0,2}")
 
@@ -33,7 +33,7 @@ def thumbnail_data_uri(body: bytes, px: int = THUMB_PX) -> str | None:
     except ImportError:          # pillow is a hard dependency; be honest if not
         return None
     try:
-        with Image.open(io.BytesIO(body)) as im:
+        with Image.open(io.BytesIO(body), formats=("PNG", "JPEG", "GIF", "WEBP")) as im:
             w, h = im.size
             if w <= 0 or h <= 0 or w * h > MAX_PIXELS:
                 return None

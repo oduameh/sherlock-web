@@ -160,6 +160,21 @@ def test_assert_public_url_blocks_non_http_scheme():
         _run("file:///etc/passwd")
 
 
+def test_assert_public_url_blocks_non_standard_port():
+    with pytest.raises(BlockedRequestError):
+        _run("http://8.8.8.8:8080/")
+
+
+def test_assert_public_url_blocks_embedded_credentials():
+    with pytest.raises(BlockedRequestError):
+        _run("http://admin:pass@8.8.8.8/")
+
+
+def test_assert_public_url_allows_standard_ports():
+    _run("http://8.8.8.8:80/")
+    _run("https://8.8.8.8:443/")
+
+
 def test_assert_public_url_allows_public_ip_literal():
     # No network call — an IP literal is validated without resolving.
     _run("http://8.8.8.8/")

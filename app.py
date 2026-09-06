@@ -1043,48 +1043,54 @@ if RECON_AVAILABLE:
     # /api/recon/report/{run_id} stays so stored kind="recon" history rows
     # still render.
 
-    @app.get("/api/recon/report/{run_id}")
-    async def recon_report(run_id: int) -> Response:
+    def _load_run(run_id: int):
         with db_connect(DB_PATH) as conn:
             row = conn.execute(
                 "SELECT ts, username, results, kind, investigation_id FROM runs WHERE id = ?",
                 (run_id,),
             ).fetchone()
         if row is None:
-            return Response("not found", status_code=404)
+            return None
         ts, username, results_json, kind, inv_id = row
         if kind == "investigation":
-            # The v2 renderer never understood investigation summaries (it
-            # 500'd on them); the dossier is the report for these rows.
-            if inv_id is None:
-                return JSONResponse({"error": "not found"}, status_code=404)
-            return RedirectResponse(url=f"/api/investigate/{inv_id}/report", status_code=307)
+            return ("redirect", inv_id)
         results = _resolve_run_results(results_json, kind, inv_id)
         if kind == "recon":
-            run = {
+            return {
                 "subject": username,
                 "ts": ts,
                 "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "params": results.get("params") or {},
                 "results": results,
             }
-        else:  # plain sherlock run: render a minimal report
-            run = {
-                "subject": username,
-                "ts": ts,
-                "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "params": {"usernames": [username]},
-                "results": {
-                    "accounts": [
-                        {"username": username, "site": r.get("site"),
-                         "url": r.get("url"), "engines": ["sherlock"]}
-                        for r in results
-                    ],
-                    "variants": [], "email": {}, "correlation": [],
-                },
-            }
+        return {
+            "subject": username,
+            "ts": ts,
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "params": {"usernames": [username]},
+            "results": {
+                "accounts": [
+                    {"username": username, "site": r.get("site"),
+                     "url": r.get("url"), "engines": ["sherlock"]}
+                    for r in results
+                ],
+                "variants": [], "email": {}, "correlation": [],
+            },
+        }
+
+    @app.get("/api/recon/report/{run_id}")
+    async def recon_report(run_id: int) -> Response:
+        run = await asyncio.to_thread(_load_run, run_id)
+        if run is None:
+            return Response("not found", status_code=404)
+        if isinstance(run, tuple) and run[0] == "redirect":
+            inv_id = run[1]
+            if inv_id is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            return RedirectResponse(url=f"/api/investigate/{inv_id}/report", status_code=307)
         avatars = await _avatar_thumbnails(_report_avatar_urls(run["results"]))
-        return Response(render_report(run, avatars=avatars), media_type="text/html")
+        html = await asyncio.to_thread(render_report, run, avatars=avatars)
+        return Response(html, media_type="text/html")
 
     # -----------------------------------------------------------------------
     # v3: Investigations — unified pipeline, graph, dossier, monitoring
@@ -1828,7 +1834,15 @@ if RECON_AVAILABLE:
 
     _avatar_cache = _AvatarCache(AVATAR_CACHE_MAX_ENTRIES, AVATAR_CACHE_MAX_BYTES,
                                  AVATAR_CACHE_TTL_S)
-    _avatar_gate = asyncio.Semaphore(AVATAR_MAX_CONCURRENT)
+    _avatar_gates: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+    def _avatar_gate() -> asyncio.Semaphore:
+        loop = asyncio.get_running_loop()
+        sem = _avatar_gates.get(loop)
+        if sem is None:
+            sem = asyncio.Semaphore(AVATAR_MAX_CONCURRENT)
+            _avatar_gates[loop] = sem
+        return sem
 
     def _avatar_client_kwargs() -> dict:
         """Client settings for avatar fetches (shared with the test fixture so
@@ -1926,7 +1940,7 @@ if RECON_AVAILABLE:
         :func:`_avatar_url_refusal`."""
         hit = _avatar_cache.get(url)
         if hit is None:
-            async with _avatar_gate:
+            async with _avatar_gate():
                 hit = _avatar_cache.get(url)     # a concurrent fetch may have filled it
                 if hit is None:
                     status, detail, body = await _fetch_avatar(url)
@@ -1973,7 +1987,11 @@ if RECON_AVAILABLE:
         tasks = [asyncio.create_task(one(u)) for u in todo]
         try:
             async with asyncio.timeout(AVATAR_REPORT_BUDGET_S):
-                await asyncio.gather(*tasks, return_exceptions=True)
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+            _log = logging.getLogger("app")
+            for r in results:
+                if isinstance(r, Exception):
+                    _log.warning("report thumbnail failed: %s", r)
         except TimeoutError:
             for t in tasks:
                 t.cancel()
