@@ -10,7 +10,14 @@ which is exactly why data-removal is a paid service and not a scraper. So this
 is primarily a curated exposure + opt-out map (works from a name alone), with
 **best-effort** automated presence checks on the minority of brokers that have
 predictable, checkable search URLs — and WAF/challenge responses are reported
-honestly as "blocked", never as a false "not found".
+honestly as "blocked", never as a false "not found". The check runs through
+:func:`recon.retrieval.fetch` (G2): a WAF page, rate limit, login redirect or
+transport failure is ``blocked`` by the shared classification; only a real
+page is read for the broker's match string.
+
+Residual (audit §6 "also noted"): a 200 page that carries neither the match
+string nor a wall marker reads as ``not_found`` — marker rot on a broker's
+markup is indistinguishable from "not listed" without a control probe.
 
 For comprehensive *free* removal, California residents can file one request via
 the official DROP portal (https://consumer.drop.privacy.ca.gov), covering 500+
@@ -26,7 +33,8 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 
-from recon import safeweb
+from recon import retrieval, safeweb
+from recon.htmltext import visible_text
 
 logger = logging.getLogger("recon.brokers")
 
@@ -58,8 +66,13 @@ BLOCKED = "blocked"      # WAF / CAPTCHA / rate limit — can't tell (check manu
 MANUAL = "manual"        # not auto-checkable; use the opt-out link directly
 UNKNOWN = "unknown"
 
-_WAF_MARKERS = ("just a moment", "cloudflare", "captcha", "access denied",
-                "enable javascript", "are you human", "attention required")
+# Wall phrases the shared marker list (recon.htmltext) does not carry yet,
+# looked for in the visible text of a page retrieval called ``ok``: a CAPTCHA
+# gate served as a 200 must be BLOCKED, not "not listed". A residual until
+# htmltext grows them; everything else ("just a moment", "access denied",
+# "attention required", "enable javascript and cookies", …) is classified
+# once, in retrieval.
+_EXTRA_WALL_PHRASES = ("captcha", "are you human")
 
 _CACHE: Optional[list[dict]] = None
 
@@ -149,40 +162,36 @@ def reverse_phone_links(e164: Optional[str],
     return out
 
 
-async def _get_capped(client, url: str) -> tuple[int, str]:
-    async with client.stream("GET", url) as resp:
-        chunks: list[bytes] = []
-        size = 0
-        async for chunk in resp.aiter_bytes(16384):
-            chunks.append(chunk)
-            size += len(chunk)
-            if size >= MAX_BODY_BYTES:
-                break
-        body = b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
-        return resp.status_code, body
-
-
-async def _check(client, url: str, match: str) -> str:
-    try:
-        code, body = await _get_capped(client, url)
-        low = body.lower()
-        if code in (403, 429, 503):
-            return BLOCKED
-        if any(m in low for m in _WAF_MARKERS):
-            return BLOCKED
-        if code == 404:
-            return NOT_FOUND
-        if code >= 400:
-            return BLOCKED
-        if match and match in body:
-            return LISTED
+def classify_page(res: retrieval.FetchResult, match: str) -> str:
+    """One broker presence verdict from a :class:`recon.retrieval.FetchResult`
+    (pure): ``absent`` → NOT_FOUND; anything not ``ok`` (a WAF page, rate
+    limit, login redirect, transport failure, policy refusal) → BLOCKED; a
+    real page → LISTED when the broker's match string is present, else
+    NOT_FOUND (the residual above)."""
+    if res.outcome == retrieval.ABSENT:
         return NOT_FOUND
-    except Exception:
+    if res.outcome != retrieval.OK:
         return BLOCKED
+    body = res.html or ""
+    top = visible_text(body, limit=2000).lower()
+    if any(p in top for p in _EXTRA_WALL_PHRASES):
+        return BLOCKED
+    if match and match in body:
+        return LISTED
+    return NOT_FOUND
+
+
+async def _check(client, url: str, match: str, *,
+                 stats: Optional[retrieval.RetrievalStats] = None) -> str:
+    res = await retrieval.fetch(url, client=client, kind="text", stats=stats,
+                                max_bytes=MAX_BODY_BYTES)
+    return classify_page(res, match)
 
 
 async def broker_exposure(name: str, location: Optional[str] = None, *,
-                          do_checks: bool = True) -> dict:
+                          do_checks: bool = True,
+                          retrieval_stats: Optional[retrieval.RetrievalStats] = None
+                          ) -> dict:
     """Map a person's data-broker exposure. Never raises.
 
     Every broker contributes an opt-out link (the remediation value); the
@@ -209,7 +218,8 @@ async def broker_exposure(name: str, location: Optional[str] = None, *,
     if checkable:
         async with safeweb.async_client(timeout=TIMEOUT_S) as client:
             for entry, b, search in checkable[:MAX_CHECKS]:
-                entry["status"] = await _check(client, search, b.get("match") or "")
+                entry["status"] = await _check(client, search, b.get("match") or "",
+                                               stats=retrieval_stats)
 
     def _count(status):
         return sum(1 for e in results if e["status"] == status)

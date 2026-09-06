@@ -52,8 +52,8 @@ from recon.htmltext import challenge_marker, consent_wall_marker, looks_like_she
 __all__ = [
     "ABSENT", "BLOCKED", "OK", "OUTCOMES", "POLICY", "SSRF", "TRANSPORT",
     "Classification", "FetchResult", "HostState", "RetrievalStats",
-    "classify", "fetch", "host_key", "is_login_url", "is_rate_limit",
-    "parse_retry_after",
+    "classify", "escalate_shell", "fetch", "host_key", "is_login_url",
+    "is_rate_limit", "parse_retry_after",
 ]
 
 logger = logging.getLogger("recon.retrieval")
@@ -621,6 +621,47 @@ async def fetch(url: str, *, client: httpx.AsyncClient, kind: str = "html",
     if st:
         st.record(result.outcome, result.status, host)
     return result
+
+
+async def escalate_shell(result: FetchResult, url: str, *, ladder: Ladder,
+                         kind: str = "html",
+                         host_state: Optional[HostState] = None,
+                         stats: Optional[RetrievalStats] = None) -> FetchResult:
+    """The caller's decision to render an ``ok`` JS shell (G2 helper).
+
+    :func:`fetch` runs the ladder only for a block; a 2xx with almost no
+    visible text (:attr:`FetchResult.is_shell`) is ``ok`` there because
+    whether to spend a browser fetch on it is the caller's call — enrichment
+    and the content detectors both make it (a single-page profile renders an
+    empty shell to a plain client, and a detector would call the live account
+    ABSENT). Runs ``ladder`` once, adopts a non-None status re-classified
+    exactly as :func:`fetch` does (a rate limit from a tier backs the host
+    off), and counts the run and any rescue in ``stats``. Anything that is
+    not an ``ok`` shell — including a shell the ladder itself rendered
+    (``via`` is not ``httpx``), which must not cost a second browser fetch —
+    is returned untouched. Never raises.
+    """
+    if (not (result.outcome == OK and result.is_shell) or ladder is None
+            or result.via != "httpx"):
+        return result
+    host = host_key(url)
+    if stats:
+        stats.ladder_runs += 1
+    try:
+        l_status, l_html, l_via = await ladder(url)
+    except Exception as exc:
+        logger.debug("ladder failed for %s: %s", url, exc)
+        return result
+    if l_status is None:
+        return result
+    out = _classify_ladder(url, kind, l_status, l_html, l_via or "ladder")
+    if stats and out.outcome in (OK, ABSENT) and not out.is_shell:
+        stats.ladder_rescued += 1
+    if out.rate_limited and host_state is not None:
+        host_state.backoff(host, DEFAULT_BACKOFF_S, status=l_status)
+    if host_state is not None:
+        host_state.record(host, out.outcome, out.status)
+    return out
 
 
 def _classify_ladder(url: str, kind: str, status: int, html: Optional[str],

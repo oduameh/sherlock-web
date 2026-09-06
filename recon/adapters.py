@@ -17,6 +17,16 @@ unauthenticated** surface, which buys three things the generic path cannot:
    never had this, and in a time-critical case "last active yesterday" vs
    "dormant since 2019" is often the single most decisive fact.
 
+Retrieval (G2): the call goes through :func:`recon.retrieval.fetch` with
+``kind="json"`` — ``absent`` ⇒ ABSENT, ``ok`` + JSON ⇒ ``exists_when``, and
+``blocked``/``transport``/``policy``/``ssrf`` ⇒ BLOCKED with retrieval's
+reason (a GitHub 403 with ``X-RateLimit-Remaining: 0`` now reads "rate
+limited", audit defect 10). Answers are cached per ``(source, handle)`` for
+six hours — EXISTS and ABSENT only, never BLOCKED (:mod:`recon.cache`'s rule)
+— and the cache is shared by discovery, enrichment's re-check and the
+timeline, so GitHub's 60/h budget is spent once per handle per run. Every
+call is recorded against the source registry (:func:`recon.sources.record`).
+
 Rules for adding an adapter (all of these are enforced by review, not code):
   * Public and unauthenticated only. No tokens, cookies, or logged-in sessions.
   * No evasion: no browser-impersonating User-Agent, no CAPTCHA/challenge
@@ -31,20 +41,48 @@ Rules for adding an adapter (all of these are enforced by review, not code):
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Callable, Optional
 
-from recon import safeweb
+from recon import retrieval, safeweb, sources
+from recon.cache import TTLCache
 from recon.engines import normalize_site
+from recon.retrieval import FetchResult
 
 logger = logging.getLogger("recon.adapters")
 
 TIMEOUT_S = 12
-# An honest, identifiable agent. Never a browser impersonation.
-USER_AGENT = "sherlock-web/1.0 (OSINT account verification; +https://github.com/oduameh/sherlock-web)"
+MAX_BODY_BYTES = 256 * 1024
+CACHE_TTL_S = 6 * 3600
 
 EXISTS = "exists"
 ABSENT = "absent"
 BLOCKED = "blocked"
+
+# Process-wide answer cache: (source name, handle) → the EXISTS/ABSENT result
+# dict. A BLOCKED answer is never stored — there is no API for it.
+_CACHE = TTLCache(maxsize=2048, ttl_s=CACHE_TTL_S)
+
+
+def cache_key(source: str, username: str) -> tuple[str, str]:
+    """The shared key: the registry source name (``"github"``) and the handle
+    lower-cased, so the timeline and the adapters look up the same entry."""
+    return (source, (username or "").strip().lower())
+
+
+def cached_result(source: str, username: str) -> Optional[dict]:
+    """The cached EXISTS/ABSENT result for ``(source, handle)``, or None."""
+    hit, value = _CACHE.get(cache_key(source, username))
+    return dict(value) if hit and isinstance(value, dict) else None
+
+
+def clear_cache() -> None:
+    """Forget every cached adapter answer (tests)."""
+    _CACHE.clear()
+
+
+def cache_stats() -> dict:
+    return _CACHE.stats()
 
 
 def _dig(obj: Any, path: str) -> Any:
@@ -70,7 +108,9 @@ class Adapter:
 
     ``url`` is a template taking ``{username}``. ``exists_when`` receives the
     decoded JSON and returns True when the account provably exists. ``identity``
-    and ``temporal`` map output keys to dotted JSON paths.
+    and ``temporal`` map output keys to dotted JSON paths. ``source`` is the
+    registry name in :mod:`recon.sources` the check is recorded and cached
+    under.
     """
 
     def __init__(self, name: str, sites: tuple, url: str,
@@ -80,7 +120,8 @@ class Adapter:
                  absent_status: tuple = (404,),
                  headers: Optional[dict] = None,
                  profile: str = "",
-                 note: str = ""):
+                 note: str = "",
+                 source: Optional[str] = None):
         self.name = name
         self.sites = {normalize_site(s) for s in sites}
         self.url = url
@@ -92,6 +133,7 @@ class Adapter:
         # Human profile URL template (for discovery). Falls back to the API URL.
         self.profile = profile
         self.note = note
+        self.source = source or normalize_site(name)
 
     def profile_url(self, username: str) -> str:
         try:
@@ -102,35 +144,27 @@ class Adapter:
     def handles(self, site: str) -> bool:
         return normalize_site(site or "") in self.sites
 
-    async def check(self, username: str) -> dict:
-        """Run the check. Never raises; returns a result dict."""
-        url = self.url.format(username=username)
-        out: dict[str, Any] = {"adapter": self.name, "source_url": url}
-        headers = {"User-Agent": USER_AGENT, **self.headers}
-        try:
-            async with safeweb.async_client(timeout=TIMEOUT_S) as client:
-                resp = await client.get(url, headers=headers)
-        except Exception as exc:
-            out.update(status=BLOCKED,
-                       signal=f"request failed ({type(exc).__name__})")
-            return out
+    def outcome(self, res: FetchResult) -> dict:
+        """Map one :class:`recon.retrieval.FetchResult` to the result fields
+        (``status``, ``signal``, and ``identity``/``temporal`` on EXISTS). Pure.
 
-        out["http_status"] = resp.status_code
-        if resp.status_code in self.absent_status:
+        Order: a status in ``absent_status`` (Bluesky answers 400 for an
+        unknown actor) or an ``absent`` outcome ⇒ ABSENT; any outcome other
+        than ``ok`` ⇒ BLOCKED with retrieval's reason ("rate limited (HTTP
+        403, X-RateLimit-Remaining: 0)", "non-JSON response (HTTP 200)", "no
+        response (ConnectTimeout)"); ``ok`` ⇒ ``exists_when`` on the JSON.
+        """
+        out: dict[str, Any] = {"http_status": res.status}
+        if (res.status is not None and res.status in self.absent_status) \
+                or res.outcome == retrieval.ABSENT:
             out.update(status=ABSENT,
-                       signal=f"{self.name} API returned HTTP {resp.status_code}")
+                       signal=f"{self.name} API returned HTTP {res.status}")
             return out
-        if resp.status_code >= 400:
+        if res.outcome != retrieval.OK:
             out.update(status=BLOCKED,
-                       signal=f"blocked: HTTP {resp.status_code} — cannot determine")
+                       signal=f"blocked: {res.reason} — cannot determine")
             return out
-        try:
-            data = resp.json()
-        except Exception:
-            out.update(status=BLOCKED,
-                       signal="response was not JSON — cannot determine")
-            return out
-
+        data = res.data
         try:
             exists = bool(self.exists_when(data))
         except Exception:
@@ -139,13 +173,52 @@ class Adapter:
             out.update(status=ABSENT,
                        signal=f"{self.name} API returned no matching account")
             return out
-
         out["status"] = EXISTS
         out["signal"] = f"{self.name} public API confirms this account exists"
         ident = {k: _dig(data, p) for k, p in self.identity.items()}
         temp = {k: _dig(data, p) for k, p in self.temporal.items()}
         out["identity"] = {k: v for k, v in ident.items() if v not in (None, "")}
         out["temporal"] = {k: v for k, v in temp.items() if v not in (None, "")}
+        return out
+
+    async def check(self, username: str, *,
+                    host_state: Optional[retrieval.HostState] = None,
+                    retrieval_stats: Optional[retrieval.RetrievalStats] = None,
+                    use_cache: bool = True) -> dict:
+        """Run the check. Never raises; returns a result dict.
+
+        Served from the answer cache when this ``(source, handle)`` was
+        answered EXISTS/ABSENT within ``CACHE_TTL_S`` (the copy carries
+        ``cached: True``); a BLOCKED answer is never cached, so the next
+        caller asks again. ``host_state`` / ``retrieval_stats`` are the run's
+        shared retrieval state.
+        """
+        url = self.url.format(username=username)
+        out: dict[str, Any] = {"adapter": self.name, "source_url": url}
+        key = cache_key(self.source, username)
+        if use_cache:
+            hit, cached = _CACHE.get(key)
+            if hit and isinstance(cached, dict):
+                served = dict(cached)
+                served["cached"] = True
+                return served
+        headers = {"User-Agent": sources.USER_AGENT, **self.headers}
+        t0 = time.monotonic()
+        try:
+            async with safeweb.async_client(timeout=TIMEOUT_S) as client:
+                res = await retrieval.fetch(
+                    url, client=client, kind="json", host_state=host_state,
+                    stats=retrieval_stats, headers=headers,
+                    max_bytes=MAX_BODY_BYTES)
+        except Exception as exc:   # the client itself could not be opened
+            res = FetchResult(retrieval.TRANSPORT, f"no response ({type(exc).__name__})",
+                              None, None, type(exc).__name__, final_url=url)
+        latency_ms = (time.monotonic() - t0) * 1000
+        out.update(self.outcome(res))
+        ok = out["status"] != BLOCKED
+        sources.record(self.source, ok, latency_ms, None if ok else res.reason)
+        if ok and use_cache:
+            _CACHE.set(key, dict(out))
         return out
 
 
@@ -167,6 +240,7 @@ ADAPTERS: list[Adapter] = [
         temporal={"created_at": "created_at", "last_profile_update": "updated_at"},
         headers={"Accept": "application/vnd.github+json"},
         profile="https://github.com/{username}",
+        source="github",
         note="Unauthenticated limit is 60 requests/hour per source IP — enrichment only, never a scan-wide sweep.",
     ),
     Adapter(
@@ -180,6 +254,7 @@ ADAPTERS: list[Adapter] = [
         temporal={"created_at": "createdAt", "indexed_at": "indexedAt"},
         absent_status=(400, 404),
         profile="https://bsky.app/profile/{username}",
+        source="bluesky",
         note="Bluesky returns 400 InvalidRequest for an unresolvable actor.",
     ),
     Adapter(
@@ -192,6 +267,7 @@ ADAPTERS: list[Adapter] = [
                   "github": "github_username", "website": "website_url"},
         temporal={"created_at": "joined_at"},
         profile="https://dev.to/{username}",
+        source="devto",
         note="Documented public Forem API.",
     ),
     Adapter(
@@ -203,6 +279,7 @@ ADAPTERS: list[Adapter] = [
                   "location": "location", "company": "company"},
         temporal={"created_at": "date_joined"},
         profile="https://hub.docker.com/u/{username}",
+        source="dockerhub",
     ),
     Adapter(
         "Keybase", ("Keybase",),
@@ -217,6 +294,7 @@ ADAPTERS: list[Adapter] = [
                   "location": "them.0.profile.location"},
         temporal={"created_at": "them.0.basics.ctime"},
         profile="https://keybase.io/{username}",
+        source="keybase",
         note="Proof chain (them.0.proofs_summary) carries self-declared, "
              "cryptographically-signed cross-platform links.",
     ),
@@ -229,6 +307,7 @@ ADAPTERS: list[Adapter] = [
                   "bio": "bio", "location": "location"},
         temporal={"created_at": "created_on"},
         profile="https://vimeo.com/{username}",
+        source="vimeo",
         note="Use the API, not the HTML page: vimeo.com/staff returns 410 while "
              "the API proves the account is live.",
     ),
@@ -242,6 +321,7 @@ ADAPTERS: list[Adapter] = [
                   "followers": "followers_count", "posts": "statuses_count"},
         temporal={"created_at": "created_at", "last_active": "last_status_at"},
         profile="https://mastodon.social/@{username}",
+        source="mastodon_social",
         note="Public account lookup on the flagship instance; robots.txt permits "
              "/api/v1/accounts/lookup (only /media_proxy/ and /interact/ are "
              "disallowed). Verified real vs fake 2026-08-24. Other instances "
@@ -266,15 +346,22 @@ def covered_sites() -> list[str]:
     return sorted({s for a in ADAPTERS for s in a.sites})
 
 
-async def check_account(site: str, username: str) -> Optional[dict]:
+async def check_account(site: str, username: str, *,
+                        host_state: Optional[retrieval.HostState] = None,
+                        retrieval_stats: Optional[retrieval.RetrievalStats] = None
+                        ) -> Optional[dict]:
     """Run the adapter for ``site`` if one exists. None when unsupported."""
     a = adapter_for(site)
     if a is None or not username:
         return None
-    return await a.check(username)
+    return await a.check(username, host_state=host_state,
+                         retrieval_stats=retrieval_stats)
 
 
-async def discover(username: str, stats: Optional[dict] = None) -> list[dict]:
+async def discover(username: str, stats: Optional[dict] = None, *,
+                   host_state: Optional[retrieval.HostState] = None,
+                   retrieval_stats: Optional[retrieval.RetrievalStats] = None
+                   ) -> list[dict]:
     """DISCOVERY: query every adapter's public API for ``username`` directly,
     independent of the third-party engines. Each hit is a definitive API answer
     — far higher signal than a page guess — carrying identity + dates. Returns a
@@ -288,7 +375,8 @@ async def discover(username: str, stats: Optional[dict] = None) -> list[dict]:
     tab (audit ops-observability gap 8). The return shape is unchanged.
 
     This is bounded to a real handle (never fan it across name candidates): it
-    is at most ``len(ADAPTERS)`` public-API calls, one per platform.
+    is at most ``len(ADAPTERS)`` public-API calls, one per platform — fewer
+    when the answer cache already holds them.
     """
     import asyncio
 
@@ -297,7 +385,8 @@ async def discover(username: str, stats: Optional[dict] = None) -> list[dict]:
 
     async def _one(a: Adapter) -> Optional[dict]:
         try:
-            res = await a.check(username)
+            res = await a.check(username, host_state=host_state,
+                                retrieval_stats=retrieval_stats)
         except Exception as exc:
             if stats is not None:
                 stats[a.name] = {

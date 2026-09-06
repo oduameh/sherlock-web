@@ -28,7 +28,7 @@ from datetime import datetime
 from typing import Callable, Optional
 from urllib.parse import quote, urlparse
 
-from recon import retrieval, sources
+from recon import adapters, retrieval, sources
 from recon.cache import TTLCache
 from recon.engines import normalize_site
 from recon.rows import created_at as row_created_at
@@ -202,6 +202,15 @@ async def account_creation_dates(
         if hit:
             if cached:
                 dates[url] = cached
+            continue
+        # The adapter cache (recon.adapters) may already hold this login from
+        # the run's discovery or enrichment — one GitHub source, one budget:
+        # an EXISTS answer carries created_at, an ABSENT one is definitive.
+        shared = adapters.cached_result("github", login)
+        if shared is not None:
+            created = (shared.get("temporal") or {}).get("created_at")
+            if created:
+                dates[url] = str(created)
             continue
         targets.append((url, login))
 

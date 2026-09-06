@@ -8,6 +8,16 @@ its ``e_string`` appears in the body; a known "missing" code/string marks it
 A site on a robots-denied host is never requested and yields *policy* — not a
 vote, not an error (see :data:`POLICY`).
 
+Two honesty rules sit on top of the scheme (G2, audit defect 3):
+
+* a **429/503** is a block whatever the site's own codes say — never a vote
+  (some entries declare a 503 as their "missing" code) and never answered
+  with a stealth retry (V7);
+* a **2xx that is a challenge page, consent wall or login redirect** without
+  the found-string is *unknown*, not *available*: the "found-code without
+  found-string is a soft-404" rule assumed the page was the site's, and a
+  Cloudflare interstitial made walled sites read as "no account".
+
 The value of a third engine is less raw coverage (Maigret already spans ~3200
 sites) than an **independent vote** — a site confirmed by three engines is a
 much stronger signal than one — plus a **category** per site (social / coding /
@@ -15,7 +25,8 @@ gaming …) that enriches found accounts.
 
 Data: ``recon/data/wmn-data.json``, vendored from the WhatsMyName project
 (https://github.com/WebBreacher/WhatsMyName), (C) Micah Hoffman & contributors,
-licensed CC BY-SA 4.0. All fetches go through the SSRF-guarded ``recon.safeweb``.
+licensed CC BY-SA 4.0. All fetches go through :func:`recon.retrieval.fetch`
+on the SSRF-guarded ``recon.safeweb`` client.
 """
 
 from __future__ import annotations
@@ -29,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from recon import policy, safeweb, stealthweb
+from recon import policy, retrieval, safeweb, stealthweb
 from recon.engines import HIGH_VALUE_SITES, normalize_site
 
 logger = logging.getLogger("recon.whatsmyname")
@@ -145,23 +156,36 @@ def classify_response(site: dict, status_code: int, body: str) -> str:
     return UNKNOWN
 
 
-async def _get_capped(client, url: str) -> tuple[Optional[int], str]:
-    """GET streaming at most MAX_BODY_BYTES. Returns (status_code, body_text)."""
-    async with client.stream("GET", url) as resp:
-        chunks: list[bytes] = []
-        size = 0
-        async for chunk in resp.aiter_bytes(16384):
-            chunks.append(chunk)
-            size += len(chunk)
-            if size >= MAX_BODY_BYTES:
-                break
-        body = b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
-        return resp.status_code, body
+def classify_fetch(site: dict, res: retrieval.FetchResult) -> tuple[str, str]:
+    """``(status, context)`` for one :class:`recon.retrieval.FetchResult` —
+    the WhatsMyName scheme plus the two honesty overrides (pure).
+
+    * no response (``transport``/``ssrf``) → UNKNOWN with retrieval's reason;
+    * a rate limit (429/503) → UNKNOWN "rate limited (HTTP …)" even when the
+      site's own ``e_code``/``m_code`` would have made it a vote;
+    * a 2xx that retrieval calls ``blocked`` (challenge page, consent wall,
+      login redirect) without the found-string → UNKNOWN with the reason, not
+      AVAILABLE; a found-string that *is* present still wins (a real marker
+      beats a stray phrase);
+    * otherwise :func:`classify_response`, with ``"HTTP <status>"`` as the
+      context of an UNKNOWN.
+    """
+    if res.status is None:
+        return UNKNOWN, res.reason
+    if res.rate_limited:
+        return UNKNOWN, res.reason
+    status = classify_response(site, res.status, res.html or "")
+    if (status == AVAILABLE and res.outcome == retrieval.BLOCKED
+            and res.status < 300):
+        return UNKNOWN, res.reason
+    return status, (f"HTTP {res.status}" if status == UNKNOWN else "")
 
 
 async def _check_site(client, site: dict, username: str,
                       stealth_retry: bool = False,
-                      budget: Optional[dict] = None) -> WmnResult:
+                      budget: Optional[dict] = None, *,
+                      stats: Optional[retrieval.RetrievalStats] = None,
+                      counters: Optional[dict] = None) -> WmnResult:
     template = site.get("uri_check") or ""
     url = template.replace("{account}", username)
     name = site.get("name", "?")
@@ -179,39 +203,44 @@ async def _check_site(client, site: dict, username: str,
     # 2026-09-06 it was never set, so 0 of 649 WhatsMyName site_health rows
     # had a latency (audit ops-observability §5 / §10 gap 7).
     t0 = time.monotonic()
-    try:
-        status_code, body = await _get_capped(client, url)
-        elapsed = time.monotonic() - t0
-        status = classify_response(site, status_code, body)
-        # A blocked/ambiguous response on a HIGH-VALUE site is often a WAF/JS
-        # interstitial. Spend one budgeted tier-2 stealth fetch (TLS-impersonated,
-        # still SSRF-guarded, never tier-3) to try to recover the vote. Gated so
-        # it never fans out across the ~700-site dataset.
-        if (status == UNKNOWN and stealth_retry and budget is not None
-                and budget.get("left", 0) > 0
-                and normalize_site(name) in _HV_NORM
-                and stealthweb.enabled()):
-            budget["left"] -= 1
-            try:
-                st2, body2 = await stealthweb.fetch_tls(url)
-            except Exception:
-                st2, body2 = None, None
-            if st2 is not None and body2:
-                status2 = classify_response(site, st2, body2)
-                if status2 != UNKNOWN:
-                    return WmnResult(status2, name, url, cat, "stealth-recovered",
-                                     query_time=elapsed)
-        context = "" if status != UNKNOWN else f"HTTP {status_code}"
-        return WmnResult(status, name, url, cat, context, query_time=elapsed)
-    except Exception as exc:
-        return WmnResult(UNKNOWN, name, url, cat, f"{type(exc).__name__}: {exc}",
-                         query_time=time.monotonic() - t0)
+    # ``text``: WhatsMyName markers live in JSON and XML bodies as often as in
+    # HTML, so every text-like body is decoded. fetch never raises.
+    res = await retrieval.fetch(url, client=client, kind="text", stats=stats,
+                                max_bytes=MAX_BODY_BYTES)
+    elapsed = time.monotonic() - t0
+    status, context = classify_fetch(site, res)
+    # A blocked/ambiguous response on a HIGH-VALUE site is often a WAF/JS
+    # interstitial. Spend one budgeted tier-2 stealth fetch (TLS-impersonated,
+    # still SSRF-guarded, never tier-3) to try to recover the vote. Gated so
+    # it never fans out across the ~700-site dataset — and never for a rate
+    # limit, which is answered by backing off (V7).
+    if (status == UNKNOWN and not res.rate_limited and stealth_retry
+            and budget is not None and budget.get("left", 0) > 0
+            and normalize_site(name) in _HV_NORM
+            and stealthweb.enabled()):
+        budget["left"] -= 1
+        if counters is not None:
+            counters["stealth_retries"] = counters.get("stealth_retries", 0) + 1
+        try:
+            st2, body2 = await stealthweb.fetch_tls(url)
+        except Exception:
+            st2, body2 = None, None
+        if st2 is not None and body2:
+            status2 = classify_response(site, st2, body2)
+            if status2 != UNKNOWN:
+                if counters is not None:
+                    counters["stealth_recovered"] = counters.get("stealth_recovered", 0) + 1
+                return WmnResult(status2, name, url, cat, "stealth-recovered",
+                                 query_time=elapsed)
+    return WmnResult(status, name, url, cat, context, query_time=elapsed)
 
 
 async def whatsmyname_scan(username: str, sites: list[dict], timeout: int,
                            on_result: Callable[[WmnResult], None],
                            proxy: Optional[str] = None,
-                           stealth_retry: bool = False) -> None:
+                           stealth_retry: bool = False, *,
+                           stats: Optional[retrieval.RetrievalStats] = None,
+                           counters: Optional[dict] = None) -> None:
     """Scan ``username`` across ``sites``, calling ``on_result`` per site.
 
     Bounded concurrency, all through the SSRF-guarded client. Never raises;
@@ -219,6 +248,10 @@ async def whatsmyname_scan(username: str, sites: list[dict], timeout: int,
     requested and yields a POLICY result (callers must not count it as an
     error). With ``stealth_retry`` and the ladder enabled, an UNKNOWN on a
     high-value site gets one budgeted tier-2 stealth retry.
+
+    ``stats`` (the run's :class:`recon.retrieval.RetrievalStats`) counts every
+    fetch; ``counters``, when given, receives ``stealth_retries`` /
+    ``stealth_recovered`` for the run diagnostics.
     """
     if not sites:
         return
@@ -233,7 +266,8 @@ async def whatsmyname_scan(username: str, sites: list[dict], timeout: int,
             async with sem:
                 result = await _check_site(client, site, username,
                                            stealth_retry=stealth_retry,
-                                           budget=budget)
+                                           budget=budget, stats=stats,
+                                           counters=counters)
             try:
                 on_result(result)
             except Exception:

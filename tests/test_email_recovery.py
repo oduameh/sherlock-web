@@ -133,3 +133,97 @@ def test_graph_links_corroborating_recovery_to_phone():
     # The non-corroborating registration must NOT link to the phone.
     assert not [e for e in g["edges"]
                 if e["source"] == "reg:Imgur" and e["target"] == "phone"]
+
+
+# --- G2: Gravatar "could not check" is not "no profile" -----------------------------
+
+def _grav(monkeypatch, handler, calls=None):
+    from conftest import mock_client
+    monkeypatch.setattr(email_pivot.safeweb, "async_client", mock_client(handler, calls))
+
+
+def test_gravatar_profile_distinguishes_no_profile_from_could_not_check(monkeypatch, public_dns):
+    import httpx
+    from recon import sources
+    sources.reset()
+
+    def handler(req):
+        return httpx.Response(200, json={"entry": [{
+            "displayName": "Alice", "name": {"formatted": "Alice Example"},
+            "profileUrl": "https://gravatar.com/alice", "thumbnailUrl": "https://0.gravatar.com/a",
+            "aboutMe": "hi", "currentLocation": "Berlin",
+            "accounts": [{"name": "Mastodon", "domain": "m.example", "url": "https://m.example/@a",
+                          "username": "a"}]}]})
+    _grav(monkeypatch, handler)
+    res = asyncio.run(email_pivot.gravatar_profile("Alice@Example.com"))
+    assert res.error is None
+    assert res.profile["display_name"] == "Alice" and res.profile["full_name"] == "Alice Example"
+    assert res.profile["accounts"][0]["domain"] == "m.example"
+    assert asyncio.run(email_pivot.gravatar_lookup("Alice@Example.com"))["hash"] == res.profile["hash"]
+
+    _grav(monkeypatch, lambda req: httpx.Response(404))
+    assert asyncio.run(email_pivot.gravatar_profile("a@b.com")) == (None, None)
+    _grav(monkeypatch, lambda req: httpx.Response(200, json={"entry": []}))
+    assert asyncio.run(email_pivot.gravatar_profile("a@b.com")) == (None, None)
+
+    _grav(monkeypatch, lambda req: httpx.Response(429, headers={"Retry-After": "30"}))
+    res = asyncio.run(email_pivot.gravatar_profile("a@b.com"))
+    assert res.profile is None
+    assert res.error == "could not check: rate limited (HTTP 429, Retry-After 30)"
+    assert asyncio.run(email_pivot.gravatar_lookup("a@b.com")) is None   # compat view
+
+    def boom(req):
+        raise httpx.ConnectTimeout("slow")
+    _grav(monkeypatch, boom)
+    res = asyncio.run(email_pivot.gravatar_profile("a@b.com"))
+    assert res.error == "could not check: no response (ConnectTimeout)"
+
+    h = sources.health("gravatar_json")
+    assert h["observations"] == 7 and h["failures"] == 3
+    sources.reset()
+
+
+def test_gravatar_url_is_the_md5_of_the_normalised_address(monkeypatch, public_dns):
+    import hashlib
+    import httpx
+    seen = []
+
+    def handler(req):
+        seen.append(str(req.url))
+        return httpx.Response(404)
+    _grav(monkeypatch, handler)
+    asyncio.run(email_pivot.gravatar_profile("  Alice@Example.com "))
+    digest = hashlib.md5(b"alice@example.com").hexdigest()
+    assert seen == [f"https://www.gravatar.com/{digest}.json"]
+
+
+# --- G2: holehe honesty (defect 6) ----------------------------------------------------
+
+def test_holehe_entry_checked_and_tally():
+    from recon.email_pivot import holehe_entry_checked, holehe_tally
+    assert holehe_entry_checked({"exists": True}) is True
+    assert holehe_entry_checked({"exists": False}) is True
+    assert holehe_entry_checked({"exists": False, "rate_limit": True}) is False
+    assert holehe_entry_checked({"exists": None, "error": "TimeoutError"}) is False
+    assert holehe_entry_checked("junk") is False
+
+    limited = [{"site": f"s{i}", "exists": False, "rate_limit": True} for i in range(100)]
+    t = holehe_tally(limited)
+    assert t == {"total": 100, "checked_ok": 0, "hits": 0, "rate_limited": 100,
+                 "errors": 0, "undetermined": True}
+    mixed = ([{"site": "a", "exists": True}, {"site": "b", "exists": False},
+              {"site": "c", "exists": False, "rate_limit": True},
+              {"site": "d", "exists": None, "error": "TimeoutError"}])
+    t = holehe_tally(mixed)
+    assert (t["total"], t["checked_ok"], t["hits"], t["rate_limited"], t["errors"]) == (4, 2, 1, 1, 1)
+    assert t["undetermined"] is False            # a hit was found
+    half = [{"exists": False}] * 5 + [{"exists": False, "rate_limit": True}] * 5
+    assert holehe_tally(half)["undetermined"] is False   # half answered: "none found" stands
+    assert holehe_tally([])["undetermined"] is False
+    assert holehe_tally(None)["total"] == 0
+
+
+def test_monitor_reexports_the_same_predicate():
+    from recon import monitor
+    from recon.email_pivot import holehe_entry_checked
+    assert monitor.holehe_entry_checked is holehe_entry_checked

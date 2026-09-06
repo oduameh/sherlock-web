@@ -1,7 +1,15 @@
+"""WhatsMyName engine tests. No network: the classification is pure and every
+fetch is an ``httpx.MockTransport`` behind the real SSRF-guarded client (G2
+routed the scanner through ``recon.retrieval.fetch``)."""
+
 import asyncio
 
-from recon import whatsmyname as wmn
+import httpx
+import pytest
+from conftest import mock_client
 
+from recon import retrieval, safeweb
+from recon import whatsmyname as wmn
 
 _SITE = {
     "name": "Example",
@@ -12,33 +20,38 @@ _SITE = {
     "m_string": "not found",
     "cat": "social",
 }
+CHALLENGE = ("<html><head><title>Just a moment...</title></head><body>"
+             "<p>Checking your browser before accessing example.com.</p></body></html>")
 
 
-class _FakeResp:
-    def __init__(self, status, body):
-        self.status_code = status
-        self.encoding = "utf-8"
-        self._body = body.encode()
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *a):
-        return False
-
-    async def aiter_bytes(self, _n):
-        yield self._body
+@pytest.fixture(autouse=True)
+def _dns(public_dns):
+    """Every fetch here is offline: the guard resolves to a public address."""
 
 
-class _FakeClient:
-    """Returns a fixed response; records how many times it fetched."""
-    def __init__(self, status, body):
-        self._status, self._body, self.calls = status, body, 0
+def _client(handler, calls=None):
+    """A guarded client over a MockTransport, for direct ``_check_site`` calls."""
+    return mock_client(handler, calls)()
 
-    def stream(self, _method, _url):
-        self.calls += 1
-        return _FakeResp(self._status, self._body)
 
+def _fixed(status, body, headers=None):
+    def handler(req):
+        return httpx.Response(status, headers=headers or {"content-type": "text/html"},
+                              text=body)
+    return handler
+
+
+def _check(handler, site=_SITE, username="alice", **kw):
+    calls = []
+    client = _client(handler, calls)
+
+    async def go():
+        async with client:
+            return await wmn._check_site(client, site, username, **kw)
+    return asyncio.run(go()), calls
+
+
+# --- classification (pure) --------------------------------------------------------
 
 def test_classify_claimed():
     assert wmn.classify_response(_SITE, 200, "<div class=profile-header>") == wmn.CLAIMED
@@ -64,6 +77,33 @@ def test_classify_unknown():
 def test_classify_no_estring_uses_code_alone():
     site = dict(_SITE, e_string="")
     assert wmn.classify_response(site, 200, "anything") == wmn.CLAIMED
+
+
+def test_classify_fetch_honesty_overrides():
+    """Defect 3: a rate limit is never a vote; a walled 2xx without the
+    found-string is unknown, not available; a present found-string still wins."""
+    ok = retrieval.FetchResult(retrieval.OK, "HTTP 200", 200, "<div class=profile-header>")
+    assert wmn.classify_fetch(_SITE, ok) == (wmn.CLAIMED, "")
+    absent = retrieval.FetchResult(retrieval.ABSENT, "HTTP 404", 404, "x")
+    assert wmn.classify_fetch(_SITE, absent) == (wmn.AVAILABLE, "")
+    limited = retrieval.FetchResult(retrieval.BLOCKED, "rate limited (HTTP 503)", 503,
+                                    "x", rate_limited=True)
+    site_503_missing = dict(_SITE, m_code=503)     # the dataset calls a 503 "missing"
+    assert wmn.classify_fetch(site_503_missing, limited) == (wmn.UNKNOWN, "rate limited (HTTP 503)")
+    plain_429 = retrieval.FetchResult(retrieval.BLOCKED, "rate limited (HTTP 429)", 429, "",
+                                      rate_limited=True)
+    assert wmn.classify_fetch(_SITE, plain_429) == (wmn.UNKNOWN, "rate limited (HTTP 429)")
+    walled = retrieval.FetchResult(retrieval.BLOCKED, 'challenge page ("just a moment")',
+                                   200, CHALLENGE)
+    assert wmn.classify_fetch(_SITE, walled) == (wmn.UNKNOWN, 'challenge page ("just a moment")')
+    marker_on_wall = retrieval.FetchResult(retrieval.BLOCKED, 'challenge page ("just a moment")',
+                                           200, CHALLENGE + "<div class=profile-header>")
+    assert wmn.classify_fetch(_SITE, marker_on_wall) == (wmn.CLAIMED, "")
+    forbidden = retrieval.FetchResult(retrieval.BLOCKED, "HTTP 403", 403, "")
+    assert wmn.classify_fetch(_SITE, forbidden) == (wmn.UNKNOWN, "HTTP 403")
+    transport = retrieval.FetchResult(retrieval.TRANSPORT, "no response (ReadTimeout)",
+                                      None, None, "ReadTimeout")
+    assert wmn.classify_fetch(_SITE, transport) == (wmn.UNKNOWN, "no response (ReadTimeout)")
 
 
 def test_dataset_loads_and_is_substantial():
@@ -95,12 +135,11 @@ def test_denied_host_is_never_fetched():
     # failure (audit defect 8).
     denied = dict(_SITE, name="Facebook",
                   uri_check="https://facebook.com/{account}")
-    client = _FakeClient(200, "profile-header")   # would classify CLAIMED if fetched
-    res = asyncio.run(wmn._check_site(client, denied, "alice"))
+    res, calls = _check(_fixed(200, "profile-header"), site=denied)   # would be CLAIMED
     assert res.status == wmn.POLICY
     assert res.status not in (wmn.UNKNOWN, wmn.CLAIMED, wmn.AVAILABLE)
     assert res.context.startswith("policy:")
-    assert client.calls == 0            # never touched the network
+    assert calls == []            # never touched the network
 
 
 def test_policy_status_is_distinct_and_not_an_error_class():
@@ -130,15 +169,9 @@ def test_url_templates_is_the_fetched_uri_only():
 def test_whatsmyname_scan_yields_policy_result_without_fetching(monkeypatch):
     # Direct callers of the scanner still get a POLICY result per denied site
     # (plan-time filtering normally removes them first).
-    class _Client(_FakeClient):
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-    client = _Client(200, "profile-header")
-    monkeypatch.setattr(wmn.safeweb, "async_client", lambda **k: client)
+    calls = []
+    monkeypatch.setattr(wmn.safeweb, "async_client",
+                        mock_client(_fixed(200, "profile-header"), calls))
     got = []
     sites = [dict(_SITE, name="Instagram", uri_check="https://instagram.com/{account}"),
              dict(_SITE)]
@@ -146,7 +179,7 @@ def test_whatsmyname_scan_yields_policy_result_without_fetching(monkeypatch):
     by = {r.site_name: r for r in got}
     assert by["Instagram"].status == wmn.POLICY
     assert by["Example"].status == wmn.CLAIMED
-    assert client.calls == 1            # only the permitted site was fetched
+    assert len(calls) == 1            # only the permitted site was fetched
 
 
 # --- pipeline handling of POLICY results ------------------------------------
@@ -185,10 +218,10 @@ def test_pipeline_neither_observes_nor_reports_policy_results():
 
 
 def test_stealth_retry_recovers_a_high_value_unknown(monkeypatch):
-    # High-value site (GitHub) whose plain fetch is a WAF-ish 503 (UNKNOWN);
-    # the tier-2 stealth fetch returns the real found page -> CLAIMED.
+    # High-value site (GitHub) whose plain fetch is a WAF 403 (UNKNOWN); the
+    # tier-2 stealth fetch returns the real found page -> CLAIMED. (Until G2
+    # this test used a 503 — a rate limit, which must never be escalated.)
     gh = dict(_SITE, name="GitHub")       # normalizes into HIGH_VALUE_SITES
-    client = _FakeClient(503, "server error")   # -> UNKNOWN
     monkeypatch.setattr(wmn.stealthweb, "enabled", lambda: True)
 
     async def fake_tls(_url):
@@ -196,15 +229,36 @@ def test_stealth_retry_recovers_a_high_value_unknown(monkeypatch):
     monkeypatch.setattr(wmn.stealthweb, "fetch_tls", fake_tls)
 
     budget = {"left": 5}
-    res = asyncio.run(wmn._check_site(client, gh, "alice",
-                                      stealth_retry=True, budget=budget))
+    counters = {}
+    res, _ = _check(_fixed(403, "forbidden"), site=gh, stealth_retry=True,
+                    budget=budget, counters=counters)
     assert res.status == wmn.CLAIMED
     assert res.context == "stealth-recovered"
     assert budget["left"] == 4          # spent exactly one unit
+    assert counters == {"stealth_retries": 1, "stealth_recovered": 1}
+
+
+def test_rate_limit_is_never_answered_with_a_stealth_retry(monkeypatch):
+    """V7 for WhatsMyName: a 429/503 is UNKNOWN "rate limited …" and spends
+    no stealth budget, even on a high-value site."""
+    gh = dict(_SITE, name="GitHub")
+    called = {"n": 0}
+
+    async def fake_tls(_url):
+        called["n"] += 1
+        return 200, "<div class=profile-header>"
+    monkeypatch.setattr(wmn.stealthweb, "enabled", lambda: True)
+    monkeypatch.setattr(wmn.stealthweb, "fetch_tls", fake_tls)
+
+    for code in (429, 503):
+        budget = {"left": 5}
+        res, _ = _check(_fixed(code, "slow down"), site=gh, stealth_retry=True, budget=budget)
+        assert res.status == wmn.UNKNOWN
+        assert res.context.startswith(f"rate limited (HTTP {code}")
+        assert called["n"] == 0 and budget["left"] == 5
 
 
 def test_stealth_retry_skips_non_high_value_and_spends_no_budget(monkeypatch):
-    client = _FakeClient(503, "server error")   # -> UNKNOWN
     called = {"n": 0}
 
     async def fake_tls(_url):
@@ -214,8 +268,7 @@ def test_stealth_retry_skips_non_high_value_and_spends_no_budget(monkeypatch):
     monkeypatch.setattr(wmn.stealthweb, "fetch_tls", fake_tls)
 
     budget = {"left": 5}
-    res = asyncio.run(wmn._check_site(client, _SITE, "alice",   # "Example" not high-value
-                                      stealth_retry=True, budget=budget))
+    res, _ = _check(_fixed(403, "forbidden"), stealth_retry=True, budget=budget)  # "Example" not high-value
     assert res.status == wmn.UNKNOWN
     assert called["n"] == 0
     assert budget["left"] == 5          # untouched
@@ -234,48 +287,60 @@ def test_denied_high_value_host_never_triggers_stealth(monkeypatch):
     monkeypatch.setattr(wmn.stealthweb, "enabled", lambda: True)
     monkeypatch.setattr(wmn.stealthweb, "fetch_tls", fake_tls)
 
-    res = asyncio.run(wmn._check_site(_FakeClient(503, "x"), ig, "alice",
-                                      stealth_retry=True, budget={"left": 5}))
+    res, _ = _check(_fixed(503, "x"), site=ig, stealth_retry=True, budget={"left": 5})
     assert res.context.startswith("policy:")
     assert called["n"] == 0
 
 
+# --- defect 3: a walled 200 is not "available" ---------------------------------------
+
+def test_challenge_200_without_found_string_is_unknown_not_available():
+    res, _ = _check(_fixed(200, CHALLENGE))
+    assert res.status == wmn.UNKNOWN
+    assert res.context == 'challenge page ("just a moment")'
+
+
+def test_plain_200_without_found_string_is_still_available():
+    res, _ = _check(_fixed(200, "<html><body>" + "Generic landing page text. " * 10
+                           + "</body></html>"))
+    assert res.status == wmn.AVAILABLE
+
+
+def test_json_bodies_are_read_for_the_found_string():
+    res, _ = _check(_fixed(200, '{"profile-header": true}',
+                           headers={"content-type": "application/json"}))
+    assert res.status == wmn.CLAIMED
+
+
 # --- query_time (latency for the router's EWMA; ops-observability gap 7) ----
 
-class _SlowResp(_FakeResp):
-    async def aiter_bytes(self, _n):
-        await asyncio.sleep(0.005)
-        yield self._body
-
-
-class _SlowClient(_FakeClient):
-    def stream(self, _method, _url):
-        self.calls += 1
-        return _SlowResp(self._status, self._body)
+async def _slow(req):
+    await asyncio.sleep(0.005)
+    return httpx.Response(200, headers={"content-type": "text/html"},
+                          text="<div class=profile-header>")
 
 
 def test_check_site_sets_query_time_on_success():
     # 0 of 649 WhatsMyName site_health rows had a latency: query_time was
     # never set. It is the plain request's wall time.
-    res = asyncio.run(wmn._check_site(_SlowClient(200, "<div class=profile-header>"),
-                                      _SITE, "alice"))
+    res, _ = _check(_slow)
     assert res.status == wmn.CLAIMED
     assert isinstance(res.query_time, float) and res.query_time >= 0.005
 
 
 def test_check_site_sets_query_time_on_failure():
-    class _Boom:
-        def stream(self, *_a):
-            raise RuntimeError("connection reset")
+    def boom(req):
+        raise httpx.ConnectError("connection reset")
 
-    res = asyncio.run(wmn._check_site(_Boom(), _SITE, "alice"))
+    res, _ = _check(boom)
     assert res.status == wmn.UNKNOWN
+    assert res.context == "no response (ConnectError)"
     assert isinstance(res.query_time, float) and res.query_time >= 0.0
 
 
 def test_policy_result_has_no_query_time():
     ig = dict(_SITE, name="Instagram", uri_check="https://instagram.com/{account}")
-    res = asyncio.run(wmn._check_site(_FakeClient(200, "x"), ig, "alice"))
+    res, _ = _check(_fixed(200, "x"), site=ig)
     assert res.status == wmn.POLICY and res.query_time is None
 
 
@@ -286,11 +351,37 @@ def test_query_time_feeds_the_router_latency(tmp_path):
     db = tmp_path / "h.db"
     with db_connect(db) as conn:
         init_tables(conn)
-    res = asyncio.run(wmn._check_site(_SlowClient(200, "<div class=profile-header>"),
-                                      _SITE, "alice"))
+    res, _ = _check(_slow)
     r = RunRouter(db)
     r.observe("whatsmyname", res.site_name, res.status, res.context, res.query_time)
     r.finish()
     (row,) = SiteHealthStore(db).all_rows()
     assert row["engine"] == "whatsmyname"
     assert row["ewma_latency_ms"] is not None and row["ewma_latency_ms"] >= 5
+
+
+# --- the run's shared counters --------------------------------------------------------
+
+def test_scan_counts_every_fetch_in_the_shared_stats(monkeypatch):
+    def handler(req):
+        if req.url.host == "limited.example":
+            return httpx.Response(429)
+        return httpx.Response(200, headers={"content-type": "text/html"},
+                              text="<div class=profile-header>")
+    monkeypatch.setattr(wmn.safeweb, "async_client", mock_client(handler))
+    st = retrieval.RetrievalStats()
+    got = []
+    sites = [dict(_SITE), dict(_SITE, name="Limited", uri_check="https://limited.example/{account}")]
+    asyncio.run(wmn.whatsmyname_scan("alice", sites, 5, got.append, stats=st))
+    snap = st.snapshot()
+    assert snap["requests"] == 2
+    assert snap["by_outcome"]["ok"] == 1 and snap["by_outcome"]["blocked"] == 1
+    assert snap["by_status_class"] == {"2xx": 1, "4xx": 1}
+    assert {r.status for r in got} == {wmn.CLAIMED, wmn.UNKNOWN}
+
+
+def test_guarded_client_is_used_directly():
+    """The scanner's client is the SSRF-guarded one; the guard hook, not a
+    second resolution per fetch, checks the URL."""
+    client = safeweb.async_client(transport=httpx.MockTransport(_fixed(404, "")))
+    assert retrieval._client_is_guarded(client)

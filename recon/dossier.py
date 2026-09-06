@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from recon.confidence import account_confidence, bucket_counts, verdict_bucket
+from recon.email_pivot import holehe_tally
 from recon.exposure import exposure_summary, footprint_score
 from recon.rows import all_account_rows, display_name
 
@@ -109,7 +110,8 @@ def _exec_summary(inv: dict, summary: dict, score: dict) -> str:
     # row must never inflate a headline the reader will take as established fact.
     platforms = {r.get("site") for r in all_rows
                  if verdict_bucket(r) == "found" and r.get("site")}
-    holehe_hits = sum(1 for h in (email.get("holehe") or []) if h.get("exists"))
+    email_tally = holehe_tally(email.get("holehe") or [])
+    holehe_hits = email_tally["hits"]
     strong_links = sum(
         1 for c in clusters if (c.get("confidence") or 0) >= 60
     )
@@ -152,6 +154,13 @@ def _exec_summary(inv: dict, summary: dict, score: dict) -> str:
                   f"service(s)"
                   + (" and has a public Gravatar profile. "
                      if email.get("gravatar") else ". "))
+        elif email_tally["undetermined"]:
+            # Defect 6: "no exposure" is a claim the checks did not establish
+            # when most modules were rate-limited or errored.
+            failed = email_tally["total"] - email_tally["checked_ok"]
+            s += (f"Email checks were rate-limited/failed on {failed} of "
+                  f"{email_tally['total']} services — registered-account "
+                  f"exposure could not be determined. ")
         else:
             s += "No registered-account exposure was found for the email. "
     if phone:
@@ -477,12 +486,22 @@ def render_dossier(inv: dict, summary: dict, *,
                 if a.get("url"):
                     p.append(f"<li>linked: <a href='{_href(a['url'])}'>{_e(a.get('name') or a.get('domain'))}</a></li>")
             p.append("</ul>")
+        elif email_state.get("gravatar_error"):
+            p.append(f"<p class='dim'>Gravatar could not be checked "
+                     f"({_e(email_state['gravatar_error'])}).</p>")
         else:
             p.append("<p class='dim'>No public Gravatar profile.</p>")
         holehe = email_state.get("holehe") or []
         hits = [h for h in holehe if h.get("exists")]
-        p.append(f"<p>Registered-account checks: <b>{len(hits)} positive</b> "
-                 f"/ {len(holehe)} sites checked.</p>")
+        tally = holehe_tally(holehe)
+        line = (f"<p>Registered-account checks: <b>{len(hits)} positive</b> "
+                f"/ {len(holehe)} sites checked")
+        unanswered = tally["total"] - tally["checked_ok"]
+        if unanswered:
+            line += (f" ({unanswered} rate-limited or failed"
+                     + (" — exposure could not be determined"
+                        if tally["undetermined"] else "") + ")")
+        p.append(line + ".</p>")
         if hits:
             p.append("<table class='data'><tr><th>Service</th><th>Domain</th>"
                      "<th>Recovery trail (masked)</th></tr>")

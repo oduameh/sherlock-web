@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from recon.confidence import account_confidence, bucket_counts, verdict_bucket
+from recon.email_pivot import holehe_tally
 from recon.engines import normalize_site
 from recon.rows import all_account_rows, avatar, display_name
 
@@ -171,7 +172,8 @@ def exposure_summary(summary: dict) -> dict[str, Any]:
         1 for r in all_rows
         if (r.get("verification") or {}).get("status") == "likely_false_positive"
     )
-    holehe_hits = sum(1 for h in (email.get("holehe") or []) if h.get("exists"))
+    email_tally = holehe_tally(email.get("holehe") or [])
+    holehe_hits = email_tally["hits"]
     phone_regs = sum(1 for a in (phone.get("accounts") or []) if a.get("exists"))
     high_conf_links = sum(1 for c in clusters if (c.get("confidence") or 0) >= 60)
 
@@ -232,6 +234,11 @@ def exposure_summary(summary: dict) -> dict[str, Any]:
         "verified": verified,
         "flagged": flagged,
         "email_registrations": holehe_hits,
+        # Additive (defect 6): how many email checks actually answered, and
+        # whether "no exposure" is a claim the checks can support.
+        "email_checks": email_tally["total"],
+        "email_checks_ok": email_tally["checked_ok"],
+        "email_checks_undetermined": email_tally["undetermined"],
         "phone_registrations": phone_regs,
         "correlation_clusters": len(clusters),
         "high_confidence_links": high_conf_links,
@@ -266,6 +273,14 @@ def _factors(counts: dict, identity: dict, phone: dict, domain: dict,
         out.append(
             f"email registered on {counts['email_registrations']} checked "
             f"service(s)"
+        )
+    elif counts.get("email_checks_undetermined"):
+        # Defect 6: say what was not established instead of implying "none".
+        failed = counts.get("email_checks", 0) - counts.get("email_checks_ok", 0)
+        out.append(
+            f"email checks were rate-limited/failed on {failed} of "
+            f"{counts.get('email_checks', 0)} services — registered-account "
+            f"exposure could not be determined"
         )
     if identity["gravatar"]:
         out.append("public Gravatar profile present")

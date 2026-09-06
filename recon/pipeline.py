@@ -25,19 +25,21 @@ import contextvars
 import logging
 import threading
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from sherlock_project.notify import QueryNotify
 from sherlock_project.result import QueryStatus
 from sherlock_project.sherlock import sherlock
 
-from recon import adapters, detectors, engines
+from recon import adapters, detectors, engines, retrieval
 from recon.confidence import account_confidence, bucket_counts
 from recon.correlate import correlate
-from recon.email_pivot import (annotate_recovery, gravatar_lookup,
-                                holehe_available, holehe_scan)
-from recon.enrich import enrich_profiles, MAX_ENRICH_PER_RUN
+from recon.email_pivot import (annotate_recovery, gravatar_profile,
+                                holehe_available, holehe_scan, holehe_tally)
+from recon.enrich import (enrich_profiles, MAX_ENRICH_PER_RUN,
+                          STEALTH_BROWSER_BUDGET)
 from recon.domain_pivot import domain_from_email, domain_intel
+from recon.ladder import StealthLadder
 from recon.names import generate_name_candidates
 from recon.permutations import generate_variants
 from recon.phone_accounts import ignorant_available, ignorant_scan
@@ -117,18 +119,138 @@ def tally_signal(counts: dict, name: str, res: dict) -> None:
         entry["blocked"] += 1
 
 
-# Retrieval facts the diagnostics do NOT yet record (they live in modules
-# other increments own); listed in the blob so a reader never assumes a
-# missing key means "nothing happened".
-NOT_RECORDED = ("stealth_ladder_attempts", "wmn_stealth_retries",
-                "detector_browser_escalations", "budget_consumption",
-                "fetch_status_histogram")
+# Retrieval facts the diagnostics do NOT record; listed in the blob so a
+# reader never assumes a missing key means "nothing happened". Empty since
+# G2: the stealth ladder's attempts per tier, the WhatsMyName stealth
+# retries, the detectors' browser escalations, every budget's consumption
+# and the fetch status histogram live under ``run["retrieval"]``
+# (:func:`build_retrieval_record`).
+NOT_RECORDED: tuple[str, ...] = ()
+
+# Bounds on ``run["retrieval"]`` (architecture §6: the record must fit the
+# summary blob). Hosts are worst-first, so the cap keeps the ones that matter.
+RETRIEVAL_HOSTS_CAP = 50
+
+
+def build_retrieval_record(*, stats: retrieval.RetrievalStats,
+                           host_state: retrieval.HostState,
+                           enrich_stats: dict, enrich_ladder: StealthLadder,
+                           detector_ladders: list, wmn_counters: dict,
+                           verify_budget: Optional[int] = None) -> dict:
+    """Assemble ``summary["run"]["retrieval"]`` — what our own fetchers did
+    this run, from the shared retrieval state (G2). Pure given its inputs;
+    bounded by ``RETRIEVAL_HOSTS_CAP``.
+
+    * ``fetches`` — :meth:`recon.retrieval.RetrievalStats.snapshot`:
+      attempts, requests, ``by_outcome``, ``by_status_class`` (the fetch
+      status histogram), the worst hosts, the policy/ssrf/backoff skips and
+      the ladder's runs/rescues across every caller;
+    * ``hosts`` — the hosts that were backed off or blocked (from
+      :meth:`recon.retrieval.HostState.snapshot`), plus ``hosts_seen`` and
+      ``hosts_backed_off`` counts;
+    * ``stealth`` — the enrichment ladder: attempts and rescues per tier,
+      the browser budget and what is left of it;
+    * ``detector_stealth`` — the same counters summed over every detector
+      sweep (one budget per sweep) plus the sweep count;
+    * ``wmn_stealth`` — WhatsMyName's tier-2 retries and recoveries;
+    * ``budgets`` — every budget's limit and consumption;
+    * ``enrichment`` — the enrichment counters (rate-limited hosts/rows,
+      backoff seconds per host, failed control probes).
+    """
+    fetches = stats.snapshot()
+    by_host = fetches.get("by_host") or {}
+    kept = dict(list(by_host.items())[:RETRIEVAL_HOSTS_CAP])
+    fetches["by_host"] = kept
+    fetches["by_host_truncated"] = max(0, len(by_host) - len(kept))
+
+    hosts = host_state.snapshot()
+    troubled = {h: v for h, v in hosts.items()
+                if v.get("backoff_s_left") or v.get("consecutive_blocks")}
+    kept_hosts = dict(list(troubled.items())[:RETRIEVAL_HOSTS_CAP])
+
+    detector_totals: dict[str, int] = {}
+    for ladder in detector_ladders:
+        for key, value in ladder.snapshot().items():
+            detector_totals[key] = detector_totals.get(key, 0) + int(value)
+    detector_totals["sweeps"] = len(detector_ladders)
+
+    stealth = enrich_ladder.snapshot()
+    enrichment = {k: v for k, v in (enrich_stats or {}).items() if k != "stealth"}
+    wmn_budget = getattr(whatsmyname, "_STEALTH_RETRY_BUDGET", None)
+    return {
+        "fetches": fetches,
+        "hosts_seen": len(hosts),
+        "hosts_backed_off": sum(1 for v in hosts.values() if v.get("backoff_s_left")),
+        "hosts": kept_hosts,
+        "hosts_truncated": max(0, len(troubled) - len(kept_hosts)),
+        "stealth": stealth,
+        "detector_stealth": detector_totals,
+        "wmn_stealth": {
+            "budget_per_scan": wmn_budget,
+            "retries": int(wmn_counters.get("stealth_retries", 0)),
+            "recovered": int(wmn_counters.get("stealth_recovered", 0)),
+        },
+        "budgets": {
+            "verify": {
+                "limit": enrichment.get("verify_budget", verify_budget),
+                "used": enrichment.get("verify_budget_used"),
+                "skipped": enrichment.get("verify_budget_skipped"),
+            },
+            "stealth_browser": {"limit": stealth["browser_budget"],
+                                "used": stealth["browser_attempts"]},
+            "detector_browser": {
+                "limit_per_sweep": getattr(detectors, "BROWSER_BUDGET", None),
+                "used": detector_totals.get("browser_attempts", 0),
+            },
+            "wmn_stealth": {"limit_per_scan": wmn_budget,
+                            "used": int(wmn_counters.get("stealth_retries", 0))},
+        },
+        "enrichment": enrichment,
+    }
+
+
+def reclassify_engine_result(status: str, context: str,
+                             http_status: Any) -> tuple[str, str]:
+    """Re-classify one third-party engine result before ``router.observe``
+    (audit defect 3, architecture §3: "a 429/403/503 status is a block, never
+    a success").
+
+    Sherlock has no status ≥ 400 branch and Maigret's error detection knows
+    403/5xx but not 429, so a rate-limited or WAF-walled check is labelled
+    ``Available`` (status-code sites — a silent false negative) or ``Claimed``
+    (message sites — a false positive) and the router records a healthy site.
+    When the engine called the check a success and the HTTP status it saw is
+    a rate limit (:func:`recon.retrieval.is_rate_limit`: 429/503) or a 403,
+    the observation becomes ``("blocked", <retrieval reason>)`` — "rate
+    limited (HTTP 429)" / "HTTP 403" — which :func:`recon.router.classify`
+    files under ``http_429`` / ``http_403_waf``. Anything else, and any
+    result the engine already called an error, passes through unchanged.
+    Pure.
+    """
+    if not isinstance(http_status, int) or isinstance(http_status, bool):
+        return status, context
+    if (status or "").strip().lower() not in ("claimed", "available"):
+        return status, context
+    if retrieval.is_rate_limit(http_status) or http_status == 403:
+        return "blocked", retrieval.classify(http_status, None).reason
+    return status, context
+
+
+def _http_status_of(results: Any, site: str) -> Any:
+    """The per-site ``http_status`` from the dict an engine's scan call
+    returned (Sherlock: ``results[site]["http_status"]``; Maigret: the
+    ``SiteResult`` dict, ``""`` on its error branches). None when absent."""
+    if not isinstance(results, dict):
+        return None
+    info = results.get(site)
+    return info.get("http_status") if isinstance(info, dict) else None
 
 
 def build_run_diagnostics(*, router: RunRouter, planned: dict,
                           skipped_policy: list, engine_errors: list,
                           signals: dict, verification_counts: dict,
-                          timings: dict) -> dict:
+                          timings: dict,
+                          retrieval_record: Optional[dict] = None) -> dict:
     """Assemble ``summary["run"]`` — the bounded per-run retrieval record.
 
     Persisted with the summary by the existing ``done`` write, so a stored
@@ -144,7 +266,10 @@ def build_run_diagnostics(*, router: RunRouter, planned: dict,
     * *what fallback ran* — ``retries.attempted``, the budgets in force;
     * *did it work* — ``retries.recovered``, the signals counts;
     * *how confident* — ``verification_counts`` (per-row ``verification`` is
-      unchanged).
+      unchanged);
+    * *what our own fetchers did* — ``retrieval`` (G2,
+      :func:`build_retrieval_record`): outcomes, status histogram, backed-off
+      hosts, ladder use per tier, budget consumption.
 
     Bounded: at most ``FAILED_CHECKS_CAP`` failed checks (the overflow is
     counted in ``failed_checks_truncated``), ``SKIPPED_LIST_CAP`` rows per
@@ -155,6 +280,7 @@ def build_run_diagnostics(*, router: RunRouter, planned: dict,
     run = {
         "schema": RUN_SCHEMA,
         "not_recorded": list(NOT_RECORDED),
+        "retrieval": dict(retrieval_record or {}),
         "planned": planned,
         "skipped_policy": list(skipped_policy)[:SKIPPED_LIST_CAP],
         "skipped_policy_count": len(skipped_policy),
@@ -208,7 +334,15 @@ Emit = Callable[[str, dict], None]
 
 
 class _SherlockNotify(QueryNotify):
-    """Forwards Sherlock per-site results through the threadsafe emitter."""
+    """Forwards Sherlock per-site results through the threadsafe emitter.
+
+    Router observations are **buffered** in ``update`` and flushed after the
+    scan call returns (:meth:`flush`): Sherlock's ``QueryResult`` carries no
+    HTTP status, only the dict ``sherlock()`` returns does
+    (``results[site]["http_status"]``), and the observation must be
+    re-classified against it (:func:`reclassify_engine_result`, defect 3).
+    Found/error/progress events still stream immediately.
+    """
 
     def __init__(self, scanned_name: str, group: dict, emit_ts: Callable,
                  router: Optional[RunRouter] = None):
@@ -219,14 +353,27 @@ class _SherlockNotify(QueryNotify):
         self.router = router
         self.checked = 0
         self.total = 0
+        self.pending: list[tuple] = []
+
+    def flush(self, results: Any) -> int:
+        """Observe every buffered result, re-classified against the per-site
+        ``http_status`` in ``results`` (the dict ``sherlock()`` returned;
+        ``{}``/None when the call raised). Returns how many were observed."""
+        pending, self.pending = self.pending, []
+        if self.router is None:
+            return 0
+        for site, status, context, query_time in pending:
+            status, context = reclassify_engine_result(
+                status, context, _http_status_of(results, site))
+            self.router.observe("sherlock", site, status, context, query_time,
+                                username=self.scanned_name)
+        return len(pending)
 
     def update(self, result) -> None:  # called once per site, from scan thread
         self.checked += 1
         status = result.status
-        if self.router is not None:
-            self.router.observe("sherlock", result.site_name,
-                                str(status.value), result.context or "",
-                                result.query_time, username=self.scanned_name)
+        self.pending.append((result.site_name, str(status.value),
+                             result.context or "", result.query_time))
         if status == QueryStatus.CLAIMED:
             self.emit_ts("found", "sherlock", self.scanned_name,
                          result.site_name, result.site_url_user,
@@ -250,8 +397,14 @@ def _sherlock_worker(items: list, site_data: dict, timeout: int,
             notify.total = len(site_data)
             emit_ts("engine_start", "sherlock", scanned_name,
                     len(site_data), group)
-            sherlock(scanned_name, site_data, notify, timeout=timeout,
-                     proxy=router.proxy if router else None)
+            ret = None
+            try:
+                ret = sherlock(scanned_name, site_data, notify, timeout=timeout,
+                               proxy=router.proxy if router else None)
+            finally:
+                # Observe now that the per-site http_status is known; a
+                # raised scan still flushes what it reported (no status).
+                notify.flush(ret)
             _retry_transient(router, "sherlock", scanned_name, site_data,
                              timeout, emit_ts, notify)
             emit_ts("engine_done", "sherlock", scanned_name, group)
@@ -278,12 +431,15 @@ def _retry_transient(router: Optional[RunRouter], engine: str,
         if rec["site"] in retry_sites:
             emit_ts("retry", rec)
     time.sleep(retry_delay())
+    ret = None
     try:
-        sherlock(scanned_name, retry_sites, notify, timeout=timeout,
-                 proxy=router.proxy)
+        ret = sherlock(scanned_name, retry_sites, notify, timeout=timeout,
+                       proxy=router.proxy)
     except Exception:
         logger.exception("%sretry batch failed for %s", _log_prefix(),
                          scanned_name)
+    finally:
+        notify.flush(ret)
 
 
 def _shard(items: list, n: int) -> list[list]:
@@ -370,6 +526,16 @@ async def run_pipeline(
     signals_counts: dict[str, dict] = {}
     timings: dict[str, float] = {}
     _lap_at = [t_run0]
+    # The run's shared retrieval state (G2): one per-host memory, one set of
+    # counters and one enrichment stealth ladder, handed to every fetcher we
+    # own so a host backed off during discovery stays backed off in
+    # enrichment and every fetch lands in the same histogram.
+    host_state = retrieval.HostState()
+    rstats = retrieval.RetrievalStats()
+    enrich_ladder = StealthLadder(STEALTH_BROWSER_BUDGET)
+    detector_ladders: list[StealthLadder] = []
+    wmn_counters: dict[str, int] = {}
+    enrich_stats: dict = {}
 
     def lap(phase: str) -> None:
         """Close the current phase: seconds since the previous lap."""
@@ -509,15 +675,18 @@ async def run_pipeline(
                 _engine_lifecycle("engine_start", "maigret", scanned_name,
                                   total, group)
                 checked = 0
+                # Observations wait for the scan's return value: Maigret's
+                # result object carries no HTTP status either, only the
+                # per-site dict it returns does (defect 3).
+                pending: list[tuple] = []
 
                 def on_result(result, _name=scanned_name, _g=group):
                     nonlocal checked
                     checked += 1
                     st = result.status  # MaigretCheckStatus enum
-                    router.observe("maigret", result.site_name,
-                                   str(st.value), result.context or "",
-                                   getattr(result, "query_time", None),
-                                   username=_name)
+                    pending.append((result.site_name, str(st.value),
+                                    result.context or "",
+                                    getattr(result, "query_time", None)))
                     if st == MaigretCheckStatus.CLAIMED:
                         _handle_found("maigret", _name, result.site_name,
                                       result.site_url_user, None, _g)
@@ -527,13 +696,24 @@ async def run_pipeline(
                                       str(st.value), result.context or "", _g)
                     _handle_progress("maigret", _name, checked, total, _g)
 
+                def flush(results, _name=scanned_name):
+                    items, pending[:] = list(pending), []
+                    for site, status, context, query_time in items:
+                        status, context = reclassify_engine_result(
+                            status, context, _http_status_of(results, site))
+                        router.observe("maigret", site, status, context,
+                                       query_time, username=_name)
+
+                ret = None
                 try:
-                    await engines.maigret_scan(scanned_name, site_dict,
-                                               timeout, on_result,
-                                               proxy=router.proxy)
+                    ret = await engines.maigret_scan(scanned_name, site_dict,
+                                                     timeout, on_result,
+                                                     proxy=router.proxy)
                 except Exception as exc:
                     _engine_lifecycle("engine_error", "maigret",
                                       f"{type(exc).__name__}: {exc}")
+                finally:
+                    flush(ret)
                 # Retry this pass's transient failures once — all together in a
                 # single concurrent re-scan after one short delay.
                 retry_recs = router.drain_transient("maigret", scanned_name)
@@ -545,13 +725,16 @@ async def run_pipeline(
                         if rec["site"] in retry_sites:
                             emit("retry", dict(rec))
                     await asyncio.sleep(retry_delay())
+                    ret = None
                     try:
-                        await engines.maigret_scan(
+                        ret = await engines.maigret_scan(
                             scanned_name, retry_sites, timeout, on_result,
                             proxy=router.proxy)
                     except Exception:
                         logger.exception("%smaigret retry batch failed for %s",
                                          _log_prefix(), scanned_name)
+                    finally:
+                        flush(ret)
                 _engine_lifecycle("engine_done", "maigret", scanned_name,
                                   group)
 
@@ -590,7 +773,8 @@ async def run_pipeline(
                 try:
                     await whatsmyname.whatsmyname_scan(
                         scanned_name, sites_list, timeout, on_result,
-                        proxy=router.proxy, stealth_retry=True)
+                        proxy=router.proxy, stealth_retry=True,
+                        stats=rstats, counters=wmn_counters)
                 except Exception as exc:
                     _engine_lifecycle("engine_error", "whatsmyname",
                                       f"{type(exc).__name__}: {exc}")
@@ -608,7 +792,8 @@ async def run_pipeline(
                     try:
                         await whatsmyname.whatsmyname_scan(
                             scanned_name, retry_sites, timeout, on_result,
-                            proxy=router.proxy)
+                            proxy=router.proxy, stats=rstats,
+                            counters=wmn_counters)
                     except Exception:
                         logger.exception(
                             "%swhatsmyname retry batch failed for %s",
@@ -640,10 +825,19 @@ async def run_pipeline(
                               total, group)
             api_stats: dict = {}
             html_stats: dict = {}
+            # One browser budget per detector sweep (an argument, never a
+            # module global — audit §6 "also noted"); kept for the record.
+            sweep_ladder = StealthLadder(detectors.BROWSER_BUDGET)
+            detector_ladders.append(sweep_ladder)
             try:
                 api_hits, html_hits = await asyncio.gather(
-                    adapters.discover(scanned_name, stats=api_stats),
-                    detectors.discover(scanned_name, stats=html_stats),
+                    adapters.discover(scanned_name, stats=api_stats,
+                                      host_state=host_state,
+                                      retrieval_stats=rstats),
+                    detectors.discover(scanned_name, stats=html_stats,
+                                       host_state=host_state,
+                                       retrieval_stats=rstats,
+                                       ladder=sweep_ladder),
                 )
                 found = list(api_hits) + list(html_hits)
             except Exception as exc:
@@ -665,12 +859,18 @@ async def run_pipeline(
         await asyncio.gather(*(one(n, g) for n, g in items))
 
     async def email_worker(addr):
-        grav = await gravatar_lookup(addr)
-        email_state["gravatar"] = grav
-        emit("email", {
-            "source": "gravatar", "email": addr, "found": bool(grav),
-            "profile": grav,
-        })
+        grav = await gravatar_profile(addr, retrieval_stats=rstats)
+        email_state["gravatar"] = grav.profile
+        if grav.error:
+            # Additive: "could not check" is not "no profile" (G2).
+            email_state["gravatar_error"] = grav.error
+        payload = {
+            "source": "gravatar", "email": addr, "found": bool(grav.profile),
+            "profile": grav.profile, "checked": grav.error is None,
+        }
+        if grav.error:
+            payload["error"] = grav.error
+        emit("email", payload)
         if holehe_available():
             def on_holehe(entry):
                 # Stitch the trail: flag when this account's masked recovery
@@ -683,18 +883,26 @@ async def run_pipeline(
         else:
             emit("email", {"source": "holehe", "email": addr,
                            "error": "holehe not installed"})
-        hits = sum(1 for h in email_state["holehe"] if h.get("exists"))
-        emit("email_done", {"email": addr, "holehe_hits": hits,
-                            "gravatar": bool(grav)})
+        tally = holehe_tally(email_state["holehe"])
+        emit("email_done", {
+            "email": addr, "holehe_hits": tally["hits"],
+            "gravatar": bool(grav.profile),
+            # Additive (defect 6): how many modules actually answered.
+            "email_checked": tally["total"],
+            "email_checked_ok": tally["checked_ok"],
+            "email_rate_limited": tally["rate_limited"],
+            "email_errors": tally["errors"],
+            "email_undetermined": tally["undetermined"],
+        })
 
     async def domain_worker(dom):
-        data = await domain_intel(dom)
+        data = await domain_intel(dom, retrieval_stats=rstats)
         domain_state.clear()
         domain_state.update(data)
         emit("domain_intel", data)
 
     async def broker_worker(person, loc):
-        data = await brokers.broker_exposure(person, loc)
+        data = await brokers.broker_exposure(person, loc, retrieval_stats=rstats)
         broker_state.clear()
         broker_state.update(data)
         emit("broker_exposure", data)
@@ -907,11 +1115,14 @@ async def run_pipeline(
             "platform_identity": row.get("platform_identity"),
         })
 
-    await enrich_profiles(all_rows, on_enriched, subject_name=name)
+    await enrich_profiles(all_rows, on_enriched, subject_name=name,
+                          stats=enrich_stats, host_state=host_state,
+                          retrieval_stats=rstats, ladder=enrich_ladder)
     lap("enrich")
 
     # Correlation.
-    clusters = await correlate(all_rows)
+    clusters = await correlate(all_rows, host_state=host_state,
+                               retrieval_stats=rstats)
     emit("correlation", {"clusters": clusters})
     lap("correlate")
 
@@ -947,12 +1158,17 @@ async def run_pipeline(
     # verification-confirmed accounts, unconfirmed leads, and flagged false
     # positives — instead of reporting every speculative hit as "found".
     buckets = bucket_counts(all_rows)
+    email_tally = holehe_tally(email_state["holehe"])
     # The per-run retrieval record, persisted with the summary (architecture
     # §6). Built after every phase so the counters are final.
     summary["run"] = build_run_diagnostics(
         router=router, planned=planned,
         skipped_policy=site_plan.skipped_policy, engine_errors=engine_errors,
         signals=signals_counts, verification_counts=buckets, timings=timings,
+        retrieval_record=build_retrieval_record(
+            stats=rstats, host_state=host_state, enrich_stats=enrich_stats,
+            enrich_ladder=enrich_ladder, detector_ladders=detector_ladders,
+            wmn_counters=wmn_counters, verify_budget=MAX_ENRICH_PER_RUN),
     )
     router.finish()
     logger.info("%srun diagnostics: errors=%s retries=%d/%d engine_errors=%d"
@@ -971,6 +1187,11 @@ async def run_pipeline(
         "name_hits": len(name_rows),
         "clusters": len(clusters),
         "email_hits": sum(1 for h in email_state["holehe"] if h.get("exists")),
+        # Additive (defect 6): "no exposure" is only a claim when the checks
+        # ran; the dossier and the exposure summary read the same tally.
+        "email_checked_ok": email_tally["checked_ok"],
+        "email_rate_limited": email_tally["rate_limited"],
+        "email_undetermined": email_tally["undetermined"],
         "phone": bool(phone_state),
         "phone_accounts": sum(
             1 for a in (phone_state.get("accounts") or []) if a.get("exists")),

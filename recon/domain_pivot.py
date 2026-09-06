@@ -1,8 +1,8 @@
 """Domain / IP / DNS infrastructure pivot.
 
-Public data only, zero API keys. Every network call rides ``recon.safeweb``
-(the SSRF-guarded client), so DNS is resolved over DNS-over-HTTPS rather than
-raw UDP:
+Public data only, zero API keys. Every network call rides
+:func:`recon.retrieval.fetch` on ``recon.safeweb`` (the SSRF-guarded client),
+so DNS is resolved over DNS-over-HTTPS rather than raw UDP:
 
 * DNS records (A / AAAA / MX / NS / TXT) via Cloudflare DoH JSON,
 * registration data (registrar, key dates, nameservers, status) via RDAP
@@ -12,7 +12,12 @@ raw UDP:
 
 Parsing is split into pure functions (``parse_doh``, ``parse_rdap``,
 ``parse_crtsh``) so they can be unit-tested from fixtures without a network.
-Every fetch is best-effort: a failing source degrades to empty, never raises.
+Every fetch is best-effort and never raises — but a source that did not
+answer is **reported**, not silently emptied (G2; audit §6 "also noted": a
+crt.sh 503 used to read as "0 subdomains"): :func:`domain_intel` carries an
+``errors`` list (``{source, query, reason}`` per failed call) and
+``subdomain_count`` is ``None`` when crt.sh could not be read. Each call is
+recorded against the source registry (:func:`recon.sources.record`).
 """
 
 from __future__ import annotations
@@ -20,9 +25,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Optional
+import time
+from typing import Any, Optional
+from urllib.parse import quote, urlencode
 
-from recon import safeweb
+from recon import retrieval, safeweb, sources
 
 logger = logging.getLogger("recon.domain_pivot")
 
@@ -141,40 +148,64 @@ def parse_crtsh(entries: list, base_domain: str) -> list[str]:
 # Async fetchers
 # ---------------------------------------------------------------------------
 
-async def _doh_query(client, name: str, record_type: str) -> list[str]:
-    try:
-        resp = await client.get(
-            DOH_URL,
-            params={"name": name, "type": record_type},
-            headers={"Accept": "application/dns-json"},
-        )
-        if resp.status_code != 200:
-            return []
-        return parse_doh(resp.json(), record_type)
-    except Exception:
-        return []
+async def _fetch_json(client, source: str, url: str, *, label: str,
+                      headers: Optional[dict] = None,
+                      stats: Optional[retrieval.RetrievalStats] = None,
+                      errors: Optional[list] = None) -> tuple[Any, Optional[str]]:
+    """``(data, error)`` for one JSON source through :func:`retrieval.fetch`.
+
+    ``ok`` → the parsed body; ``absent`` (404/410 — RDAP for an unregistered
+    name) → ``(None, None)``; anything else → ``(None, reason)`` and an entry
+    in ``errors`` so the caller can say the source did not answer instead of
+    reporting an empty result. Recorded against ``source`` in the registry.
+    """
+    t0 = time.monotonic()
+    res = await retrieval.fetch(url, client=client, kind="json", headers=headers,
+                                stats=stats)
+    latency_ms = (time.monotonic() - t0) * 1000
+    if res.outcome == retrieval.OK:
+        sources.record(source, True, latency_ms)
+        return res.data, None
+    if res.outcome == retrieval.ABSENT:
+        sources.record(source, True, latency_ms)
+        return None, None
+    sources.record(source, False, latency_ms, res.reason)
+    if errors is not None:
+        errors.append({"source": source, "query": label, "reason": res.reason})
+    logger.debug("%s did not answer for %s: %s", source, label, res.reason)
+    return None, res.reason
 
 
-async def _rdap(client, domain: str) -> dict:
-    try:
-        resp = await client.get(RDAP_URL + domain)
-        if resp.status_code != 200:
-            return {}
-        return parse_rdap(resp.json())
-    except Exception:
-        return {}
+async def _doh_query(client, name: str, record_type: str, *,
+                     stats: Optional[retrieval.RetrievalStats] = None,
+                     errors: Optional[list] = None) -> list[str]:
+    url = DOH_URL + "?" + urlencode({"name": name, "type": record_type})
+    data, _err = await _fetch_json(client, "cloudflare_doh", url,
+                                   label=f"{record_type} {name}",
+                                   headers={"Accept": "application/dns-json"},
+                                   stats=stats, errors=errors)
+    return parse_doh(data, record_type) if isinstance(data, dict) else []
 
 
-async def _subdomains(client, domain: str) -> list[str]:
-    try:
-        resp = await client.get(
-            CRTSH_URL, params={"q": "%." + domain, "output": "json"}
-        )
-        if resp.status_code != 200:
-            return []
-        return parse_crtsh(resp.json(), domain)
-    except Exception:
-        return []
+async def _rdap(client, domain: str, *,
+                stats: Optional[retrieval.RetrievalStats] = None,
+                errors: Optional[list] = None) -> dict:
+    data, _err = await _fetch_json(client, "rdap", RDAP_URL + quote(domain, safe=""),
+                                   label=domain, stats=stats, errors=errors)
+    return parse_rdap(data) if isinstance(data, dict) else {}
+
+
+async def _subdomains(client, domain: str, *,
+                      stats: Optional[retrieval.RetrievalStats] = None,
+                      errors: Optional[list] = None) -> Optional[list[str]]:
+    """Subdomains from crt.sh, or **None** when crt.sh did not answer — a 503
+    from the CT search is "unavailable", never "0 subdomains"."""
+    url = CRTSH_URL + "?" + urlencode({"q": "%." + domain, "output": "json"})
+    data, err = await _fetch_json(client, "crtsh", url, label=domain,
+                                  stats=stats, errors=errors)
+    if err is not None:
+        return None
+    return parse_crtsh(data, domain) if isinstance(data, list) else []
 
 
 async def reverse_dns(ip: str) -> Optional[str]:
@@ -188,21 +219,30 @@ async def reverse_dns(ip: str) -> Optional[str]:
     return ptrs[0] if ptrs else None
 
 
-async def domain_intel(domain: str) -> dict:
-    """Gather DNS + RDAP + subdomain intel for a domain. Never raises."""
+async def domain_intel(domain: str, *,
+                       retrieval_stats: Optional[retrieval.RetrievalStats] = None
+                       ) -> dict:
+    """Gather DNS + RDAP + subdomain intel for a domain. Never raises.
+
+    Additive keys (G2): ``errors`` — one ``{source, query, reason}`` per call
+    whose outcome was neither ``ok`` nor ``absent`` (empty when every source
+    answered) — and ``subdomain_count`` is ``None`` rather than ``0`` when
+    crt.sh could not be read.
+    """
     domain = (domain or "").strip().lower().rstrip(".")
     if not looks_like_domain(domain):
         return {"domain": domain, "error": "not a valid domain"}
 
+    errors: list[dict] = []
     async with safeweb.async_client(timeout=TIMEOUT_S) as client:
         a, aaaa, mx, ns, txt, rdap_data, subs = await asyncio.gather(
-            _doh_query(client, domain, "A"),
-            _doh_query(client, domain, "AAAA"),
-            _doh_query(client, domain, "MX"),
-            _doh_query(client, domain, "NS"),
-            _doh_query(client, domain, "TXT"),
-            _rdap(client, domain),
-            _subdomains(client, domain),
+            _doh_query(client, domain, "A", stats=retrieval_stats, errors=errors),
+            _doh_query(client, domain, "AAAA", stats=retrieval_stats, errors=errors),
+            _doh_query(client, domain, "MX", stats=retrieval_stats, errors=errors),
+            _doh_query(client, domain, "NS", stats=retrieval_stats, errors=errors),
+            _doh_query(client, domain, "TXT", stats=retrieval_stats, errors=errors),
+            _rdap(client, domain, stats=retrieval_stats, errors=errors),
+            _subdomains(client, domain, stats=retrieval_stats, errors=errors),
         )
 
     return {
@@ -211,6 +251,7 @@ async def domain_intel(domain: str) -> dict:
             "A": a, "AAAA": aaaa, "MX": mx, "NS": ns, "TXT": txt[:MAX_TXT],
         },
         "rdap": rdap_data,
-        "subdomains": subs,
-        "subdomain_count": len(subs),
+        "subdomains": subs or [],
+        "subdomain_count": None if subs is None else len(subs),
+        "errors": errors,
     }

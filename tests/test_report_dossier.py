@@ -259,3 +259,34 @@ def test_dossier_never_renders_the_raw_title_as_a_name():
     assert "Streamer Overview" not in out
     assert "<td>Alice Example</td>" in out
     assert "<td>—</td>" in out            # the title-only row shows no identity
+
+
+# --- G2: the dossier does not claim "no exposure" when holehe did not answer ---------
+
+def test_dossier_says_could_not_be_determined_when_holehe_was_rate_limited():
+    s = _dossier_summary()
+    s["email"]["holehe"] = [{"site": f"s{i}", "exists": False, "rate_limit": True}
+                            for i in range(100)]
+    out = render_dossier({"id": 1, "created_at": "2026-09-06"}, s)
+    assert "Email checks were rate-limited/failed on 100 of 100 services" in out
+    assert "exposure could not be determined" in out
+    assert "No registered-account exposure was found" not in out
+    assert "100 rate-limited or failed" in out
+
+
+def test_dossier_still_says_no_exposure_when_the_checks_answered():
+    s = _dossier_summary()
+    s["email"]["holehe"] = [{"site": "a", "exists": False}, {"site": "b", "exists": False}]
+    out = render_dossier({"id": 1, "created_at": "2026-09-06"}, s)
+    assert "No registered-account exposure was found" in out
+    assert "exposure could not be determined" not in out
+    assert "rate-limited or failed" not in out
+
+
+def test_dossier_reports_a_gravatar_that_could_not_be_checked():
+    s = _dossier_summary()
+    s["email"]["gravatar"] = None
+    s["email"]["gravatar_error"] = "could not check: rate limited (HTTP 429)"
+    out = render_dossier({"id": 1, "created_at": "2026-09-06"}, s)
+    assert "Gravatar could not be checked (could not check: rate limited (HTTP 429))" in out
+    assert "No public Gravatar profile" not in out

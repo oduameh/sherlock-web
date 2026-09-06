@@ -78,8 +78,11 @@ from dbconn import connect as db_connect
 from dbconn import insert_returning_id
 
 # Adaptive routing (recon.router) is stdlib-only — safe to import even when
-# the optional recon dependencies (maigret, holehe) are missing.
+# the optional recon dependencies (maigret, holehe) are missing. So are the
+# row accessors (recon.rows) and the source registry (recon.sources).
 from recon import router as recon_router
+from recon import rows as recon_rows
+from recon import sources as recon_sources
 
 from sherlock_project.notify import QueryNotify
 from sherlock_project.result import QueryStatus
@@ -718,8 +721,14 @@ def get_sites() -> list[dict]:
 @app.get("/api/health/sources")
 def get_health_sources() -> JSONResponse:
     """Per-site reliability summary (failure rate, dominant error class,
-    circuit state, EWMA latency), worst-first, plus aggregate stats."""
-    return JSONResponse(recon_router.sources_summary(DB_PATH))
+    circuit state, EWMA latency), worst-first, plus aggregate stats.
+
+    Additive ``direct_sources`` (G2): the sources *we* call directly —
+    adapters, detectors, Gravatar, DoH, RDAP, crt.sh, GitHub — from the
+    in-process registry ledger (:func:`recon.sources.summary`)."""
+    data = recon_router.sources_summary(DB_PATH)
+    data["direct_sources"] = recon_sources.summary()
+    return JSONResponse(data)
 
 
 # ---------------------------------------------------------------------------
@@ -1262,8 +1271,7 @@ if RECON_AVAILABLE:
             if "done" in held:
                 emit("done", held["done"])
             from recon.confidence import bucket_counts
-            all_rows = (summary["accounts"] + summary["variants"]
-                        + summary["name_accounts"])
+            all_rows = recon_rows.all_account_rows(summary)
             n_found = bucket_counts(all_rows)["found"]
             log.info("inv=%d done in %.1fs found=%d rows=%d", inv_id,
                      time.monotonic() - started, n_found, len(all_rows))
@@ -1467,10 +1475,7 @@ if RECON_AVAILABLE:
     # --- investigation intelligence: exposure / timeline / connections -------
 
     def _summary_rows(summary: dict) -> list[dict]:
-        summary = summary or {}
-        return ((summary.get("accounts") or [])
-                + (summary.get("variants") or [])
-                + (summary.get("name_accounts") or []))
+        return recon_rows.all_account_rows(summary or {})
 
     def _all_investigation_idents() -> list[dict]:
         """Load every stored investigation as {id, label, ident} for linking."""
@@ -1849,7 +1854,7 @@ if RECON_AVAILABLE:
         a mock transport runs under the same rules). Identity encoding: httpx
         would inflate a gzip bomb chunk by chunk before our byte cap saw it
         (71 KB → 257 MiB peak in review); at most 3 redirects."""
-        from recon.adapters import USER_AGENT
+        from recon.sources import USER_AGENT
         return {"timeout": AVATAR_TIMEOUT_S, "max_redirects": AVATAR_MAX_REDIRECTS,
                 "headers": {"User-Agent": USER_AGENT, "Accept": "image/*",
                             "Accept-Encoding": "identity"}}

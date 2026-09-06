@@ -42,7 +42,11 @@ _WMN = [
 class _FakeSherlock:
     """Stands in for ``sherlock_project.sherlock.sherlock``: one call per
     (username, site set). Flaky times out on the first pass and is claimed on
-    the retry pass, so the retry is scored as recovered."""
+    the retry pass, so the retry is scored as recovered. Like the real
+    function it returns the per-site dict with ``http_status`` (200 here; a
+    subclass injects a 429 to prove the re-classification)."""
+
+    http_status = {}
 
     def __init__(self):
         self.calls = []
@@ -50,6 +54,7 @@ class _FakeSherlock:
     def __call__(self, username, site_data, notify, timeout=60, proxy=None, **kw):
         self.calls.append(sorted(site_data))
         retry_pass = len(self.calls) > 1
+        ret = {}
         for site, info in site_data.items():
             url = info["url"].format(username)
             if site == "Flaky" and not retry_pass:
@@ -59,12 +64,13 @@ class _FakeSherlock:
                 res = QueryResult(username, site, url, QueryStatus.CLAIMED,
                                   query_time=0.1)
             notify.update(res)
-        return {}
+            ret[site] = {"status": res, "http_status": self.http_status.get(site, 200)}
+        return ret
 
 
 def _fake_wmn_scan(calls):
     async def scan(username, sites, timeout, on_result, proxy=None,
-                   stealth_retry=False):
+                   stealth_retry=False, **kw):
         calls.append([s["name"] for s in sites])
         for s in sites:
             url = s["uri_check"].replace("{account}", username)
@@ -79,7 +85,7 @@ def _fake_wmn_scan(calls):
     return scan
 
 
-async def _fake_adapters_discover(username, stats=None):
+async def _fake_adapters_discover(username, stats=None, **kw):
     if stats is not None:
         stats["GitHub"] = {"kind": "adapter", "status": "exists",
                            "signal": "GitHub public API confirms this account exists",
@@ -92,7 +98,7 @@ async def _fake_adapters_discover(username, stats=None):
              "source_url": f"https://api.github.com/users/{username}"}]
 
 
-async def _fake_detectors_discover(username, stats=None):
+async def _fake_detectors_discover(username, stats=None, **kw):
     if stats is not None:
         stats["Telegram"] = {"kind": "detector", "status": "absent",
                              "signal": "Telegram: no such profile",
@@ -103,7 +109,12 @@ async def _fake_detectors_discover(username, stats=None):
     return []
 
 
-async def _fake_enrich(rows, on_enriched, subject_name=""):
+async def _fake_enrich(rows, on_enriched, subject_name="", stats=None, **kw):
+    if stats is not None:
+        stats.update({"rate_limited_hosts": 0, "rate_limited_rows": 0, "backoff_s": {},
+                      "control_failed_hosts": [], "verify_budget": 120,
+                      "verify_budget_used": len(rows), "verify_budget_skipped": 0,
+                      "stealth_tls": 0, "stealth_browser": 0})
     for row in rows:
         if row["site"] == "GitHub":
             row["verification"] = {"status": "confirmed", "score": 88, "signals": ["stub"]}
@@ -115,16 +126,17 @@ async def _fake_enrich(rows, on_enriched, subject_name=""):
         on_enriched(row, {})
 
 
-async def _fake_correlate(rows):
+async def _fake_correlate(rows, **kw):
     return []
 
 
-def _run(monkeypatch, tmp_path, *, wmn_scan=None, investigation_id=None):
+def _run(monkeypatch, tmp_path, *, wmn_scan=None, investigation_id=None,
+         sherlock=None):
     """Run the pipeline on one username with every engine/pivot stubbed."""
     db = tmp_path / "history.db"
     with db_connect(db) as conn:
         init_tables(conn)
-    fake_sherlock = _FakeSherlock()
+    fake_sherlock = sherlock or _FakeSherlock()
     wmn_calls = []
     monkeypatch.setattr(pipeline, "sherlock", fake_sherlock)
     monkeypatch.setattr(pipeline, "retry_delay", lambda: 0.0)
@@ -168,10 +180,12 @@ def test_run_diagnostics_has_every_key_with_sane_values(monkeypatch, tmp_path):
     assert set(run) >= {
         "planned", "skipped_policy", "skipped_degraded", "errors_by_class",
         "errors_by_engine_class", "failed_checks", "retries", "engine_errors",
-        "signals", "verification_counts", "timings_s", "schema",
+        "signals", "verification_counts", "timings_s", "schema", "retrieval",
         # router.breakdown() fields, including the additive retries_done
         "error_breakdown", "degraded_sources", "retries_done",
     }
+    # G2: nothing is left unrecorded — the retrieval block carries the rest.
+    assert run["not_recorded"] == [] and pipeline.NOT_RECORDED == ()
 
     planned = run["planned"]
     assert planned["sherlock"] == 2            # Instagram removed by policy
@@ -256,7 +270,7 @@ def test_signals_outcomes_are_tallied_and_observed(monkeypatch, tmp_path):
 
 
 def test_engine_crash_is_recorded(monkeypatch, tmp_path):
-    async def boom(username, sites, timeout, on_result, proxy=None, stealth_retry=False):
+    async def boom(username, sites, timeout, on_result, proxy=None, stealth_retry=False, **kw):
         raise RuntimeError("boom")
 
     summary, events, _ctx = _run(monkeypatch, tmp_path, wmn_scan=boom)
@@ -283,6 +297,9 @@ def test_done_event_carries_elapsed_and_retries(monkeypatch, tmp_path):
     assert set(done) >= {"found", "leads", "flagged", "indeterminate", "not_examined",
                          "hits", "clusters", "email_hits", "error_breakdown",
                          "degraded_sources"}
+    # Additive (defect 6): the email-check honesty keys, zero without an email.
+    assert (done["email_checked_ok"], done["email_rate_limited"],
+            done["email_undetermined"]) == (0, 0, False)
     # The plan announced what policy kept every engine away from.
     (skipped,) = _event(events, "skipped_policy")
     assert skipped["count"] == 1 and skipped["sites"][0]["site"] == "Instagram"
@@ -365,3 +382,119 @@ def test_tally_signal_counts_by_outcome_and_keeps_policy_apart():
     pipeline.tally_signal(counts, "X", {"kind": "detector", "status": None})
     assert counts == {"X": {"kind": "detector", "exists": 1, "absent": 1,
                             "blocked": 2, "policy": 1}}
+
+
+# ---------------------------------------------------------------------------
+# G2: the retrieval record and engine re-classification (defect 3)
+# ---------------------------------------------------------------------------
+
+def test_retrieval_record_is_present_and_bounded(monkeypatch, tmp_path):
+    from recon.enrich import STEALTH_BROWSER_BUDGET
+    summary, _events, _ctx = _run(monkeypatch, tmp_path)
+    rec = summary["run"]["retrieval"]
+    assert set(rec) >= {"fetches", "hosts", "hosts_seen", "hosts_backed_off",
+                        "stealth", "detector_stealth", "wmn_stealth", "budgets",
+                        "enrichment"}
+    fetches = rec["fetches"]
+    assert set(fetches) >= {"attempts", "requests", "by_outcome", "by_status_class",
+                            "by_host", "skipped", "ladder", "by_host_truncated"}
+    assert isinstance(fetches["by_status_class"], dict)      # the status histogram
+    assert rec["stealth"]["browser_budget"] == STEALTH_BROWSER_BUDGET
+    assert rec["stealth"]["tls_attempts"] == 0
+    assert rec["detector_stealth"]["sweeps"] == 1             # one signals sweep
+    assert rec["detector_stealth"]["browser_budget"] == detectors.BROWSER_BUDGET
+    assert rec["wmn_stealth"] == {"budget_per_scan": whatsmyname._STEALTH_RETRY_BUDGET,
+                                  "retries": 0, "recovered": 0}
+    budgets = rec["budgets"]
+    assert budgets["verify"] == {"limit": 120, "used": 3, "skipped": 0}   # 3 stub rows
+    assert budgets["stealth_browser"] == {"limit": STEALTH_BROWSER_BUDGET, "used": 0}
+    assert budgets["detector_browser"]["limit_per_sweep"] == detectors.BROWSER_BUDGET
+    assert budgets["wmn_stealth"]["used"] == 0
+    assert "stealth" not in rec["enrichment"]                 # not duplicated
+    assert json.loads(json.dumps(rec)) == rec
+
+
+def test_build_retrieval_record_caps_hosts_and_sums_detector_ladders():
+    from recon import retrieval
+    from recon.ladder import StealthLadder
+    st = retrieval.RetrievalStats()
+    hs = retrieval.HostState()
+    for i in range(pipeline.RETRIEVAL_HOSTS_CAP + 5):
+        host = f"h{i}.example"
+        st.record(retrieval.BLOCKED, 503, host)
+        hs.record(host, retrieval.BLOCKED, 503)
+    hs.backoff("h0.example", 60, status=503)
+    a, b = StealthLadder(3), StealthLadder(3)
+    a.tls_attempts, a.browser_attempts, a.browser_left = 2, 1, 2
+    b.tls_attempts, b.browser_ok = 1, 1
+    rec = pipeline.build_retrieval_record(
+        stats=st, host_state=hs, enrich_stats={"stealth": {"x": 1}, "rate_limited_rows": 3},
+        enrich_ladder=StealthLadder(8), detector_ladders=[a, b],
+        wmn_counters={"stealth_retries": 4, "stealth_recovered": 1}, verify_budget=120)
+    assert len(rec["fetches"]["by_host"]) == pipeline.RETRIEVAL_HOSTS_CAP
+    assert rec["fetches"]["by_host_truncated"] == 5
+    assert len(rec["hosts"]) == pipeline.RETRIEVAL_HOSTS_CAP and rec["hosts_truncated"] == 5
+    assert rec["hosts_seen"] == pipeline.RETRIEVAL_HOSTS_CAP + 5
+    assert rec["hosts_backed_off"] == 1
+    assert rec["detector_stealth"] == {"tls_attempts": 3, "tls_ok": 0, "browser_attempts": 1,
+                                       "browser_ok": 1, "browser_budget": 6,
+                                       "browser_budget_left": 5, "rate_limited": 0,
+                                       "sweeps": 2}
+    assert rec["wmn_stealth"]["retries"] == 4 and rec["budgets"]["wmn_stealth"]["used"] == 4
+    assert rec["enrichment"] == {"rate_limited_rows": 3}
+    assert rec["budgets"]["verify"]["limit"] == 120
+
+
+def test_reclassify_engine_result_matrix():
+    f = pipeline.reclassify_engine_result
+    assert f("Available", "", 429) == ("blocked", "rate limited (HTTP 429)")
+    assert f("Claimed", "", 503) == ("blocked", "rate limited (HTTP 503)")
+    assert f("Claimed", "", 403) == ("blocked", "HTTP 403")
+    assert f("available", "", 429) == ("blocked", "rate limited (HTTP 429)")
+    # Successes with a readable status, errors of any kind, and unknown
+    # statuses pass through untouched.
+    assert f("Claimed", "", 200) == ("Claimed", "")
+    assert f("Available", "", 404) == ("Available", "")
+    assert f("Unknown", "Timeout Error", 429) == ("Unknown", "Timeout Error")
+    assert f("Claimed", "", None) == ("Claimed", "")
+    assert f("Claimed", "", "") == ("Claimed", "")          # maigret's error branch
+    assert f("Claimed", "", True) == ("Claimed", "")
+
+
+def test_sherlock_notify_observes_after_flush_with_the_http_status():
+    """Sherlock's QueryResult has no http_status: the observation waits for
+    the returned dict and a 429 labelled Available is filed as http_429."""
+    from recon.router import RunRouter
+    router = RunRouter(None)
+    notify = pipeline._SherlockNotify("alice", {"kind": "base"},
+                                      lambda *a: None, router)
+    notify.update(QueryResult("alice", "Limited", "https://l.example/alice",
+                              QueryStatus.AVAILABLE, query_time=0.1))
+    notify.update(QueryResult("alice", "Fine", "https://f.example/alice",
+                              QueryStatus.CLAIMED, query_time=0.1))
+    assert router.observations == 0, "nothing observed before flush"
+    n = notify.flush({"Limited": {"http_status": 429}, "Fine": {"http_status": 200}})
+    assert n == 2 and notify.pending == []
+    assert router.observations == 2 and router.error_observations == 1
+    assert dict(router.error_counts) == {"http_429": 1}
+    assert [c["site"] for c in router.failed_checks] == ["Limited"]
+    assert router.failed_checks[0]["context"] == "rate limited (HTTP 429)"
+    # A flush with no results (the scan raised) still observes, unchanged.
+    notify.update(QueryResult("alice", "Other", "u", QueryStatus.AVAILABLE))
+    assert notify.flush(None) == 1 and router.observations == 3
+
+
+def test_stubbed_sherlock_429_is_observed_as_a_block(monkeypatch, tmp_path):
+    class _Limited(_FakeSherlock):
+        http_status = {"GitHub": 429}
+
+    summary, _events, ctx = _run(monkeypatch, tmp_path, sherlock=_Limited())
+    run = summary["run"]
+    assert run["errors_by_engine_class"]["sherlock"] == {"timeout": 1, "http_429": 1}
+    assert {"engine": "sherlock", "site": "GitHub", "username": "alice",
+            "class": "http_429", "context": "rate limited (HTTP 429)"} in run["failed_checks"]
+    rows = {(r["site"], r["engine"]): r for r in SiteHealthStore(ctx.db).all_rows()}
+    assert rows[("GitHub", "sherlock")]["window"][0]["class"] == "http_429"
+    # The engine's own "found" still streamed; verification is where the row
+    # is judged (a 429 host is rate_limited there).
+    assert "GitHub" in {r["site"] for r in summary["accounts"]}

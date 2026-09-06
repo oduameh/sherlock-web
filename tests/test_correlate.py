@@ -80,27 +80,22 @@ def test_average_hash_rejects_images_over_the_pixel_cap_below_pillows_threshold(
 
 # --- F-2: avatar downloads obey the access policy ----------------------------
 
-def test_download_avatars_never_fetches_denied_hosts(monkeypatch):
+def test_download_avatars_never_fetches_denied_hosts(monkeypatch, public_dns):
     """``og:image`` frequently points at pbs.twimg.com, a denied host; the
     downloader must make zero client calls for it while still fetching a
-    permitted avatar (proving the stub is live)."""
-    from recon import correlate
+    permitted avatar (proving the stub is live). The download is
+    ``recon.retrieval.fetch(kind="bytes")`` over the guarded client (G2)."""
+    import httpx
+    from conftest import mock_client
+    from recon import correlate, retrieval
 
-    class _Client:
-        async def __aenter__(self):
-            return self
+    fetched: list = []
 
-        async def __aexit__(self, *a):
-            return False
+    def handler(req):
+        return httpx.Response(200, headers={"content-type": "image/png"},
+                              content=_png_bytes(120))
 
-    fetched: list[str] = []
-
-    async def fake_fetch_capped(client, url, max_bytes):
-        fetched.append(url)
-        return _png_bytes(120)
-
-    monkeypatch.setattr(correlate.safeweb, "async_client", lambda **k: _Client())
-    monkeypatch.setattr(correlate.safeweb, "fetch_capped", fake_fetch_capped)
+    monkeypatch.setattr(correlate.safeweb, "async_client", mock_client(handler, fetched))
 
     denied_row = {"site": "X", "username": "a",
                   "enrichment": {"og_image": "https://scontent.cdninstagram.com/v/t51/1/x.jpg"}}
@@ -108,10 +103,37 @@ def test_download_avatars_never_fetches_denied_hosts(monkeypatch):
                    "enrichment": {"jsonld_image": "https://i.redd.it/abc123.jpg"}}
     ok_row = {"site": "GitHub", "username": "a",
               "enrichment": {"og_image": "https://avatars.githubusercontent.com/u/1?v=4"}}
-    asyncio.run(correlate._download_avatars([denied_row, denied_row2, ok_row]))
-    assert fetched == ["https://avatars.githubusercontent.com/u/1?v=4"]
+    # platform_identity.avatar outranks the page's og:image (recon.rows).
+    ident_row = {"site": "Bluesky", "username": "a",
+                 "platform_identity": {"avatar": "https://cdn.bsky.app/img/a.png"},
+                 "enrichment": {"og_image": "https://cdn.bsky.app/img/og.png"}}
+    st = retrieval.RetrievalStats()
+    asyncio.run(correlate._download_avatars([denied_row, denied_row2, ok_row, ident_row],
+                                            stats=st))
+    assert [str(r.url) for r in fetched] == ["https://avatars.githubusercontent.com/u/1?v=4",
+                                             "https://cdn.bsky.app/img/a.png"]
     assert "avatar_hash" not in denied_row and "avatar_hash" not in denied_row2
     assert ok_row.get("avatar_hash") is not None
+    assert ident_row.get("avatar_hash") is not None
+    assert st.snapshot()["by_outcome"]["ok"] == 2
+
+
+def test_download_avatars_drops_oversized_and_blocked_bodies(monkeypatch, public_dns):
+    import httpx
+    from conftest import mock_client
+    from recon import correlate
+
+    def handler(req):
+        if req.url.path.endswith("/big.png"):
+            return httpx.Response(200, headers={"content-type": "image/png"},
+                                  content=b"\x89PNG" + b"0" * (correlate.AVATAR_MAX_BYTES + 1))
+        return httpx.Response(429)
+
+    monkeypatch.setattr(correlate.safeweb, "async_client", mock_client(handler))
+    big = {"site": "A", "username": "a", "enrichment": {"og_image": "https://img.example/big.png"}}
+    limited = {"site": "B", "username": "b", "enrichment": {"og_image": "https://img.example/x.png"}}
+    asyncio.run(correlate._download_avatars([big, limited]))
+    assert "avatar_hash" not in big and "avatar_hash" not in limited
 
 
 def test_download_avatars_all_denied_opens_no_client(monkeypatch):

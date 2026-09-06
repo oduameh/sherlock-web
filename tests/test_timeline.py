@@ -210,3 +210,25 @@ def test_module_cache_is_used_by_default_and_clearable():
     _dates(rows, _gh_user, calls)
     assert len(calls) == 2
     timeline.clear_cache()
+
+
+# --- G2: the adapter answer cache is consulted before any GitHub fetch -------------------
+
+def test_adapter_cache_answers_before_a_fetch(monkeypatch):
+    from recon import adapters
+    adapters.clear_cache()
+    adapters._CACHE.set(adapters.cache_key("github", "alice"),
+                        {"adapter": "GitHub", "status": adapters.EXISTS,
+                         "temporal": {"created_at": "2011-01-25T18:44:36Z"}})
+    adapters._CACHE.set(adapters.cache_key("github", "ghost"),
+                        {"adapter": "GitHub", "status": adapters.ABSENT})
+    rows = [{"site": "GitHub", "url": "https://github.com/Alice"},
+            {"site": "GitHub", "url": "https://github.com/ghost"},
+            {"site": "GitHub", "url": "https://github.com/unknown"}]
+    calls = []
+    dates = _dates(rows, _gh_user, calls, cache=TTLCache())
+    assert dates["https://github.com/Alice"] == "2011-01-25T18:44:36Z"
+    assert "https://github.com/ghost" not in dates
+    assert dates["https://github.com/unknown"].startswith("2011-01-25T18:44:36Z#unknown")
+    assert calls == ["/users/unknown"], "only the login the adapter cache lacks is fetched"
+    adapters.clear_cache()

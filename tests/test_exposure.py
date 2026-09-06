@@ -118,3 +118,28 @@ def test_real_name_signal_prefers_platform_identity():
                                              "avatar": "https://p/a.png"}
     sig = exposure_summary(s)["identity_signals"]
     assert sig["display_names"] == ["Alice Real"] and sig["has_avatar"] is True
+
+
+# --- G2: holehe honesty (defect 6) ---------------------------------------------------
+
+def test_undetermined_email_checks_are_said_not_implied_none():
+    s = _summary()
+    s["email"]["holehe"] = [{"site": f"s{i}", "exists": False, "rate_limit": True}
+                            for i in range(100)]
+    exp = exposure_summary(s)
+    c = exp["counts"]
+    assert c["email_registrations"] == 0
+    assert (c["email_checks"], c["email_checks_ok"], c["email_checks_undetermined"]) == (100, 0, True)
+    assert any("could not be determined" in f and "100 of 100" in f for f in exp["factors"])
+    assert not any(f.startswith("email registered") for f in exp["factors"])
+    # The score's email part is zero: nothing was established either way.
+    parts = footprint_score(s)["parts"]
+    assert parts["email registrations (0 × 5, cap 25)"] == 0
+
+
+def test_answered_email_checks_with_no_hit_make_no_undetermined_claim():
+    s = _summary()
+    s["email"]["holehe"] = [{"site": "a", "exists": False}, {"site": "b", "exists": False}]
+    exp = exposure_summary(s)
+    assert exp["counts"]["email_checks_undetermined"] is False
+    assert not any("could not be determined" in f for f in exp["factors"])
