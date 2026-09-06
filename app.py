@@ -155,13 +155,35 @@ MAX_ALERT_IDS = 500
 _JSON_POST_PATHS = ("/api/investigate", "/api/watchlist", "/api/alerts/mark_seen")
 
 
+def _raw_host(request: Request) -> str:
+    """The Host header as the browser sent it (lower-cased, no userinfo
+    tricks): `evil.example@localhost` must not parse as `localhost`."""
+    host = request.headers.get("host", "").strip().lower()
+    if "@" in host or "/" in host or " " in host:
+        return ""
+    return host
+
+
+def _host_only(netloc: str) -> str:
+    """Hostname without port; IPv6 brackets removed. A bare IPv6 address
+    (`::1`, no brackets, no port) is returned whole — splitting it at the
+    first colon produced "", which then matched the empty host that the
+    userinfo trick (`evil.example@localhost`) reduces to."""
+    netloc = netloc.strip().lower()
+    if netloc.startswith("["):
+        return netloc[1:netloc.find("]")] if "]" in netloc else ""
+    if netloc.count(":") > 1:
+        return netloc
+    return netloc.split(":", 1)[0]
+
+
 def _allowed_hosts() -> set:
     raw = os.environ.get("APP_ALLOWED_HOSTS")
     if raw is None:
         # A deployment (password gate configured) serves on a public hostname we
         # cannot know; a local run is loopback only.
         return {"*"} if os.environ.get("APP_PASSWORD") else {"localhost", "127.0.0.1", "::1"}
-    return {h.strip().lower().strip("[]") for h in raw.split(",") if h.strip()}
+    return {_host_only(h) for h in raw.split(",") if h.strip()} - {""}
 
 
 ALLOWED_HOSTS = _allowed_hosts()
@@ -170,16 +192,17 @@ if "*" in ALLOWED_HOSTS:
         "APP_ALLOWED_HOSTS is open (*): set it to the public hostname of this deployment")
 
 
-def _starts_a_scan(method: str, path: str) -> bool:
-    """GETs that start network activity get the same cross-site protection as
-    state-changing methods."""
-    return method == "GET" and (
-        path == "/api/search/stream"
-        or (path.startswith("/api/investigate/") and path.endswith("/stream")))
+# GETs that only read the database. Everything else under /api/ either writes
+# or starts network activity toward third parties (scans, pivots, reports that
+# re-query GitHub/Nominatim/Cavalier) and gets the cross-site guard. An
+# allow-list, not a deny-list: a new endpoint is protected by default.
+_PURE_READ_RE = re.compile(
+    r"^/api/(?:history(?:/\d+)?|sites|health(?:/sources)?|watchlist|alerts|godseye/status"
+    r"|investigate/\d+(?:/graph|/exposure|/connections)?)$")
 
 
-def _request_origin_host(request: Request) -> str:
-    return (request.url.hostname or "").lower()
+def _is_pure_read(method: str, path: str) -> bool:
+    return method == "GET" and bool(_PURE_READ_RE.match(path))
 
 
 def _cross_site_reason(request: Request) -> str | None:
@@ -191,10 +214,12 @@ def _cross_site_reason(request: Request) -> str | None:
     if origin and origin != "null":
         try:
             from urllib.parse import urlsplit
-            ohost = (urlsplit(origin).hostname or "").lower()
+            onetloc = (urlsplit(origin).netloc or "").lower()
         except Exception:
-            ohost = ""
-        if ohost != _request_origin_host(request):
+            onetloc = ""
+        # Host and port must both match: a page served from localhost:4173
+        # (God's Eye) is not this console on localhost:8420.
+        if not onetloc or onetloc != _raw_host(request):
             return f"Origin {origin} is not this console"
     elif origin == "null":
         return "opaque Origin"
@@ -205,11 +230,12 @@ def _cross_site_reason(request: Request) -> str | None:
 async def request_protection(request: Request, call_next):
     path = request.url.path
     # 1. Host header allow-list (DNS rebinding sends a foreign Host to our port).
-    if "*" not in ALLOWED_HOSTS and _request_origin_host(request) not in ALLOWED_HOSTS:
+    host = _host_only(_raw_host(request))
+    if "*" not in ALLOWED_HOSTS and (not host or host not in ALLOWED_HOSTS):
         return JSONResponse({"error": "unexpected Host header"}, status_code=400)
     if path.startswith("/api/"):
-        # 2. No cross-site writes or scan starts.
-        if request.method != "GET" or _starts_a_scan(request.method, path):
+        # 2. No cross-site writes, scan starts or third-party pivots.
+        if not _is_pure_read(request.method, path):
             why = _cross_site_reason(request)
             if why:
                 return JSONResponse({"error": f"cross-site request refused ({why})"},
@@ -261,18 +287,26 @@ def _content_security_policy() -> str:
 APP_PASSWORD = os.environ.get("APP_PASSWORD") or None
 
 
+def _is_authorized(request: Request) -> bool:
+    if APP_PASSWORD is None:
+        return True
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(auth[6:], validate=True).decode("utf-8")
+            _, _, password = decoded.partition(":")
+            return secrets.compare_digest(password, APP_PASSWORD)
+        except Exception:
+            return False
+    return False
+
+
 @app.middleware("http")
 async def basic_auth_gate(request: Request, call_next):
-    if APP_PASSWORD is not None:
-        authorized = False
-        auth = request.headers.get("authorization", "")
-        if auth.startswith("Basic "):
-            try:
-                decoded = base64.b64decode(auth[6:], validate=True).decode("utf-8")
-                _, _, password = decoded.partition(":")
-                authorized = secrets.compare_digest(password, APP_PASSWORD)
-            except Exception:
-                authorized = False
+    # /api/health stays reachable for the platform health check (it answers
+    # with liveness only when unauthenticated).
+    if APP_PASSWORD is not None and request.url.path != "/api/health":
+        authorized = _is_authorized(request)
         if not authorized:
             return Response(
                 "Unauthorized",
@@ -803,6 +837,10 @@ async def search_stream(
             iter(['event: fatal\ndata: {"message": "no usernames given"}\n\n']),
             media_type="text/event-stream",
         )
+    if len(names) > MAX_USERNAMES_PER_REQUEST:
+        return JSONResponse(
+            {"error": f"at most {MAX_USERNAMES_PER_REQUEST} usernames per scan"},
+            status_code=400)
 
     # Build the site subset; empty selection = all sites. Case-insensitive.
     selected = {s.strip().lower() for s in sites.split(",") if s.strip()}
@@ -904,6 +942,18 @@ if RECON_AVAILABLE:
         to raise inside the handler and answer 500 with a stack trace."""
         try:
             raw = await request.body()
+        except Exception:
+            return None, JSONResponse({"error": "unreadable body"}, status_code=400)
+        # Chunked uploads carry no Content-Length, so the middleware could not
+        # size or type them; enforce both here as well.
+        if len(raw) > MAX_BODY_BYTES:
+            return None, JSONResponse({"error": "request body too large"}, status_code=413)
+        if raw.strip():
+            ctype = request.headers.get("content-type", "").split(";")[0].strip().lower()
+            if ctype != "application/json":
+                return None, JSONResponse({"error": "Content-Type must be application/json"},
+                                          status_code=415)
+        try:
             data = json.loads(raw) if raw.strip() else ({} if allow_empty else None)
         except Exception:
             return None, JSONResponse({"error": "invalid JSON body"}, status_code=400)
@@ -918,57 +968,19 @@ if RECON_AVAILABLE:
                 {"error": f"invalid field {loc}: {first.get('msg', 'invalid')}"},
                 status_code=400)
 
-    @app.get("/api/health")
-    def health() -> JSONResponse:
-        """Process health for operators and the platform health check: is the
-        database reachable, which optional engines are present, is the stealth
-        browser alive, how many investigations are in flight."""
-        db_ok = True
-        counts: dict = {}
-        try:
-            with db_connect(DB_PATH) as conn:
-                conn.execute("SELECT 1").fetchone()
-                for status, n in conn.execute(
-                        "SELECT status, COUNT(*) FROM investigations GROUP BY status"):
-                    counts[status] = n
-        except Exception:
-            db_ok = False
-        try:
-            from recon import stealthweb
-            stealth = {"enabled": stealthweb.enabled(),
-                       "tier3_dead": bool(getattr(stealthweb, "_session_dead", False))}
-        except Exception:
-            stealth = {"enabled": False, "tier3_dead": None}
-        deps = {"maigret": recon_engines.maigret_available(),
-                "holehe": holehe_available()}
-        try:
-            from recon.phone_accounts import ignorant_available
-            deps["ignorant"] = ignorant_available()
-        except Exception:
-            deps["ignorant"] = False
-        body = {
-            "ok": db_ok,
-            "db_ok": db_ok,
-            "backend": "postgres" if dbconn.IS_POSTGRES else "sqlite",
-            "commit": APP_COMMIT,
-            "uptime_s": int(time.time() - APP_STARTED_AT),
-            "investigations": counts,
-            "in_flight": counts.get("running", 0),
-            "max_concurrent": MAX_CONCURRENT_INVESTIGATIONS,
-            "deps": deps,
-            "stealth": stealth,
-            "sites": {"sherlock": len(SITE_DATA_ALL), "source": SITES_SOURCE},
-        }
-        return JSONResponse(body, status_code=200 if db_ok else 503)
-
     @app.delete("/api/investigate/{inv_id}")
     def delete_investigation(inv_id: int) -> JSONResponse:
         """Remove a case and its history rows (subject data retention, F-5)."""
         with db_connect(DB_PATH) as conn:
-            row = conn.execute("SELECT id FROM investigations WHERE id = ?",
+            row = conn.execute("SELECT id, status FROM investigations WHERE id = ?",
                                (inv_id,)).fetchone()
             if row is None:
                 return JSONResponse({"error": "not found"}, status_code=404)
+            if row[1] == "running":
+                # The pipeline would keep running and re-create an orphan
+                # history row; stop the stream first (it cancels the run).
+                return JSONResponse({"error": "investigation is running; stop it first",
+                                     "status": "running"}, status_code=409)
             conn.execute("DELETE FROM runs WHERE investigation_id = ?", (inv_id,))
             conn.execute("DELETE FROM investigations WHERE id = ?", (inv_id,))
         return JSONResponse({"deleted": inv_id})
@@ -1617,8 +1629,8 @@ if RECON_AVAILABLE:
             )
         label = body.label.strip() or (
             ", ".join(usernames) or inputs["email"] or inputs["name"])
-        interval = max(recon_monitor.MIN_INTERVAL_HOURS,
-                       int(body.interval_hours or recon_monitor.DEFAULT_INTERVAL_HOURS))
+        interval = min(24 * 365, max(recon_monitor.MIN_INTERVAL_HOURS,
+                                     int(body.interval_hours or recon_monitor.DEFAULT_INTERVAL_HOURS)))
         with db_connect(DB_PATH) as conn:
             watch_id = insert_returning_id(
                 conn,
@@ -1695,6 +1707,60 @@ if RECON_AVAILABLE:
 
     # The background watchlist monitor is started from the app lifespan handler
     # (see ``lifespan`` above), which also cancels it cleanly on shutdown.
+
+# ---------------------------------------------------------------------------
+# Process health (always registered, never behind the password gate)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/health")
+def health(request: Request) -> JSONResponse:
+    """Process health for operators and the platform health check: is the
+    database reachable, which optional engines are present, is the stealth
+    browser alive, how many investigations are in flight."""
+    db_ok = True
+    counts: dict = {}
+    try:
+        with db_connect(DB_PATH) as conn:
+            conn.execute("SELECT 1").fetchone()
+            for status, n in conn.execute(
+                    "SELECT status, COUNT(*) FROM investigations GROUP BY status"):
+                counts[status] = n
+    except Exception:
+        db_ok = False
+    try:
+        from recon import stealthweb
+        stealth = {"enabled": stealthweb.enabled(),
+                   "tier3_dead": bool(getattr(stealthweb, "_session_dead", False))}
+    except Exception:
+        stealth = {"enabled": False, "tier3_dead": None}
+    deps: dict = {"recon": RECON_AVAILABLE}
+    if RECON_AVAILABLE:
+        deps["maigret"] = recon_engines.maigret_available()
+        deps["holehe"] = holehe_available()
+        try:
+            from recon.phone_accounts import ignorant_available
+            deps["ignorant"] = ignorant_available()
+        except Exception:
+            deps["ignorant"] = False
+    body = {
+        "ok": db_ok,
+        "db_ok": db_ok,
+        "backend": "postgres" if dbconn.IS_POSTGRES else "sqlite",
+        "commit": APP_COMMIT,
+        "uptime_s": int(time.time() - APP_STARTED_AT),
+        "investigations": counts,
+        "in_flight": counts.get("running", 0),
+        "max_concurrent": globals().get("MAX_CONCURRENT_INVESTIGATIONS"),
+        "deps": deps,
+        "stealth": stealth,
+        "sites": {"sherlock": len(SITE_DATA_ALL), "source": SITES_SOURCE},
+    }
+    if APP_PASSWORD is not None and not _is_authorized(request):
+        # A platform health check must work without credentials, but an
+        # unauthenticated caller learns only liveness.
+        body = {"ok": db_ok, "db_ok": db_ok, "uptime_s": body["uptime_s"]}
+    return JSONResponse(body, status_code=200 if db_ok else 503)
+
 
 # ---------------------------------------------------------------------------
 # Frontend

@@ -478,3 +478,76 @@ def test_database_file_is_private():
     import stat
     mode = stat.S_IMODE(os.stat(appmod.DB_PATH).st_mode)
     assert mode & 0o077 == 0, oct(mode)
+
+
+# --- H1 review probes ---------------------------------------------------------------
+
+def test_network_starting_get_pivots_are_cross_site_protected(client):
+    for path in ("/api/brokers?name=x", "/api/domain?domain=example.com",
+                 "/api/investigate/1/breach", "/api/investigate/1/footprint",
+                 "/api/investigate/1/timeline", "/api/investigate/1/report"):
+        r = client.get(path, headers={"Sec-Fetch-Site": "cross-site"})
+        assert r.status_code == 403, path
+    for path in ("/api/history", "/api/sites", "/api/health", "/api/watchlist",
+                 "/api/alerts", "/api/investigate/1", "/api/investigate/1/graph"):
+        r = client.get(path, headers={"Sec-Fetch-Site": "cross-site"})
+        assert r.status_code != 403, path
+
+
+def test_origin_port_must_match_the_console(client):
+    r = client.post("/api/investigate", json={"usernames": "alice"},
+                    headers={"Origin": "http://testserver:4173"})
+    assert r.status_code == 403
+    r = client.post("/api/investigate", json={"usernames": "alice"},
+                    headers={"Origin": "http://testserver"})
+    assert r.status_code == 200
+
+
+def test_host_header_userinfo_trick_is_refused(client):
+    r = client.get("/api/history", headers={"Host": "evil.example@testserver"})
+    assert r.status_code == 400
+
+
+def test_quick_scan_username_cap(client):
+    names = ",".join(f"u{i}" for i in range(21))
+    r = client.get(f"/api/search/stream?usernames={names}")
+    assert r.status_code == 400 and "at most" in r.json()["error"]
+
+
+def test_chunked_bodies_are_still_limited(client):
+    def gen():
+        yield b"x" * (70 * 1024)
+    r = client.post("/api/investigate", content=gen(), headers={"content-type": "application/json"})
+    assert r.status_code == 413
+
+    def gen2():
+        yield b'{"usernames": "alice"}'
+    r = client.post("/api/investigate", content=gen2(), headers={"content-type": "text/plain"})
+    assert r.status_code == 415
+
+
+def test_delete_refuses_a_running_investigation(client):
+    iid = _pending(client)
+    assert appmod._claim_investigation(iid)
+    r = client.delete(f"/api/investigate/{iid}")
+    assert r.status_code == 409 and r.json()["status"] == "running"
+
+
+def test_health_is_reachable_without_credentials_when_a_password_is_set(monkeypatch):
+    monkeypatch.setattr(appmod, "APP_PASSWORD", "s3cret")
+    with TestClient(appmod.app) as c:
+        r = c.get("/api/health")
+        assert r.status_code == 200 and set(r.json()) == {"ok", "db_ok", "uptime_s"}
+        assert c.get("/api/history").status_code == 401
+        import base64
+        tok = base64.b64encode(b"x:s3cret").decode()
+        full = c.get("/api/health", headers={"Authorization": f"Basic {tok}"}).json()
+        assert "investigations" in full and "deps" in full
+
+
+def test_allowed_hosts_parsing_handles_ipv6_and_ports():
+    assert appmod._host_only("[::1]:8420") == "::1"
+    assert appmod._host_only("::1") == "::1"                  # bare IPv6 is not split
+    assert appmod._host_only("LocalHost:8420") == "localhost"
+    assert appmod._host_only("127.0.0.1") == "127.0.0.1"
+    assert "" not in appmod.ALLOWED_HOSTS
