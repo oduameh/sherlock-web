@@ -1,3 +1,5 @@
+import pytest
+
 from recon.verify import CONTROL_HANDLE, verify_username
 
 
