@@ -9,9 +9,10 @@
 <meta name="theme-color" content="#0a0c0a">
 <link rel="icon" type="image/png" href="/static/icons/icon-192.png">
 <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+<!-- Fonts are self-hosted (static/vendor/fonts, declared in app.css): an OSINT
+     console must not announce every page view to a third party. -->
+<link rel="preload" as="font" type="font/woff2" crossorigin href="/static/vendor/fonts/jetbrainsmono-latin-normal-wght.woff2">
+<link rel="preload" as="font" type="font/woff2" crossorigin href="/static/vendor/fonts/inter-latin-normal-wght.woff2">
 <link rel="stylesheet" href="/static/css/app.css">
 </head>
 <body>
@@ -435,9 +436,15 @@
   <!-- ============ GOD'S EYE VIEW (geospatial workspace) ============ -->
   <main id="tabGodseye" class="page" role="tabpanel" aria-label="God's Eye View">
     <div id="gevWrap">
+      <!-- Sandboxed: the globe runs its own scripts, storage and fetches
+           (allow-same-origin on ITS origin), submits its own forms and may
+           open links in a tab; it cannot navigate this console or run
+           plugins. No microphone: nothing here uses voice — God's Eye's
+           optional voice control is available via "Open in new tab". -->
       <iframe id="gevFrame" title="God's Eye View" hidden
               referrerpolicy="no-referrer"
-              allow="microphone; xr-spatial-tracking; fullscreen"></iframe>
+              sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+              allow="xr-spatial-tracking; fullscreen"></iframe>
       <div id="gevSetup" class="gev-setup">
         <div class="gev-setup-card">
           <h2>God&rsquo;s Eye View <span class="gev-badge">geospatial</span></h2>

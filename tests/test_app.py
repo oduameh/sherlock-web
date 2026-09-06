@@ -589,3 +589,69 @@ def test_legacy_report_route_redirects_investigation_rows(client):
         run_id = conn.execute("SELECT id FROM runs WHERE investigation_id = ?", (iid,)).fetchone()[0]
     r = client.get(f"/api/recon/report/{run_id}", follow_redirects=False)
     assert r.status_code == 307 and r.headers["location"] == f"/api/investigate/{iid}/report"
+
+
+# --- Increment H2: OPSEC and third-party hygiene ------------------------------
+
+def test_console_makes_no_third_party_font_requests_and_sandboxes_the_globe(client):
+    """F-11: Google Fonts used to be fetched on every page view. F-10: the
+    God's Eye iframe delegated the microphone and had no sandbox."""
+    html = client.get("/").text
+    assert "fonts.googleapis.com" not in html and "fonts.gstatic.com" not in html
+    iframe = html[html.index("<iframe id=\"gevFrame\""):]
+    iframe = iframe[:iframe.index("</iframe>")]
+    assert 'sandbox="allow-scripts allow-same-origin allow-forms allow-popups"' in iframe
+    assert "microphone" not in iframe
+    assert 'referrerpolicy="no-referrer"' in iframe
+    # The self-hosted faces are declared by the stylesheet, not a remote one.
+    css = client.get("/static/css/app.css").text
+    assert "fonts.googleapis.com" not in css
+    assert css.count("@font-face") == 13
+    assert "font-display: swap" in css
+
+
+def test_csp_blocks_direct_third_party_images_and_fonts(client):
+    """V11: with avatars proxied, the only image host a page may load directly
+    is the OpenStreetMap basemap; fonts and styles are same-origin."""
+    csp = client.get("/").headers["Content-Security-Policy"]
+    directives = {d.split(" ", 1)[0]: d.split(" ", 1)[1] if " " in d else ""
+                  for d in (x.strip() for x in csp.split(";")) if d}
+    assert directives["img-src"] == "'self' data: blob: https://tile.openstreetmap.org"
+    assert directives["font-src"] == "'self' data:"
+    assert directives["style-src"] == "'self' 'unsafe-inline'"
+    assert "googleapis" not in csp and "gstatic" not in csp
+    assert "*" not in directives["img-src"]
+
+
+def test_vendored_fonts_are_served_and_match_their_recorded_hashes(client):
+    """Provenance: every font file recorded in static/vendor/README-webgl.md
+    exists, is served as woff2, and hashes to the value in the table."""
+    import hashlib
+    import re
+    readme = (appmod.STATIC_DIR / "vendor" / "README-webgl.md").read_text()
+    rows = re.findall(r"^\| (fonts/[^ |]+\.woff2) \|.*`([0-9a-f]{64})` \|$", readme, re.M)
+    assert len(rows) == 13
+    for rel, digest in rows:
+        path = appmod.STATIC_DIR / "vendor" / rel
+        assert path.is_file(), rel
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == digest, rel
+        r = client.get(f"/static/vendor/{rel}")
+        assert r.status_code == 200 and r.headers["content-type"] == "font/woff2", rel
+        assert r.content[:4] == b"wOF2", rel
+    # And the stylesheet references exactly those files.
+    css = (appmod.STATIC_DIR / "css" / "app.css").read_text()
+    referenced = set(re.findall(r"url\(/static/vendor/(fonts/[^)]+\.woff2)\)", css))
+    assert referenced == {rel for rel, _ in rows}
+
+
+def test_avatar_proxy_is_registered_behind_the_cross_site_guard(client):
+    """It starts network activity toward the subject's host, so a cross-site
+    page may not use the console as an open image proxy."""
+    assert not appmod._is_pure_read("GET", "/api/avatar")
+    r = client.get("/api/avatar?u=https%3A%2F%2Fcdn.example%2Fa.png",
+                   headers={"Sec-Fetch-Site": "cross-site"})
+    assert r.status_code == 403
+    # Refusals that need no network answer offline.
+    assert client.get("/api/avatar?u=javascript%3Aalert(1)").status_code == 400
+    r = client.get("/api/avatar?u=https%3A%2F%2Fwww.instagram.com%2Fx.jpg")
+    assert r.status_code == 403 and "access policy" in r.json()["error"]

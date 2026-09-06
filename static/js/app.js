@@ -146,6 +146,17 @@
     return el;
   }
 
+  // Remote avatars (og:image, JSON-LD, Gravatar, graph nodes) never load
+  // straight from the analyst's browser: the subject's host would see the
+  // analyst's IP and browser at viewing time. The server relays them instead
+  // (/api/avatar: honest User-Agent, SSRF-guarded, policy-gated, 2 MiB cap,
+  // cached) and answers 502/415 when it cannot, which the <img> onerror hides.
+  // Anything that is not an http(s) URL gets no image at all.
+  function avatarUrl(u) {
+    var safe = safeHttp(u);
+    return safe ? "/api/avatar?u=" + encodeURIComponent(safe) : null;
+  }
+
   // "YYYY-MM-DD HH:MM:SS" (server-local) -> "5m ago" style relative time.
   // Falls back to the raw string when the timestamp can't be parsed.
   function relTime(ts) {
@@ -1269,8 +1280,8 @@
     div.className = "enrich";
     if (img) {
       var im = document.createElement("img");
-      im.src = img; im.alt = ""; im.loading = "lazy";
-      im.onerror = function () { im.style.display = "none"; };
+      im.src = avatarUrl(img); im.alt = ""; im.loading = "lazy";
+      im.onerror = function () { im.style.display = "none"; };   // proxy said 502/415/403
       div.appendChild(im);
     }
     var txt = document.createElement("div");
@@ -1324,11 +1335,11 @@
     } else {
       var div = document.createElement("div");
       div.className = "enrich";
-      var avatarUrl = safeHttp(profile.avatar_url);
-      if (avatarUrl) {
+      var gravatarSrc = avatarUrl(profile.avatar_url);
+      if (gravatarSrc) {
         var im = document.createElement("img");
-        im.src = avatarUrl; im.alt = "";
-        im.onerror = function () { im.style.display = "none"; };
+        im.src = gravatarSrc; im.alt = ""; im.loading = "lazy";
+        im.onerror = function () { im.style.display = "none"; };   // proxy said 502/415/403
         div.appendChild(im);
       }
       var txt = document.createElement("div");
@@ -2436,6 +2447,24 @@
     }
   }
 
+  // Card avatars go through the proxy too. A CSS background-image has no
+  // onerror, so probe with an Image first and keep the initial letter when the
+  // proxy answers 502/415 (upstream failed or was not an image). Remembered
+  // per proxied URL so a card rebuilt on scroll does not probe again.
+  var cgAvatarState = {};   // proxied url -> "ok" | "bad"
+  function cgSetCardAvatar(av, node, accent) {
+    av.textContent = (node.label || node.id || "?").slice(0, 1).toUpperCase();
+    av.style.color = accent;
+    var src = avatarUrl(node.avatar);
+    if (!src || cgAvatarState[src] === "bad") return;
+    function apply() { av.textContent = ""; av.style.backgroundImage = 'url("' + src + '")'; }
+    if (cgAvatarState[src] === "ok") { apply(); return; }
+    var probe = new Image();
+    probe.onload = function () { cgAvatarState[src] = "ok"; apply(); };
+    probe.onerror = function () { cgAvatarState[src] = "bad"; };
+    probe.src = src;
+  }
+
   function cgBuildCard(node) {
     var tier = (node.type === "account" && node.tier) ? CG_TIER[node.tier] : null;
     var accent = tier ? tier.color : (NODE_COLORS[node.type] || "#8b968a");
@@ -2445,13 +2474,7 @@
 
     var av = document.createElement("div");
     av.className = "cg-card-av";
-    var avatarUrl = safeHttp(node.avatar);
-    if (avatarUrl) {
-      av.style.backgroundImage = 'url("' + avatarUrl + '")';
-    } else {
-      av.textContent = (node.label || node.id || "?").slice(0, 1).toUpperCase();
-      av.style.color = accent;
-    }
+    cgSetCardAvatar(av, node, accent);
     el.appendChild(av);
 
     var main = document.createElement("div");

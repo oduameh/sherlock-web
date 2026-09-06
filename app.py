@@ -313,10 +313,16 @@ def _content_security_policy() -> str:
             frame_src = f"{g.scheme}://{g.netloc}"
     except Exception:
         pass
+    # Fonts are self-hosted (static/vendor/fonts) and remote avatars go through
+    # /api/avatar, so the only third-party resource a page may load directly is
+    # the OpenStreetMap basemap of the footprint map (a documented load; see
+    # README "Data sent to third parties"). A subject-controlled image URL that
+    # bypassed the proxy is now blocked by the browser, not merely discouraged.
     return ("default-src 'self'; script-src 'self'; "
-            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-            "font-src 'self' https://fonts.gstatic.com data:; "
-            "img-src * data: blob:; connect-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "font-src 'self' data:; "
+            "img-src 'self' data: blob: https://tile.openstreetmap.org; "
+            "connect-src 'self'; "
             f"frame-src {frame_src}; frame-ancestors 'none'; base-uri 'self'; "
             "form-action 'self'; object-src 'none'")
 
@@ -1728,6 +1734,165 @@ if RECON_AVAILABLE:
             else:
                 conn.execute("UPDATE watch_alerts SET seen = 1 WHERE seen = 0")
         return JSONResponse({"ok": True})
+
+    # --- Avatar proxy (V11 / F-6) ---------------------------------------------
+    # Profile avatars (og:image, JSON-LD, Gravatar) used to be loaded straight
+    # by the analyst's browser, so the subject's host saw the analyst's IP and
+    # browser at viewing time. The console asks this endpoint instead: it
+    # fetches with the project's honest User-Agent through the SSRF guard
+    # (every redirect hop re-checked), refuses robots-denied hosts, caps the
+    # body, insists on a raster image and caches by URL so repeated renders do
+    # not re-fetch. Not a pure read (it starts network activity), so the
+    # cross-site guard applies; our own page loads it as a same-origin <img>.
+    AVATAR_MAX_BYTES = 2 * 1024 * 1024
+    AVATAR_TIMEOUT_S = 6.0
+    AVATAR_MAX_URL_LEN = 2048
+    AVATAR_CACHE_MAX_ENTRIES = 200
+    AVATAR_CACHE_MAX_BYTES = 16 * 1024 * 1024
+    AVATAR_CACHE_TTL_S = 24 * 3600
+    AVATAR_MAX_CONCURRENT = 8
+    # A media type we will relay: image/<subtype>, never SVG — an SVG served
+    # from this origin could carry script if navigated to directly.
+    _AVATAR_MEDIA_RE = re.compile(r"^image/[a-z0-9][a-z0-9.+-]*$")
+
+    class _AvatarCache:
+        """In-process LRU keyed by URL, bounded by entries, total bytes and age."""
+
+        def __init__(self, max_entries: int, max_bytes: int, ttl_s: float):
+            from collections import OrderedDict
+            self._items: "OrderedDict[str, tuple[float, str, bytes]]" = OrderedDict()
+            self._bytes = 0
+            self.max_entries, self.max_bytes, self.ttl_s = max_entries, max_bytes, ttl_s
+            self._lock = threading.Lock()
+
+        def get(self, url: str) -> tuple[str, bytes] | None:
+            with self._lock:
+                item = self._items.get(url)
+                if item is None:
+                    return None
+                expires, ctype, body = item
+                if expires < time.monotonic():
+                    self._items.pop(url, None)
+                    self._bytes -= len(body)
+                    return None
+                self._items.move_to_end(url)
+                return ctype, body
+
+        def put(self, url: str, ctype: str, body: bytes) -> None:
+            if len(body) > self.max_bytes:
+                return
+            with self._lock:
+                old = self._items.pop(url, None)
+                if old is not None:
+                    self._bytes -= len(old[2])
+                self._items[url] = (time.monotonic() + self.ttl_s, ctype, body)
+                self._bytes += len(body)
+                while self._items and (len(self._items) > self.max_entries
+                                       or self._bytes > self.max_bytes):
+                    _, (_, _, evicted) = self._items.popitem(last=False)
+                    self._bytes -= len(evicted)
+
+        def clear(self) -> None:
+            with self._lock:
+                self._items.clear()
+                self._bytes = 0
+
+        def __len__(self) -> int:
+            return len(self._items)
+
+    _avatar_cache = _AvatarCache(AVATAR_CACHE_MAX_ENTRIES, AVATAR_CACHE_MAX_BYTES,
+                                 AVATAR_CACHE_TTL_S)
+    _avatar_gate = asyncio.Semaphore(AVATAR_MAX_CONCURRENT)
+
+    def _avatar_client():
+        """The SSRF-guarded client avatar fetches go through. A factory (not a
+        shared client) so tests can substitute an ``httpx.MockTransport``."""
+        from recon import safeweb
+        from recon.adapters import USER_AGENT
+        return safeweb.async_client(timeout=AVATAR_TIMEOUT_S,
+                                    headers={"User-Agent": USER_AGENT,
+                                             "Accept": "image/*"})
+
+    def _avatar_media_type(raw: str) -> str | None:
+        """The relayable media type of an upstream Content-Type, or None."""
+        ctype = (raw or "").split(";", 1)[0].strip().lower()
+        if ctype == "image/svg+xml" or not _AVATAR_MEDIA_RE.match(ctype):
+            return None
+        return ctype
+
+    async def _fetch_avatar(url: str) -> tuple[int, str, bytes]:
+        """Fetch one avatar. Returns ``(200, media_type, body)`` on success or
+        ``(http_status, error_message, b"")`` describing the refusal/failure."""
+        import httpx
+        from recon.safeweb import BlockedRequestError
+        too_big = (413, f"image larger than {AVATAR_MAX_BYTES // (1024 * 1024)} MiB", b"")
+        try:
+            async with _avatar_client() as client:
+                async with client.stream("GET", url) as resp:
+                    if resp.status_code >= 400:
+                        return 502, f"upstream returned {resp.status_code}", b""
+                    ctype = _avatar_media_type(resp.headers.get("content-type", ""))
+                    if ctype is None:
+                        return 415, "upstream did not return a raster image", b""
+                    declared = resp.headers.get("content-length", "")
+                    if declared.isdigit() and int(declared) > AVATAR_MAX_BYTES:
+                        return too_big
+                    chunks: list[bytes] = []
+                    size = 0
+                    async for chunk in resp.aiter_bytes(16384):
+                        size += len(chunk)
+                        if size > AVATAR_MAX_BYTES:
+                            return too_big
+                        chunks.append(chunk)
+                    return 200, ctype, b"".join(chunks)
+        except BlockedRequestError as exc:
+            # Policy denial or non-public address on the request or a redirect
+            # hop, or an unresolvable host — the guard refused to go there.
+            return 403, f"refused: {exc}", b""
+        except httpx.HTTPError as exc:
+            return 502, f"upstream fetch failed: {type(exc).__name__}", b""
+        except Exception as exc:  # never a 500 for a subject-controlled URL
+            logging.getLogger("app").debug("avatar fetch error: %r", exc)
+            return 502, f"upstream fetch failed: {type(exc).__name__}", b""
+
+    @app.get("/api/avatar")
+    async def avatar_proxy(u: str = Query(...)) -> Response:
+        """Relay a remote avatar so the analyst's browser never contacts the
+        subject's host. 400 for a non-http(s) URL, 403 when policy or the SSRF
+        guard refuses, 413 over 2 MiB, 415 when it is not a raster image, 502
+        when upstream fails (the client hides the image on any error)."""
+        from urllib.parse import urlsplit
+        url = u.strip()
+        try:
+            parts = urlsplit(url) if 0 < len(url) <= AVATAR_MAX_URL_LEN else None
+        except ValueError:
+            parts = None
+        if parts is None or parts.scheme.lower() not in ("http", "https") \
+                or not parts.netloc:
+            return JSONResponse({"error": "only http(s) URLs can be proxied"},
+                                status_code=400)
+        reason = _policy.denied_reason(url)
+        if reason:
+            return JSONResponse({"error": f"refused: access policy: {reason}"},
+                                status_code=403)
+        hit = _avatar_cache.get(url)
+        if hit is None:
+            async with _avatar_gate:
+                hit = _avatar_cache.get(url)     # a concurrent fetch may have filled it
+                if hit is None:
+                    status, detail, body = await _fetch_avatar(url)
+                    if status != 200:
+                        return JSONResponse({"error": detail}, status_code=status)
+                    _avatar_cache.put(url, detail, body)
+                    hit = (detail, body)
+        ctype, body = hit
+        return Response(content=body, media_type=ctype, headers={
+            "Cache-Control": "private, max-age=86400",
+            "X-Content-Type-Options": "nosniff",
+            # Defence in depth: even if a relayed body were somehow active
+            # content, a direct navigation to it runs in an opaque origin.
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+        })
 
     # The background watchlist monitor is started from the app lifespan handler
     # (see ``lifespan`` above), which also cancels it cleanly on shutdown.
