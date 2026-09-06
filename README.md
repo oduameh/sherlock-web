@@ -29,9 +29,30 @@ Install the dev dependencies and run the test suite (pure-function and
 security-guard coverage for the recon engines — no network required):
 
 ```bash
-./venv/bin/pip install -r requirements-dev.txt
+./venv/bin/pip install --require-hashes -r requirements-ci.lock   # app + dev + stealth, sha256-pinned
 ./venv/bin/python -m pytest -q
+./scripts/gate.sh          # what CI runs: lockcheck, ruff, node --check, pytest
 ```
+
+**Dependency locks.** `requirements*.txt` state what the app needs;
+`requirements.lock` (runtime) and `requirements-ci.lock` (runtime + dev +
+stealth) record the exact release and sha256 of every wheel that satisfies
+them, so `pip install --require-hashes` refuses a substituted or tampered
+package. `run.sh` installs from `requirements.lock` when it is present and CI
+installs only from the locks. After editing any `requirements*.txt`,
+regenerate both (network needed) and commit them together:
+
+```bash
+./venv/bin/pip-compile --generate-hashes --strip-extras --no-header \
+    -o requirements.lock requirements.txt
+./venv/bin/pip-compile --generate-hashes --strip-extras --allow-unsafe --no-header \
+    -o requirements-ci.lock requirements-dev.txt requirements-stealth.txt
+python scripts/lockcheck.py     # the gate refuses a lock that no longer covers the .txt files
+```
+
+Railway's Nixpacks builder still installs from `requirements.txt` (its
+default; overriding the install phase has not been verified against a real
+deploy), so production pins are exact only where `requirements.txt` pins them.
 
 ## Persistence — SQLite or Postgres
 
@@ -82,8 +103,9 @@ real Postgres, so both backends stay green.
   so a malformed address can't trigger a wasted holehe run or a misleading
   graph node.
 
-`run.sh` creates a local `venv` on first use, installs `requirements.txt`
-(FastAPI, uvicorn, `sherlock-project`), and starts uvicorn. Set `PORT=9000 ./run.sh`
+`run.sh` creates a local `venv` on first use, installs the hash-pinned
+`requirements.lock` (falling back to `requirements.txt` when the lock is
+absent), and starts uvicorn. Set `PORT=9000 ./run.sh`
 to use a different port.
 
 ## Adaptive routing
