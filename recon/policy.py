@@ -17,7 +17,14 @@ rendered as "no account found", and it carries no evidential weight.
 
 Each entry records the robots.txt observation that justifies it, so the list is
 auditable and can be re-checked. Verified 2026-08-14 against the live
-robots.txt of each host.
+robots.txt of each host; the image-CDN entries were verified 2026-09-06.
+
+Rule (owner decision, 2026-09-06): a site is denied when *any* URL the engine
+fetches **or displays as the profile** is on a denied host. A third-party
+scraper mirror (imginn for Instagram, nitter for X) is not an alternative
+source for a denied platform — it is the obstacle with a different hostname —
+so a Sherlock entry whose profile URL is denied is skipped even when its probe
+goes to a mirror.
 """
 
 from __future__ import annotations
@@ -33,7 +40,12 @@ DENIED_HOSTS: dict[str, str] = {
     "redd.it": "reddit.com robots.txt disallows all automated access",
     "x.com": "x.com robots.txt disallows all automated access (Disallow: /)",
     "twitter.com": "twitter.com robots.txt disallows all automated access",
-    "twimg.com": "X/Twitter infrastructure — robots.txt disallows automated access",
+    # pbs.twimg.com robots.txt is "User-agent: * / Disallow:" (allows all;
+    # observed 2026-09-06), so X's image CDN is NOT denied.
+    "cdninstagram.com": "cdninstagram.com robots.txt disallows all automated access (Disallow: /; observed 2026-09-06)",
+    "fbcdn.net": "fbcdn.net robots.txt disallows all automated access (Disallow: /; observed 2026-09-06)",
+    "pinimg.com": "pinimg.com robots.txt allowlists named crawlers then Disallow: / (observed 2026-09-06)",
+    "redditmedia.com": "redditmedia.com robots.txt disallows all automated access (Disallow: /; observed 2026-09-06)",
     "facebook.com": "facebook.com robots.txt disallows automated collection without written permission",
     "instagram.com": "instagram.com robots.txt disallows all automated access (Disallow: /)",
     "threads.com": "threads.com robots.txt disallows all automated access",
@@ -149,11 +161,14 @@ def filter_site_mapping(mapping: dict, url_of: Callable[[Any], Any]
     """Split a dict of engine sites into ``(kept, denied_names)``.
 
     ``url_of(value)`` returns the URL template for a site value — or an
-    iterable of templates when the engine fetches more than one URL per site
-    (Maigret's ``url_probe``, Sherlock's ``urlProbe``). A site is denied when
-    *any* of its templates targets a denied host: Maigret's HackerNews entry
-    shows a permitted profile URL but probes the denied Firebase API, and the
-    probe is what gets fetched. Order is preserved. Pure.
+    iterable of templates (profile URL first, then probe / main) when the
+    engine fetches or displays more than one URL per site. A site is denied
+    when *any* template targets a denied host, in both directions: Maigret's
+    HackerNews shows a permitted profile URL but probes the denied Firebase API
+    (the probe is what gets fetched); Sherlock's Instagram/Twitter show a
+    denied profile URL but probe a scraper mirror (imginn, nitter), and a
+    mirror is not an alternative source for a denied platform (see the module
+    docstring). Order is preserved. Pure.
     """
     kept: dict = {}
     denied: list[str] = []

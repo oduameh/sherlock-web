@@ -103,7 +103,7 @@ def test_download_avatars_never_fetches_denied_hosts(monkeypatch):
     monkeypatch.setattr(correlate.safeweb, "fetch_capped", fake_fetch_capped)
 
     denied_row = {"site": "X", "username": "a",
-                  "enrichment": {"og_image": "https://pbs.twimg.com/profile_images/1/x.jpg"}}
+                  "enrichment": {"og_image": "https://scontent.cdninstagram.com/v/t51/1/x.jpg"}}
     denied_row2 = {"site": "Reddit", "username": "a",
                    "enrichment": {"jsonld_image": "https://i.redd.it/abc123.jpg"}}
     ok_row = {"site": "GitHub", "username": "a",
@@ -121,7 +121,7 @@ def test_download_avatars_all_denied_opens_no_client(monkeypatch):
         raise AssertionError("client must not be opened when nothing is fetchable")
 
     monkeypatch.setattr(correlate.safeweb, "async_client", boom)
-    row = {"enrichment": {"og_image": "https://pbs.twimg.com/profile_images/1/x.jpg"}}
+    row = {"enrichment": {"og_image": "https://scontent.cdninstagram.com/v/t51/1/x.jpg"}}
     asyncio.run(correlate._download_avatars([row]))
     assert "avatar_hash" not in row
 

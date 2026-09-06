@@ -134,18 +134,26 @@ def test_no_denied_host_survives_in_any_planned_set_real_data():
 
     skipped = {(r["site"], r["engine"]) for r in plan.skipped_policy}
     # The known offenders from the 2026-09-06 audit are gone and reported.
+    # Named assertions are conditional on the site existing in the installed
+    # engine data (sherlock-project floats; a rename must not fail the suite —
+    # the _assert_no_denied sweeps above are the robust guarantee).
     for site in ("Instagram", "Reddit", "Flickr", "threads"):
-        assert (site, "sherlock") in skipped, site
-        assert site not in plan.sherlock
+        if site in sher:
+            assert (site, "sherlock") in skipped, site
+            assert site not in plan.sherlock
+    wmn_names = {s.get("name") for s in whatsmyname.all_sites()}
     for site in ("Facebook", "Instagram", "Reddit", "Pinterest", "Threads", "X"):
-        assert (site, "whatsmyname") in skipped, site
+        if site in wmn_names:
+            assert (site, "whatsmyname") in skipped, site
     # Counts the ``meta`` event reports are the filtered sizes.
     sher_denied = [r for r in plan.skipped_policy if r["engine"] == "sherlock"]
     assert len(plan.sherlock) == len(sher) - len(sher_denied)
     assert len(plan.whatsmyname) == len(whatsmyname.all_sites()) - len(
         [r for r in plan.skipped_policy if r["engine"] == "whatsmyname"])
-    # Twitter is scanned by Sherlock on x.com — denied by host, not by name.
-    assert ("Twitter", "sherlock") in skipped
+    # Sherlock's Twitter entry displays x.com but probes a nitter mirror; the
+    # platform is denied and the mirror is not used as a proxy for it.
+    if "Twitter" in sher:
+        assert ("Twitter", "sherlock") in skipped
 
 
 def test_maigret_denied_sites_are_planned_out_real_data():
@@ -159,3 +167,27 @@ def test_maigret_denied_sites_are_planned_out_real_data():
                  "Flickr", "Threads", "HackerNews"):
         assert site in skipped, site
         assert site not in plan.maigret and site not in plan.maigret_reduced
+
+
+# --- the mirror rule and honest reasons (review of increment C, S1) -------------------
+
+def test_denied_profile_with_permitted_mirror_probe_is_denied_and_says_why():
+    """Sherlock's Instagram entry: profile on instagram.com (denied), probe on
+    imginn.com (a scraper mirror). Denied — a mirror is not an alternative
+    source for a denied platform — and the reason must say the engine would
+    have probed a mirror, not claim the mirror's robots.txt."""
+    from recon import plan as planmod
+    sites = {"Instagram": {"url": "https://instagram.com/{}",
+                           "urlProbe": "https://imginn.com/{}",
+                           "urlMain": "https://instagram.com/"}}
+    kept, denied = policy.filter_site_mapping(sites, engines.sherlock_url_templates)
+    assert denied == ["Instagram"] and kept == {}
+    reason = planmod.skip_reason(engines.sherlock_url_templates(sites["Instagram"]))
+    assert "instagram.com" in reason and "mirror" in reason
+
+
+def test_permitted_profile_with_denied_probe_blames_the_probe():
+    from recon import plan as planmod
+    reason = planmod.skip_reason(["https://news.ycombinator.com/user?id={}",
+                                  "https://hacker-news.firebaseio.com/v0/user/{}.json"])
+    assert "firebaseio" in reason and "check request" in reason

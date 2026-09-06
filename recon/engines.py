@@ -112,10 +112,12 @@ def maigret_url_templates(site: Any) -> list[str]:
     ``{urlSubpath}`` resolved (Maigret 0.6.4 ``checking.py`` formats ``url``
     and ``url_probe`` with exactly those two plus ``{username}``).
 
-    ``url`` is the profile page, ``url_probe`` the URL actually requested when
-    present (HackerNews probes the denied Firebase API behind a permitted
-    profile URL), ``url_main`` the platform itself. Any of them on a denied
-    host denies the site.
+    ``url`` is the profile page (displayed to the analyst, fetched when there
+    is no probe), ``url_probe`` the URL actually requested when present
+    (HackerNews probes the denied Firebase API behind a permitted profile
+    URL), ``url_main`` the platform itself (never fetched by Maigret; kept so
+    a denied platform is denied whatever the entry points at). Any of them on
+    a denied host denies the site — see recon.policy for the mirror rule.
     """
     url_main = getattr(site, "url_main", "") or ""
     subpath = getattr(site, "url_subpath", "") or ""
@@ -202,9 +204,12 @@ async def maigret_scan(username: str, site_dict: dict[str, Any], timeout: int,
 # ---------------------------------------------------------------------------
 
 def sherlock_url_templates(info: dict) -> list[str]:
-    """Every URL a Sherlock site check may fetch: ``url`` (the ``{}`` template
-    Sherlock formats with the handle), ``urlProbe`` when the check hits a
-    different endpoint, and ``urlMain`` (the platform itself)."""
+    """Every URL a Sherlock site check fetches or displays, profile first:
+    ``url`` (the ``{}`` template shown as the profile and fetched when there is
+    no probe), ``urlProbe`` (requested instead of ``url`` when present — for
+    Instagram/Twitter this is a scraper mirror), and ``urlMain`` (the platform;
+    stored, never fetched). Any of them on a denied host denies the site — see
+    recon.policy for the mirror rule."""
     return [info[k] for k in ("url", "urlProbe", "urlMain")
             if isinstance(info.get(k), str) and info[k]]
 

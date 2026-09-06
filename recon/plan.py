@@ -55,11 +55,32 @@ def _policy_filter(mapping: dict, engine: str, url_of: Callable[[Any], Any],
         if key in seen:
             continue
         seen.add(key)
-        skipped.append({
-            "site": name, "engine": engine,
-            "reason": policy.denied_site_reason(url_of(mapping[name])) or "",
-        })
+        skipped.append({"site": name, "engine": engine,
+                        "reason": skip_reason(url_of(mapping[name]))})
     return kept
+
+
+def skip_reason(templates) -> str:
+    """The analyst-facing reason a site was skipped — true to what the engine
+    would actually have fetched. Templates are ordered profile URL first.
+
+    * profile denied, probe permitted (Sherlock Instagram → imginn, Twitter →
+      nitter): say so — the platform is denied and the mirror is not used as a
+      proxy for it (policy module docstring);
+    * profile permitted, probe denied (HackerNews → Firebase): the probe is
+      what gets fetched — say that instead of blaming the profile host.
+    """
+    tpls = [templates] if isinstance(templates, str) else list(templates or [])
+    if not tpls:
+        return ""
+    reasons = [policy.denied_site_reason(t) for t in tpls]
+    if reasons[0]:
+        if len(tpls) > 1 and any(r is None for r in reasons[1:]):
+            return (f"{reasons[0]} — the engine would probe a third-party mirror,"
+                    " which is not used as a proxy for a denied platform")
+        return reasons[0]
+    probe = next((r for r in reasons[1:] if r), "")
+    return f"{probe} — the engine's check request goes there behind a permitted profile URL"
 
 
 def plan_site_sets(

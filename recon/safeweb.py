@@ -103,7 +103,19 @@ async def assert_public_url(url: str) -> None:
 
 
 async def _guard(request: httpx.Request) -> None:
-    """httpx request hook: block non-public destinations (initial + redirects)."""
+    """httpx request hook: refuse denied hosts and non-public destinations,
+    on the initial request AND on every redirect hop.
+
+    The access policy is checked first (no DNS needed): a permitted host that
+    30x-redirects to instagram.com / reddit.com / x.com used to be followed by
+    every fetcher built on this client (WhatsMyName, enrichment, detectors,
+    avatars, holehe, ignorant, brokers). Plan-time site filtering cannot see a
+    redirect; this hook can.
+    """
+    from recon import policy   # stdlib-only module, no import cycle
+    reason = policy.denied_reason(str(request.url))
+    if reason:
+        raise BlockedRequestError(f"access policy: {reason}")
     await assert_public_url(str(request.url))
 
 
