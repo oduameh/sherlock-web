@@ -63,7 +63,10 @@ def test_plan_reports_each_denied_site_once_with_engine_and_reason():
         ("Twitter", "maigret"), ("HackerNews", "maigret"), ("Forum", "maigret"),
         ("Reddit", "whatsmyname"), ("X", "whatsmyname"),
     }
-    assert rows[("HackerNews", "maigret")] == policy.DENIED_HOSTS["hacker-news.firebaseio.com"]
+    # The reason starts with the host's robots observation and adds which URL the
+    # engine would actually have fetched (the Firebase probe, not the profile).
+    assert rows[("HackerNews", "maigret")].startswith(
+        policy.DENIED_HOSTS["hacker-news.firebaseio.com"])
     assert rows[("Forum", "maigret")] == policy.DENIED_HOSTS["reddit.com"]
     ev = plan.skipped_event()
     assert ev["count"] == 7 and ev["sites"] == plan.skipped_policy
@@ -190,4 +193,4 @@ def test_permitted_profile_with_denied_probe_blames_the_probe():
     from recon import plan as planmod
     reason = planmod.skip_reason(["https://news.ycombinator.com/user?id={}",
                                   "https://hacker-news.firebaseio.com/v0/user/{}.json"])
-    assert "firebaseio" in reason and "check request" in reason
+    assert "Firebase" in reason and "check request" in reason
