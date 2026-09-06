@@ -61,6 +61,7 @@ from recon.htmltext import (
     SOFT_404_PHRASES,
     SOFT_404_RE,
     WEAK_CHALLENGE_PHRASES,
+    heading_texts,
     soft_404_pattern,
     challenge_marker,
     consent_wall_marker,
@@ -195,14 +196,37 @@ def _handle_in_metadata(uname_raw: str, extracted: dict) -> bool:
     return bool(pat.search(hay.lower()))
 
 
-def _display_name_conflicts(subject_name: str, extracted: dict, handle: str) -> bool:
-    """True when the page's structured/og display name, minus the handle and
-    the site's boilerplate, shares no name token (nor a nickname prefix) with
-    the subject. Both sides must have a real token left, else no opinion."""
-    raw = extracted.get("jsonld_name") or extracted.get("og_title") or ""
+def _display_name_conflicts(subject_name: str, extracted: dict, handle: str,
+                            control_extracted: Optional[dict] = None) -> bool:
+    """True only when the page names a *person* next to the handle who is
+    clearly not the subject: ``handle (Name)`` / ``Name (@handle)`` forms.
+
+    Anything else — "torvalds - Overview", "torvalds | Bandcamp" — is site
+    boilerplate around the handle, not a display name, and yields no opinion
+    (a broader rule demoted the common nickname-less profile by 53 points —
+    re-review blocker). Tokens that also appear in the control page's
+    title/og are boilerplate and dropped; tokens shorter than three
+    characters ("LT") carry no name information.
+    """
+    raw = str(extracted.get("jsonld_name") or extracted.get("og_title") or "")
+    if not raw or not handle:
+        return False
+    h = re.escape(handle)
+    m = re.search(r"(?<![\w@])@?" + h + r"\s*\(([^()]{2,80})\)", raw, re.I)   # handle (Name)
+    if m:
+        name = m.group(1)
+    else:
+        m = re.search(r"^\s*([^()|•·\-–—]{2,80}?)\s*\(\s*@?" + h + r"\s*\)", raw, re.I)  # Name (@handle)
+        if not m:
+            return False
+        name = m.group(1)
+    boiler: set = set()
+    for key in ("title", "og_title"):
+        boiler |= set(_tokens((control_extracted or {}).get(key)))
     hn = _norm(handle)
-    name_toks = {t for t in _tokens(raw) if len(t) >= 2 and t != hn and hn not in t}
-    subj_toks = {t for t in _tokens(subject_name) if len(t) >= 2}
+    name_toks = {t for t in _tokens(name)
+                 if len(t) >= 3 and t != hn and hn not in t and t not in boiler}
+    subj_toks = {t for t in _tokens(subject_name) if len(t) >= 3}
     if not name_toks or not subj_toks:
         return False
     for x in name_toks:
@@ -321,7 +345,8 @@ def verify_username(username: Optional[str], url: Optional[str],
     #      vendor tokens are deliberately NOT consulted here (rule: a DataDome
     #      script tag on a legitimate page is not a block page).
     marker = challenge_marker(html, extracted, raw_tokens=False)
-    if marker in WEAK_CHALLENGE_PHRASES and _handle_in_metadata(uname_raw, extracted):
+    if (marker in WEAK_CHALLENGE_PHRASES and _handle_in_metadata(uname_raw, extracted)
+            and marker not in str(extracted.get("title") or "").lower()):
         marker = None      # "Access Denied" is an album here; the page names the handle
     if marker:
         return _verdict("indeterminate", 30,
@@ -362,8 +387,17 @@ def verify_username(username: Optional[str], url: Optional[str],
             return _verdict("likely_false_positive", 10,
                             [f'page heading reads as not-found ("{phrase}")'],
                             identity_match=identity_match, control_probe=probe)
-    m = SOFT_404_RE.search(headline) or (
-        soft_404_pattern(uname_raw).search(headline) if uname_raw else None)
+    m = SOFT_404_RE.search(headline)
+    if m is None and uname_raw:
+        # The handle-anchored forms ("Torvalds does not use Launchpad") are
+        # matched per headline part with the handle at the START of the part:
+        # a post titled "Why torvalds hasn't joined the Rust crowd" or a gap
+        # spanning two joined parts must not refute a real profile (re-review).
+        pat = soft_404_pattern(uname_raw, anchored=True)
+        parts = [str(extracted.get("title") or ""), str(extracted.get("og_title") or "")]
+        if html:
+            parts.extend(heading_texts(html))
+        m = next((pm for part in parts for pm in [pat.search(part)] if pm), None)
     if m:
         return _verdict("likely_false_positive", 10,
                         [f'page heading reads as not-found ("{m.group(0)}")'],
@@ -404,7 +438,8 @@ def verify_username(username: Optional[str], url: Optional[str],
         # the subject, this is a lead, not a confirmation (rule 3: a different
         # name is weak negative evidence). "torvalds (Hemant)" with subject
         # "Linus Torvalds" is Hemant's account, not Linus's.
-        if subject_name and _display_name_conflicts(subject_name, extracted, uname_raw):
+        if subject_name and _display_name_conflicts(subject_name, extracted, uname_raw,
+                                                    control_extracted):
             return _verdict("unconfirmed", 38,
                             ["handle appears in the page's title, but the display "
                              "name is someone else — may be another person"],

@@ -176,13 +176,19 @@ _SOFT_404_PREDICATES = (
 )
 
 
-def soft_404_pattern(handle: str) -> re.Pattern:
-    """A per-call soft-404 regex with the handle as an extra subject word."""
-    subject = r"profile|user|page|account|member"
+def soft_404_pattern(handle: str, anchored: bool = False) -> re.Pattern:
+    """A per-call soft-404 regex with the handle as the subject word.
+
+    ``anchored`` (the verifier's setting) requires the handle at the start of
+    the text it is applied to — one headline part at a time — so a post
+    titled "Why torvalds hasn't joined the Rust crowd" cannot refute a real
+    profile, and no match can span two joined parts. Without a usable handle
+    the generic subject words are used."""
     if handle and len(handle) >= 3:
-        subject += "|" + re.escape(handle)
-    return re.compile(r"\b(?:" + subject + r")\b.{0,40}?\b(?:" + _SOFT_404_PREDICATES + r")\b",
-                      re.I | re.S)
+        head = (r"^\s*@?" if anchored else r"\b") + re.escape(handle) + r"\b"
+    else:
+        head = r"\b(?:profile|user|page|account|member)\b"
+    return re.compile(head + r"[^\n]{0,40}?\b(?:" + _SOFT_404_PREDICATES + r")\b", re.I)
 
 
 # Generic phrases that also occur on legitimate pages (an album called

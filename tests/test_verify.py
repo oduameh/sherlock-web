@@ -466,3 +466,34 @@ def test_non_latin_titles_and_handle_echoes_are_not_block_pages():
                         control_html=html.replace("yamada_taro", "qzx9no7such8user2wj"),
                         control_extracted={"title": "qzx9no7such8user2wj - プロフィール ページ です"})
     assert v["status"] == "likely_false_positive"      # identical to control → refuted, not "blocked"
+
+
+# --- re-review of the B fixes: boilerplate names, blog headings, WAF titles ---------
+
+@pytest.mark.parametrize("title", [
+    "torvalds - Overview", "torvalds | Bandcamp", "torvalds | Keybase",
+    "torvalds - DEV Community", "torvalds (u/torvalds) - Reddit", "torvalds's Profile",
+    "LT (@torvalds) • Instagram photos and videos",
+])
+def test_boilerplate_around_the_handle_is_not_a_conflicting_display_name(title):
+    """A broader rule demoted every nickname-less profile to a lead (blocker)."""
+    html = f"<html><head><title>{title}</title></head><body><p>Profile page with posts, followers and activity.</p></body></html>"
+    v = verify_username("torvalds", "https://x/torvalds", html,
+                        {"title": title, "og_title": title}, status=200,
+                        subject_name="Linus Torvalds")
+    assert v["status"] == "confirmed", title
+
+
+def test_handle_anchored_not_found_does_not_fire_on_blog_headings():
+    html = ("<html><head><title>torvalds | Blog</title></head><body>"
+            "<h2>Why torvalds hasn't joined the Rust crowd</h2><h2>Not found: the lost tapes</h2>"
+            "<p>Posts about kernels and Rust with plenty of body text here.</p></body></html>")
+    v = verify_username("torvalds", "https://x/torvalds", html, {"title": "torvalds | Blog"}, status=200)
+    assert v["status"] == "confirmed"
+
+
+def test_waf_title_is_not_rescued_by_a_handle_in_og_title():
+    html = "<html><head><title>Access Denied</title></head><body><h1>Access Denied</h1><p>Reference #18.4f2c</p></body></html>"
+    v = verify_username("torvalds", "https://x/torvalds", html,
+                        {"title": "Access Denied", "og_title": "torvalds on Example"}, status=200)
+    assert v["status"] == "indeterminate"

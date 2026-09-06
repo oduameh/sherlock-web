@@ -257,4 +257,10 @@ def test_soft_404_pattern_is_anchored_on_the_handle():
     assert pat.search("Profile johnsmith77 not found")
     assert not pat.search("torvalds (Hemant)")
     assert not pat.search("ken (Torvalds) - Gitee.com")
-    assert not soft_404_pattern("ab").search("ab does not use it")   # too short to anchor
+    # Anchored (the verifier's setting): the handle must start the part.
+    anchored = soft_404_pattern("torvalds", anchored=True)
+    assert anchored.search("Torvalds does not use Launchpad")
+    assert not anchored.search("Why torvalds hasn't joined the Rust crowd")
+    assert not anchored.search("torvalds | Blog\nNot found: the lost tapes")
+    # No usable handle: the generic subject words apply.
+    assert soft_404_pattern("ab").search("profile ab not found")
