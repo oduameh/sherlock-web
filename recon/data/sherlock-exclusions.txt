@@ -1,0 +1,51 @@
+# Sherlock exclusions snapshot — sites the Sherlock project excludes as dead or
+# false-positive-prone. Fetched 2026-09-06 from https://raw.githubusercontent.com/sherlock-project/sherlock/refs/heads/exclusions/false_positive_exclusions.txt
+# Applied when the live list cannot be fetched (offline / bundled mode).
+7Cups
+Airliners
+Apple Developer
+Apple Discussions
+Archive.org
+Bandcamp
+Championat
+Chatujme.cz
+Codolio
+DeviantArt
+Discord.bio
+Envato Forum
+GeeksforGeeks
+Giphy
+Hashnode
+Houzz
+Hubski
+Instapaper
+ObservableHQ
+Odysee
+PCGamer
+Rarible
+Realmeye
+Reddit
+ReverbNation
+RocketTube
+Scribd
+Shelf
+SlideShare
+Splice
+Spotify
+Trakt
+Trovo
+TryHackMe
+Velomania
+Weblate
+YandexMusic
+authorSTREAM
+dailykos
+fixya
+hunting
+igromania
+interpals
+mercadolivre
+opennet
+phpRU
+social.tchncs.de
+svidbook

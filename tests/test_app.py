@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 import app as appmod
 from dbconn import connect as db_connect
+from dbconn import insert_returning_id
 
 
 def _events(body: str):
@@ -167,13 +168,13 @@ def test_client_disconnect_marks_the_investigation_cancelled(monkeypatch):
 
     async def scenario():
         with db_connect(appmod.DB_PATH) as conn:
-            iid = conn.execute(
+            iid = insert_returning_id(conn,
                 "INSERT INTO investigations (created_at, inputs, status)"
                 " VALUES (?,?,'pending')",
                 ("2026-01-01 00:00:00", json.dumps({
                     "name": "", "usernames": ["alice"], "email": "", "phone": "",
                     "domain": "", "location": "", "variants": False,
-                    "thorough": False, "timeout": 5}))).lastrowid
+                    "thorough": False, "timeout": 5})))
         assert appmod._claim_investigation(iid)
         inputs = appmod._get_investigation(iid)["inputs"]
         events = []
@@ -196,16 +197,25 @@ def test_client_disconnect_marks_the_investigation_cancelled(monkeypatch):
 
 def test_startup_sweep_marks_stale_running_rows_interrupted():
     with db_connect(appmod.DB_PATH) as conn:
-        iid = conn.execute(
+        iid = insert_returning_id(conn,
             "INSERT INTO investigations (created_at, inputs, status)"
             " VALUES (?,?,'running')",
-            ("2026-01-01 00:00:00", json.dumps({"usernames": ["x"]}))).lastrowid
-    assert appmod.sweep_stuck_investigations() >= 1
+            ("2026-01-01 00:00:00", json.dumps({"usernames": ["x"]})))
+        zombie = insert_returning_id(conn,
+            "INSERT INTO investigations (created_at, inputs, status)"
+            " VALUES (?,?,'pending')",
+            ("2026-01-01 00:00:00", json.dumps({"usernames": ["y"]})))
+        fresh = insert_returning_id(conn,
+            "INSERT INTO investigations (created_at, inputs, status)"
+            " VALUES (?,?,'pending')",
+            (appmod._now(), json.dumps({"usernames": ["z"]})))
+    assert appmod.sweep_stuck_investigations() >= 2
     row = _row(iid)
     assert row["status"] == "interrupted"
     assert "restarted" in row["error"] and row["finished_at"]
-    # Idempotent: nothing left to sweep for this row.
-    assert _row(iid)["status"] == "interrupted"
+    assert _row(zombie)["status"] == "interrupted"          # pending for months
+    assert _row(fresh)["status"] == "pending"               # just created: kept
+    assert appmod.sweep_stuck_investigations() == 0         # idempotent
 
 
 # --- concurrency -------------------------------------------------------------------
@@ -215,13 +225,13 @@ def test_queued_event_when_the_concurrency_limit_is_reached(monkeypatch):
 
     async def scenario():
         with db_connect(appmod.DB_PATH) as conn:
-            iid = conn.execute(
+            iid = insert_returning_id(conn,
                 "INSERT INTO investigations (created_at, inputs, status)"
                 " VALUES (?,?,'pending')",
                 ("2026-01-01 00:00:00", json.dumps({
                     "name": "", "usernames": ["alice"], "email": "", "phone": "",
                     "domain": "", "location": "", "variants": False,
-                    "thorough": False, "timeout": 5}))).lastrowid
+                    "thorough": False, "timeout": 5})))
         assert appmod._claim_investigation(iid)
         inputs = appmod._get_investigation(iid)["inputs"]
         sem = appmod._investigation_semaphore()
@@ -239,3 +249,50 @@ def test_queued_event_when_the_concurrency_limit_is_reached(monkeypatch):
     iid, events = asyncio.run(scenario())
     assert _row(iid)["status"] == "done"
     assert [e for e, _ in events][-1] == "saved"
+
+
+# --- site list loader --------------------------------------------------------------
+
+def _no_fetch_allowed(url):
+    raise AssertionError("fetch must not be called when the cache is fresh")
+
+
+def test_site_list_auto_mode_falls_back_to_bundled_without_network(tmp_path, caplog):
+    def no_network(url):
+        raise OSError("network unreachable")
+    with caplog.at_level(logging.WARNING, logger="app"):
+        sites, label = appmod._load_sherlock_sites("auto", cache_dir=tmp_path, fetch=no_network)
+    assert label == "bundled" and len(sites) > 300
+    assert any("refresh failed" in r.getMessage() for r in caplog.records)
+    assert not (tmp_path / "sherlock-data.json").exists()
+
+
+def test_site_list_auto_mode_caches_a_fetched_list_and_reuses_it(tmp_path):
+    from pathlib import Path
+    import sherlock_project
+    bundled = Path(sherlock_project.__file__).parent / "resources" / "data.json"
+    payload = bundled.read_text()
+    calls = []
+
+    def fake_fetch(url):
+        calls.append(url)
+        return payload if url.endswith(".json") else "GitHub\nFakeSiteToExclude\n"
+    sites, label = appmod._load_sherlock_sites("auto", cache_dir=tmp_path, fetch=fake_fetch)
+    assert label == "remote-cached" and len(calls) == 2
+    assert (tmp_path / "sherlock-data.json").exists()
+    assert "GitHub" not in {s.name for s in sites}          # live exclusions applied
+    sites2, label2 = appmod._load_sherlock_sites("auto", cache_dir=tmp_path,
+                                                 fetch=_no_fetch_allowed)
+    assert label2 == "cache" and len(sites2) == len(sites)
+
+
+def test_site_list_rejects_a_corrupt_remote_payload(tmp_path):
+    sites, label = appmod._load_sherlock_sites("auto", cache_dir=tmp_path,
+                                               fetch=lambda url: "<html>not json")
+    assert label == "bundled" and not (tmp_path / "sherlock-data.json").exists()
+
+
+def test_bundled_mode_applies_the_vendored_exclusions():
+    excl = appmod._read_exclusions(appmod._VENDORED_EXCLUSIONS)
+    assert excl, "recon/data/sherlock-exclusions.txt must not be empty"
+    assert not (excl & set(appmod.SITE_DATA_ALL)), "excluded sites must not be scanned"
