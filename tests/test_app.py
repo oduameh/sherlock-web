@@ -11,6 +11,7 @@ and the rule that a GET on /stream can never start a second run.
 """
 
 import asyncio
+import os
 import json
 import logging
 
@@ -361,3 +362,119 @@ def test_done_is_only_sent_after_the_summary_is_written(monkeypatch):
     iid, events = asyncio.run(scenario())
     assert "done" not in events and "fatal" in events
     assert _row(iid)["status"] == "failed" and "disk full" in _row(iid)["error"]
+
+
+# --- HTTP-layer hardening (increment H1) -------------------------------------------
+
+def _pending(client):
+    return client.post("/api/investigate", json={"usernames": "alice"}).json()["investigation_id"]
+
+
+def test_cross_site_post_is_refused_and_writes_nothing(client):
+    before = client.get("/api/watchlist").json()
+    r = client.post("/api/watchlist", json={"inputs": {"usernames": "eve"}},
+                    headers={"Sec-Fetch-Site": "cross-site", "Origin": "https://evil.example"})
+    assert r.status_code == 403 and "cross-site" in r.json()["error"]
+    assert client.get("/api/watchlist").json() == before
+    # A foreign Origin alone (older browsers without Sec-Fetch-Site) is enough.
+    r = client.post("/api/investigate", json={"usernames": "eve"},
+                    headers={"Origin": "https://evil.example"})
+    assert r.status_code == 403
+    # The console's own origin and header-less local tools are fine.
+    r = client.post("/api/investigate", json={"usernames": "alice"},
+                    headers={"Origin": "http://testserver", "Sec-Fetch-Site": "same-origin"})
+    assert r.status_code == 200
+
+
+def test_scan_starting_get_is_protected_like_a_write(client):
+    iid = _pending(client)
+    r = client.get(f"/api/investigate/{iid}/stream", headers={"Sec-Fetch-Site": "cross-site"})
+    assert r.status_code == 403
+    assert _row(iid)["status"] == "pending", "a refused request must not claim the row"
+    r = client.get("/api/search/stream?usernames=alice", headers={"Sec-Fetch-Site": "cross-site"})
+    assert r.status_code == 403
+
+
+def test_foreign_host_header_is_refused(client):
+    r = client.get("/api/history", headers={"Host": "evil.example"})
+    assert r.status_code == 400 and "Host" in r.json()["error"]
+
+
+def test_json_endpoints_require_json_content_type(client):
+    r = client.post("/api/investigate", content=b'{"usernames":"alice"}',
+                    headers={"content-type": "text/plain"})
+    assert r.status_code == 415
+
+
+def test_request_limits(client):
+    r = client.post("/api/investigate", json={"usernames": ",".join(f"u{i}" for i in range(21))})
+    assert r.status_code == 400 and "at most" in r.json()["error"]
+    r = client.post("/api/investigate", content=b"x" * (70 * 1024),
+                    headers={"content-type": "application/json"})
+    assert r.status_code == 413
+    r = client.post("/api/alerts/mark_seen", json={"ids": list(range(501))})
+    assert r.status_code == 400
+
+
+def test_malformed_bodies_are_400_not_500(client):
+    assert client.post("/api/investigate", json={"usernames": "alice", "timeout": "abc"}).status_code == 400
+    assert client.post("/api/watchlist", json={"inputs": []}).status_code == 400
+    assert client.post("/api/watchlist", json={"inputs": {"usernames": "a"}, "interval_hours": "x"}).status_code == 400
+    assert client.post("/api/alerts/mark_seen", json={"ids": ["x"]}).status_code == 400
+    assert client.post("/api/alerts/mark_seen", content=b"", headers={"content-type": "application/json"}).status_code == 200
+
+
+def test_security_headers_and_csp_on_html(client):
+    r = client.get("/")
+    assert r.headers["X-Frame-Options"] == "DENY"
+    assert r.headers["X-Content-Type-Options"] == "nosniff"
+    assert r.headers["Referrer-Policy"] == "no-referrer"
+    csp = r.headers["Content-Security-Policy"]
+    assert "script-src 'self'" in csp and "frame-ancestors 'none'" in csp
+    assert "unsafe-inline" not in csp.split("style-src")[0]      # no inline scripts
+    assert "Content-Security-Policy" not in client.get("/api/history").headers
+    # The one former inline script now loads from a file the CSP allows.
+    assert client.get("/static/js/sw-cleanup.js").status_code == 200
+    assert "<script>" not in client.get("/").text
+
+
+def test_health_endpoint(client):
+    r = client.get("/api/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["db_ok"] is True and body["backend"] == "sqlite"
+    for key in ("commit", "uptime_s", "investigations", "deps", "stealth", "sites", "max_concurrent"):
+        assert key in body, key
+    assert body["sites"]["source"] == "bundled" and body["sites"]["sherlock"] > 300
+
+
+def test_delete_investigation_cascades_to_history(client):
+    iid = _pending(client)
+    with client.stream("GET", f"/api/investigate/{iid}/stream") as r:
+        "".join(r.iter_text())
+    assert _runs_for(iid) == 1
+    r = client.delete(f"/api/investigate/{iid}")
+    assert r.status_code == 200 and r.json() == {"deleted": iid}
+    assert client.get(f"/api/investigate/{iid}").status_code == 404
+    assert _runs_for(iid) == 0
+    assert client.delete(f"/api/investigate/{iid}").status_code == 404
+    assert client.delete("/api/history/999999").status_code == 404
+
+
+def test_legacy_recon_stream_is_gone_but_reports_remain(client):
+    assert client.get("/api/recon/stream?usernames=alice").status_code == 404
+    assert client.get("/api/recon/report/999999").status_code == 404   # route exists
+
+
+def test_site_picker_has_no_denied_hosts(client):
+    from recon import engines, policy
+    names = {s["name"] for s in client.get("/api/sites").json()}
+    for name in names:
+        info = appmod.SITE_DATA_ALL[name]
+        assert policy.denied_site_reason(engines.sherlock_url_templates(info)) is None, name
+
+
+def test_database_file_is_private():
+    import stat
+    mode = stat.S_IMODE(os.stat(appmod.DB_PATH).st_mode)
+    assert mode & 0o077 == 0, oct(mode)

@@ -207,7 +207,7 @@ async def run_pipeline(
     # Only pivot on a well-formed address; a malformed one would waste a
     # rate-limited holehe run and draw a misleading email node.
     if email and not is_probably_email(email):
-        logger.info("skipping email pivot: %r is not a valid email", email)
+        logger.info("skipping email pivot: the input is not a valid email address")
         email = ""
 
     # Infrastructure pivot: an explicit domain, else the email's domain.
