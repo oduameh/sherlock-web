@@ -10,6 +10,8 @@ import html
 import re
 from typing import Any
 
+from recon.rows import avatar, bio, display_name
+
 
 def _e(v: Any) -> str:
     return html.escape("" if v is None else str(v))
@@ -77,15 +79,16 @@ def _verify_badge(row: dict) -> str:
 
 
 def _enrichment_cell(row: dict) -> str:
-    enr = row.get("enrichment") or {}
+    """Avatar, name and bio through :mod:`recon.rows` — the raw page
+    ``<title>`` is never shown as the person's name (D7)."""
     bits = []
-    img = _href(enr.get("jsonld_image") or enr.get("og_image"))
+    img = _href(avatar(row))
     if img:   # target-controlled: same scheme allow-list as links (F-6)
         bits.append(f'<img class="avatar" src="{img}" alt="" loading="lazy">')
-    name = enr.get("jsonld_name") or enr.get("og_title") or enr.get("title")
+    name = display_name(row)
     if name:
         bits.append(f"<b>{_e(name)}</b>")
-    desc = enr.get("jsonld_description") or enr.get("og_description")
+    desc = bio(row)
     if desc:
         snippet = desc if len(desc) <= 160 else desc[:157] + "..."
         bits.append(f'<div class="dim">{_e(snippet)}</div>')

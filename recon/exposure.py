@@ -16,6 +16,7 @@ from typing import Any
 
 from recon.confidence import account_confidence, bucket_counts, verdict_bucket
 from recon.engines import normalize_site
+from recon.rows import all_account_rows, avatar, display_name
 
 
 # ---------------------------------------------------------------------------
@@ -86,13 +87,10 @@ def footprint_score(summary: dict) -> dict:
 
     Likely-false-positive rows contribute nothing.
     """
-    accounts = summary.get("accounts") or []
-    variants = summary.get("variants") or []
-    name_rows = summary.get("name_accounts") or []
     email = summary.get("email") or {}
     phone = summary.get("phone") or {}
 
-    b = bucket_counts(accounts + variants + name_rows)
+    b = bucket_counts(all_account_rows(summary))
     confirmed, leads = b["found"], b["lead"]
     holehe_hits = sum(1 for h in (email.get("holehe") or []) if h.get("exists"))
     phone_regs = sum(1 for a in (phone.get("accounts") or []) if a.get("exists"))
@@ -124,13 +122,12 @@ def _score_band(score: int) -> str:
 def _display_name(row: dict) -> str | None:
     # A bare page <title> is site boilerplate, not a person's name — including
     # it is how an unrelated page's title became "the subject's real name".
-    enr = row.get("enrichment") or {}
-    return enr.get("jsonld_name") or enr.get("og_title")
+    # The rule now lives in recon.rows so every renderer applies it (D7).
+    return display_name(row)
 
 
 def _has_avatar(row: dict) -> bool:
-    enr = row.get("enrichment") or {}
-    return bool(enr.get("jsonld_image") or enr.get("og_image"))
+    return bool(avatar(row))
 
 
 def exposure_summary(summary: dict) -> dict[str, Any]:
@@ -156,7 +153,7 @@ def exposure_summary(summary: dict) -> dict[str, Any]:
     accounts = summary.get("accounts") or []
     variants = summary.get("variants") or []
     name_rows = summary.get("name_accounts") or []
-    all_rows = accounts + variants + name_rows
+    all_rows = all_account_rows(summary)
     email = summary.get("email") or {}
     phone = summary.get("phone") or {}
     domain = summary.get("domain") or {}

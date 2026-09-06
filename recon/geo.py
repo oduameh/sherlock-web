@@ -22,9 +22,17 @@ Five sources, all already produced by the pipeline:
 
 Resolution uses free, key-less public services with an honest User-Agent:
 OpenStreetMap **Nominatim** for place names (rate-limited to 1 request/second
-per their usage policy) and **ipwho.is** for IP geolocation. Results are cached
-in-process so re-opening a case re-queries nothing. Only public place strings
-and public IPs are ever sent; nothing about the subject's identity leaves here.
+per their usage policy) and **ipwho.is** for IP geolocation. Answers are
+cached in-process with a TTL so re-opening a case re-queries nothing. Only
+public place strings and public IPs are ever sent; nothing about the subject's
+identity leaves here.
+
+Caching rule (retrieval audit defect 10): only a real answer and a
+*definitive* negative (a 200 with an empty result set) are cached. A 429, a
+5xx, a timeout or a malformed reply is **not** an answer and is never cached —
+the old dicts stored ``None`` for all of them, so one Nominatim 429 made
+"could not geocode" permanent for the process. A later call performs the
+request again.
 
 Everything network-facing is best-effort and never raises: an unresolvable
 place is reported in ``unresolved`` rather than dropped silently, because
@@ -38,7 +46,9 @@ import logging
 import math
 from typing import Any, Optional
 
-from recon import safeweb
+from recon import safeweb, sources
+from recon.cache import TTLCache
+from recon.rows import all_account_rows
 
 logger = logging.getLogger("recon.geo")
 
@@ -56,8 +66,12 @@ _NOMINATIM_MIN_INTERVAL_S = 1.05
 MAX_PLACES = 25
 MAX_IPS = 8
 
-_place_cache: dict[str, Optional[dict]] = {}
-_ip_cache: dict[str, Optional[dict]] = {}
+# Place names do not move; IP allocations do. Both caches hold positives and
+# definitive negatives only — there is no way to cache a failure.
+PLACE_TTL_S = 24 * 3600
+IP_TTL_S = 6 * 3600
+_place_cache = TTLCache(maxsize=2048, ttl_s=PLACE_TTL_S)
+_ip_cache = TTLCache(maxsize=2048, ttl_s=IP_TTL_S)
 _nominatim_lock: Optional[asyncio.Lock] = None
 _last_nominatim_at = 0.0
 
@@ -79,12 +93,6 @@ def _clean_place(value: Any) -> Optional[str]:
     if not any(ch.isalpha() for ch in text):
         return None
     return text
-
-
-def _rows(summary: dict) -> list[dict]:
-    return ((summary.get("accounts") or [])
-            + (summary.get("variants") or [])
-            + (summary.get("name_accounts") or []))
 
 
 def collect_places(summary: dict) -> list[dict]:
@@ -119,7 +127,7 @@ def collect_places(summary: dict) -> list[dict]:
         add("subject", place=claimed, label=claimed)
 
     # 2. Per-platform profile locations (adapter identity first, then enrichment).
-    for row in _rows(summary):
+    for row in all_account_rows(summary):
         ident = row.get("platform_identity") or {}
         place = _clean_place(ident.get("location"))
         if place:
@@ -226,21 +234,26 @@ def footprint_stats(points: list[dict]) -> dict:
 async def geocode_place(place: str) -> Optional[dict]:
     """Place name → ``{lat, lon, display, country}``. None if unresolvable.
 
-    Honours Nominatim's 1 request/second policy and caches every answer
-    (including misses) so a re-opened case issues no new traffic.
+    Honours Nominatim's 1 request/second policy. Caches a resolved place and
+    a definitive miss (200 with an empty list); never a 429/5xx, a transport
+    failure or a malformed reply (defect 10) — those return None *this time*
+    and the next call asks again.
     """
     global _nominatim_lock, _last_nominatim_at
     key = place.strip().lower()
-    if key in _place_cache:
-        return _place_cache[key]
+    hit, cached = _place_cache.get(key)
+    if hit:
+        return cached
     if _nominatim_lock is None:
         _nominatim_lock = asyncio.Lock()
+    latency_ms: Optional[float] = None
     try:
         async with _nominatim_lock:
             loop = asyncio.get_running_loop()
             wait = _NOMINATIM_MIN_INTERVAL_S - (loop.time() - _last_nominatim_at)
             if wait > 0:
                 await asyncio.sleep(wait)
+            t0 = loop.time()
             async with safeweb.async_client(timeout=TIMEOUT_S) as client:
                 resp = await client.get(
                     NOMINATIM_URL,
@@ -250,55 +263,89 @@ async def geocode_place(place: str) -> Optional[dict]:
                              "Accept-Language": "en"},
                 )
             _last_nominatim_at = loop.time()
-        data = resp.json()
+            latency_ms = (_last_nominatim_at - t0) * 1000
     except Exception as exc:
         logger.debug("geocode failed for %r: %s", place, exc)
-        _place_cache[key] = None
+        sources.record("nominatim", False, latency_ms, type(exc).__name__)
+        return None                      # a failure is not an answer: not cached
+    if resp.status_code >= 400:
+        logger.debug("geocode of %r answered HTTP %s", place, resp.status_code)
+        sources.record("nominatim", False, latency_ms, f"HTTP {resp.status_code}")
+        return None                      # 429/5xx: not cached
+    try:
+        data = resp.json()
+    except Exception:
+        sources.record("nominatim", False, latency_ms, "non-JSON response")
         return None
+    sources.record("nominatim", True, latency_ms)
     if not isinstance(data, list) or not data:
-        _place_cache[key] = None
+        _place_cache.set_absent(key)     # Nominatim answered: no such place
         return None
-    hit = data[0]
+    hit0 = data[0]
     try:
         out = {
-            "lat": float(hit["lat"]),
-            "lon": float(hit["lon"]),
-            "display": hit.get("display_name") or place,
-            "country": (hit.get("address") or {}).get("country"),
+            "lat": float(hit0["lat"]),
+            "lon": float(hit0["lon"]),
+            "display": hit0.get("display_name") or place,
+            "country": (hit0.get("address") or {}).get("country"),
         }
     except Exception:
-        _place_cache[key] = None
-        return None
-    _place_cache[key] = out
+        return None                      # malformed hit: not cached
+    _place_cache.set(key, out)
     return out
 
 
 async def geolocate_ip(ip: str) -> Optional[dict]:
     """Public IP → ``{lat, lon, display, country, org}``. None if unresolvable.
 
-    Private/reserved addresses are never sent to a third party.
+    Private/reserved addresses are never sent to a third party. Same caching
+    rule as :func:`geocode_place`: a located IP and a definitive "no such
+    address" are cached; a 429/5xx, a quota message or a transport failure
+    is not.
     """
     key = ip.strip()
-    if key in _ip_cache:
-        return _ip_cache[key]
+    hit, cached = _ip_cache.get(key)
+    if hit:
+        return cached
     try:
         if not safeweb._is_public_ip(key):
-            _ip_cache[key] = None
-            return None
+            return None                  # cheap, deterministic: no cache needed
     except Exception:
         pass
+    latency_ms: Optional[float] = None
     try:
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
         async with safeweb.async_client(timeout=TIMEOUT_S) as client:
             resp = await client.get(IPWHO_URL.format(ip=key),
                                     headers={"User-Agent": USER_AGENT})
-        data = resp.json()
+        latency_ms = (loop.time() - t0) * 1000
     except Exception as exc:
         logger.debug("ip geolocation failed for %s: %s", key, exc)
-        _ip_cache[key] = None
+        sources.record("ipwhois", False, latency_ms, type(exc).__name__)
+        return None                      # not cached
+    if resp.status_code >= 400:
+        sources.record("ipwhois", False, latency_ms, f"HTTP {resp.status_code}")
+        return None                      # not cached
+    try:
+        data = resp.json()
+    except Exception:
+        sources.record("ipwhois", False, latency_ms, "non-JSON response")
         return None
-    if not isinstance(data, dict) or not data.get("success"):
-        _ip_cache[key] = None
+    if not isinstance(data, dict):
+        sources.record("ipwhois", False, latency_ms, "unexpected payload")
         return None
+    if not data.get("success"):
+        # ipwho.is answers 200 + success:false both for "reserved range /
+        # invalid IP" (definitive) and for an exhausted quota (not an answer).
+        message = str(data.get("message") or "").lower()
+        if "limit" in message or "quota" in message:
+            sources.record("ipwhois", False, latency_ms, "quota exhausted")
+            return None
+        sources.record("ipwhois", True, latency_ms)
+        _ip_cache.set_absent(key)
+        return None
+    sources.record("ipwhois", True, latency_ms)
     try:
         city = data.get("city")
         country = data.get("country")
@@ -311,9 +358,8 @@ async def geolocate_ip(ip: str) -> Optional[dict]:
                     or (data.get("connection") or {}).get("isp")),
         }
     except Exception:
-        _ip_cache[key] = None
-        return None
-    _ip_cache[key] = out
+        return None                      # malformed: not cached
+    _ip_cache.set(key, out)
     return out
 
 

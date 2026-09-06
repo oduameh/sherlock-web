@@ -14,6 +14,7 @@ from typing import Any
 
 from recon.confidence import account_confidence, bucket_counts, verdict_bucket
 from recon.exposure import exposure_summary, footprint_score
+from recon.rows import all_account_rows, display_name
 
 
 def _e(v: Any) -> str:
@@ -96,14 +97,13 @@ font-size:11.5px;color:var(--dim)}
 
 def _exec_summary(inv: dict, summary: dict, score: dict) -> str:
     params = summary.get("params") or {}
-    accounts = summary.get("accounts") or []
     variants = summary.get("variants") or []
     name_rows = summary.get("name_accounts") or []
     email = summary.get("email") or {}
     phone = summary.get("phone") or {}
     clusters = summary.get("correlation") or []
 
-    all_rows = accounts + variants + name_rows
+    all_rows = all_account_rows(summary)
     buckets = bucket_counts(all_rows)
     # Platforms are counted from CONFIRMED rows only: a rejected or never-fetched
     # row must never inflate a headline the reader will take as established fact.
@@ -170,8 +170,8 @@ def _exec_summary(inv: dict, summary: dict, score: dict) -> str:
 def _account_rows(rows: list[dict]) -> str:
     out = []
     for r in rows:
-        enr = r.get("enrichment") or {}
-        name = enr.get("jsonld_name") or enr.get("og_title") or enr.get("title")
+        # recon.rows: the raw page <title> is never a person's name (D7).
+        name = display_name(r)
         engines = ", ".join(r.get("engines") or [])
         conf = account_confidence(r)
         vchip = _VERIFY_CHIP.get((r.get("verification") or {}).get("status"), "")

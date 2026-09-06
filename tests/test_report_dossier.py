@@ -197,3 +197,37 @@ def test_dossier_every_url_attribute_is_http_including_brokers():
     _assert_only_http_urls(out)
     assert "whitepages.com/suppression" in out       # the brokers section did render
     assert "Spokeo" in out
+
+
+# --- the raw page <title> is never rendered as a person's name (D7 / V10) --------------
+
+RAW_TITLE_PLAIN = "carmen_pop - Streamer Overview & Stats · TwitchTracker"
+
+
+def _title_only_account():
+    return {"site": "TwitchTracker", "username": "carmen_pop",
+            "url": "https://twitchtracker.com/carmen_pop", "engines": ["sherlock"],
+            "verification": {"status": "confirmed"},
+            "enrichment": {"title": RAW_TITLE_PLAIN}}
+
+
+def test_report_never_renders_the_raw_title_as_a_name():
+    run = _report_run()
+    run["results"]["accounts"] = [_title_only_account(),
+                                  {**_account(), "enrichment": {"jsonld_name": "Alice Example",
+                                                                "title": RAW_TITLE_PLAIN}}]
+    out = render_report(run)
+    assert "Streamer Overview" not in out
+    assert "<b>Alice Example</b>" in out
+
+
+def test_dossier_never_renders_the_raw_title_as_a_name():
+    inv = {"id": 7, "created_at": "2026-09-06 00:00:00"}
+    summary = _dossier_summary()
+    summary["accounts"] = [_title_only_account(),
+                           {**_account(), "enrichment": {"og_title": "Alice Example",
+                                                         "title": RAW_TITLE_PLAIN}}]
+    out = render_dossier(inv, summary)
+    assert "Streamer Overview" not in out
+    assert "<td>Alice Example</td>" in out
+    assert "<td>—</td>" in out            # the title-only row shows no identity

@@ -207,3 +207,43 @@ def test_no_baseline_means_no_diff_markers():
     node = next(n for n in g["nodes"] if n["type"] == "account")
     assert "is_new" not in node["data"]
     assert not any(n["data"].get("gone") for n in g["nodes"])
+
+
+# --- display names come from recon.rows (D7 / V10) ----------------------------------
+
+def test_display_name_never_uses_the_raw_page_title():
+    """A row whose enrichment carries only <title> renders no display name:
+    'carmen_pop - Streamer Overview & Stats · TwitchTracker' is boilerplate,
+    not a person."""
+    g = build_graph(_summary(accounts=[
+        {"site": "TwitchTracker", "username": "carmen_pop",
+         "url": "https://twitchtracker.com/carmen_pop", "engines": ["sherlock"],
+         "enrichment": {"title": "carmen_pop - Streamer Overview & Stats · TwitchTracker"}},
+    ]))
+    node = next(n for n in g["nodes"] if n["type"] == "account")
+    assert node["data"]["display_name"] is None
+
+
+def test_display_name_avatar_and_bio_prefer_platform_identity():
+    g = build_graph(_summary(accounts=[
+        {"site": "GitHub", "username": "alice", "url": "https://github.com/alice",
+         "engines": ["sherlock"],
+         "platform_identity": {"display_name": "Alice Real", "avatar": "https://p/a.png",
+                               "bio": "maps"},
+         "enrichment": {"og_title": "Alice", "og_image": "https://o/a.png",
+                        "og_description": "other", "title": "alice · GitHub"}},
+    ]))
+    node = next(n for n in g["nodes"] if n["type"] == "account")
+    assert node["data"]["display_name"] == "Alice Real"
+    assert node["avatar"] == "https://p/a.png"
+    assert node["data"]["bio"] == "maps"
+
+
+def test_gone_node_display_name_also_ignores_the_title():
+    baseline = _summary(accounts=[
+        {"site": "OldSite", "username": "alice", "url": "https://oldsite.com/u/alice",
+         "engines": ["wmn"], "enrichment": {"title": "alice | OldSite"}},
+    ])
+    g = build_graph(_summary(accounts=[]), baseline=baseline)
+    gone = next(n for n in g["nodes"] if n["data"].get("gone"))
+    assert gone["data"]["display_name"] is None

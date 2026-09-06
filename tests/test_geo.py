@@ -3,6 +3,8 @@ assessment. Pure functions only; no network."""
 
 import asyncio
 
+import httpx
+
 from recon import geo
 
 
@@ -149,3 +151,113 @@ def test_build_footprint_merges_resolved_points(monkeypatch):
     assert kinds == {"subject", "infra"}
     assert out["points"][0]["lat"] == 48.8566
     assert out["stats"]["resolved"] == 2
+
+
+# --- caching honesty (defect 10): failures are never cached ------------------------
+
+def _client(handler, calls):
+    def counting(request):
+        calls.append(str(request.url))
+        return handler(request)
+
+    def make(**kw):
+        return httpx.AsyncClient(transport=httpx.MockTransport(counting), **kw)
+    return make
+
+
+def _fresh(monkeypatch, handler):
+    calls = []
+    monkeypatch.setattr(geo.safeweb, "async_client", _client(handler, calls))
+    monkeypatch.setattr(geo, "_NOMINATIM_MIN_INTERVAL_S", 0.0)
+    monkeypatch.setattr(geo, "_nominatim_lock", None)
+    geo._place_cache.clear()
+    geo._ip_cache.clear()
+    return calls
+
+
+PARIS = [{"lat": "48.8566", "lon": "2.3522", "display_name": "Paris, France",
+          "address": {"country": "France"}}]
+
+
+def test_geocode_429_is_not_cached_then_the_next_call_asks_again(monkeypatch):
+    def handler(request):
+        if len(calls) == 1:
+            return httpx.Response(429, text="slow down")
+        return httpx.Response(200, json=PARIS)
+    calls = _fresh(monkeypatch, handler)
+    assert asyncio.run(geo.geocode_place("Paris")) is None
+    out = asyncio.run(geo.geocode_place("Paris"))
+    assert out["lat"] == 48.8566 and out["country"] == "France"
+    assert len(calls) == 2
+    # And now it is cached (case-insensitively).
+    assert asyncio.run(geo.geocode_place("paris"))["lat"] == 48.8566
+    assert len(calls) == 2
+
+
+def test_geocode_empty_result_is_a_definitive_miss_and_cached(monkeypatch):
+    calls = _fresh(monkeypatch, lambda r: httpx.Response(200, json=[]))
+    assert asyncio.run(geo.geocode_place("Atlantis")) is None
+    assert asyncio.run(geo.geocode_place("Atlantis")) is None
+    assert len(calls) == 1
+
+
+def test_geocode_transport_failure_is_not_cached(monkeypatch):
+    def handler(request):
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("slow")
+        return httpx.Response(200, json=PARIS)
+    calls = _fresh(monkeypatch, handler)
+    assert asyncio.run(geo.geocode_place("Paris")) is None
+    assert asyncio.run(geo.geocode_place("Paris")) is not None
+    assert len(calls) == 2
+
+
+def test_geocode_keeps_the_honest_user_agent(monkeypatch):
+    seen = {}
+
+    def handler(request):
+        seen["ua"] = request.headers.get("user-agent")
+        return httpx.Response(200, json=PARIS)
+    _fresh(monkeypatch, handler)
+    asyncio.run(geo.geocode_place("Paris"))
+    assert seen["ua"] == geo.USER_AGENT and "sherlock-web" in seen["ua"]
+
+
+IPWHO_OK = {"success": True, "latitude": 37.4, "longitude": -122.0, "city": "Mountain View",
+            "country": "United States", "connection": {"org": "Google"}}
+
+
+def test_geolocate_ip_429_then_200(monkeypatch):
+    def handler(request):
+        if len(calls) == 1:
+            return httpx.Response(429)
+        return httpx.Response(200, json=IPWHO_OK)
+    calls = _fresh(monkeypatch, handler)
+    assert asyncio.run(geo.geolocate_ip("8.8.8.8")) is None
+    out = asyncio.run(geo.geolocate_ip("8.8.8.8"))
+    assert out["country"] == "United States" and out["org"] == "Google"
+    assert len(calls) == 2
+    assert asyncio.run(geo.geolocate_ip("8.8.8.8"))["org"] == "Google"
+    assert len(calls) == 2
+
+
+def test_geolocate_ip_quota_message_is_not_cached_but_invalid_ip_is(monkeypatch):
+    def handler(request):
+        if len(calls) == 1:
+            return httpx.Response(200, json={"success": False,
+                                             "message": "You've hit the monthly limit"})
+        if "8.8.8.8" in str(request.url):
+            return httpx.Response(200, json=IPWHO_OK)
+        return httpx.Response(200, json={"success": False, "message": "Invalid IP address"})
+    calls = _fresh(monkeypatch, handler)
+    assert asyncio.run(geo.geolocate_ip("8.8.8.8")) is None      # quota: not cached
+    assert asyncio.run(geo.geolocate_ip("8.8.8.8")) is not None
+    assert asyncio.run(geo.geolocate_ip("1.1.1.1")) is None       # "invalid": definitive
+    assert asyncio.run(geo.geolocate_ip("1.1.1.1")) is None
+    assert len(calls) == 3 and geo._ip_cache.is_absent("1.1.1.1")
+
+
+def test_private_ip_is_never_sent(monkeypatch):
+    calls = _fresh(monkeypatch, lambda r: httpx.Response(200, json=IPWHO_OK))
+    assert asyncio.run(geo.geolocate_ip("10.0.0.5")) is None
+    assert calls == []
