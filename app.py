@@ -933,7 +933,7 @@ async def search_stream(
                 except asyncio.TimeoutError:
                     if await request.is_disconnected():
                         break
-                    yield ": keepalive\n\n"
+                    yield "event: keepalive\ndata: {}\n\n"
                     continue
                 if item is None:  # sentinel: scan finished
                     break
@@ -1428,7 +1428,7 @@ if RECON_AVAILABLE:
                     except asyncio.TimeoutError:
                         if await request.is_disconnected():
                             break
-                        yield ": keepalive\n\n"
+                        yield "event: keepalive\ndata: {}\n\n"
                         continue
                     if item is None:
                         break
