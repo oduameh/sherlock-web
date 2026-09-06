@@ -120,7 +120,33 @@ def test_report_keeps_https_links():
     out = render_report(_report_run())
     assert f"href='{GOOD_SITE}'" in out
     assert f"href='{GOOD_ACCOUNT}'" in out
-    assert "src='https://0.gravatar.com/avatar/abc'" in out  # avatar is an <img>, not a link
+
+
+THUMB = "data:image/png;base64,iVBORw0KGgo="
+
+
+def test_report_never_links_an_avatar_to_the_subjects_host():
+    """V11: a saved report opened later must not fetch from the subject's
+    host, so the remote avatar URL never becomes an ``<img src>`` — only a
+    thumbnail the server made from proxied bytes does."""
+    run = _report_run()
+    run["results"]["accounts"][0]["enrichment"] = {"og_image": "https://cdn.example/alice.png"}
+    out = render_report(run)
+    assert "<img" not in out                     # nothing was proxied: no picture
+    assert "0.gravatar.com/avatar/abc" not in out and "cdn.example" not in out
+    out = render_report(run, avatars={"https://cdn.example/alice.png": THUMB,
+                                      "https://0.gravatar.com/avatar/abc": THUMB})
+    assert out.count(f'<img class="avatar" src="{THUMB}"') == 2
+    assert "cdn.example" not in out and "0.gravatar.com/avatar" not in out
+
+
+def test_report_only_embeds_server_made_thumbnails():
+    run = _report_run()
+    run["results"]["accounts"][0]["enrichment"] = {"og_image": "https://cdn.example/alice.png"}
+    for bad in ("https://cdn.example/alice.png", "data:image/svg+xml,<svg onload=alert(1)>",
+                "javascript:alert(1)", "data:image/png;base64,\u00e9", ""):
+        out = render_report(run, avatars={"https://cdn.example/alice.png": bad})
+        assert "<img" not in out, bad
 
 
 def test_report_escapes_script_in_display_name():
@@ -172,9 +198,9 @@ def _brokers_block():
     }
 
 
-def _assert_only_http_urls(html):
-    bad = [u for _, u in ATTR_URL.findall(html)
-           if u and not u.lower().startswith(("http://", "https://"))]
+def _assert_only_http_urls(html, *, thumbs=False):
+    ok = ("http://", "https://") + (("data:image/png;base64,",) if thumbs else ())
+    bad = [u for _, u in ATTR_URL.findall(html) if u and not u.lower().startswith(ok)]
     assert bad == [], f"non-http(s) URL attributes rendered: {bad}"
 
 
@@ -183,9 +209,11 @@ def test_report_gates_img_src_and_every_url_attribute():
     run["results"]["accounts"].append({**_account(), "site": "Evil",
         "enrichment": {"og_image": "javascript:alert(2)", "og_title": "Evil"}})
     run["results"]["email"]["gravatar"]["avatar_url"] = "data:image/svg+xml,evil"
-    out = render_report(run)
-    _assert_only_http_urls(out)
+    out = render_report(run, avatars={"javascript:alert(2)": THUMB,
+                                      "data:image/svg+xml,evil": THUMB})
+    _assert_only_http_urls(out, thumbs=True)
     assert "alert(2)" not in out                    # a hostile src is dropped, not escaped
+    assert "svg" not in out
     assert f"href='{GOOD_SITE}'" in out
 
 

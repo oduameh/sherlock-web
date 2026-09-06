@@ -1044,7 +1044,7 @@ if RECON_AVAILABLE:
     # still render.
 
     @app.get("/api/recon/report/{run_id}")
-    def recon_report(run_id: int) -> Response:
+    async def recon_report(run_id: int) -> Response:
         with db_connect(DB_PATH) as conn:
             row = conn.execute(
                 "SELECT ts, username, results, kind, investigation_id FROM runs WHERE id = ?",
@@ -1083,7 +1083,8 @@ if RECON_AVAILABLE:
                     "variants": [], "email": {}, "correlation": [],
                 },
             }
-        return Response(render_report(run), media_type="text/html")
+        avatars = await _avatar_thumbnails(_report_avatar_urls(run["results"]))
+        return Response(render_report(run, avatars=avatars), media_type="text/html")
 
     # -----------------------------------------------------------------------
     # v3: Investigations — unified pipeline, graph, dossier, monitoring
@@ -1774,6 +1775,8 @@ if RECON_AVAILABLE:
     AVATAR_MAX_CONCURRENT = 8
     AVATAR_TOTAL_DEADLINE_S = 10.0     # wall-clock cap: per-op timeouts let a drip run for minutes
     AVATAR_MAX_REDIRECTS = 3
+    AVATAR_REPORT_MAX = 60             # thumbnails a saved report embeds at most
+    AVATAR_REPORT_BUDGET_S = 12.0      # wall-clock for all of them; the rest render without
     # A media type we will relay: image/<subtype>, never SVG — an SVG served
     # from this origin could carry script if navigated to directly.
     _AVATAR_MEDIA_RE = re.compile(r"^image/[a-z0-9][a-z0-9.+-]*$")
@@ -1892,35 +1895,35 @@ if RECON_AVAILABLE:
             logging.getLogger("app").debug("avatar fetch error: %r", exc)
             return 502, f"upstream fetch failed: {type(exc).__name__}", b""
 
-    @app.get("/api/avatar")
-    async def avatar_proxy(u: str = Query(...)) -> Response:
-        """Relay a remote avatar so the analyst's browser never contacts the
-        subject's host. 400 for a non-http(s) URL, 403 when policy or the SSRF
-        guard refuses, 413 over 2 MiB, 415 when it is not a raster image, 502
-        when upstream fails (the client hides the image on any error)."""
+    def _avatar_url_refusal(url: str) -> tuple[int, str] | None:
+        """Why ``url`` may not be fetched as an avatar — ``(status, message)``
+        — or None. Shared by the proxy route and report thumbnails so the two
+        never drift: http(s) only, ≤ 2 KiB, no credentials (they would go
+        upstream as Basic auth), ports 80/443 only (a port scan through
+        differing 502 texts otherwise), and the access policy."""
         from urllib.parse import urlsplit
-        url = u.strip()
         try:
             parts = urlsplit(url) if 0 < len(url) <= AVATAR_MAX_URL_LEN else None
         except ValueError:
             parts = None
         if parts is None or parts.scheme.lower() not in ("http", "https") \
                 or not parts.netloc:
-            return JSONResponse({"error": "only http(s) URLs can be proxied"},
-                                status_code=400)
-        # No credentials (they would be sent upstream as Basic auth) and only
-        # the web ports (a port scan through differing 502 texts otherwise).
+            return 400, "only http(s) URLs can be proxied"
         try:
             port = parts.port
         except ValueError:
             port = -1
         if parts.username is not None or port not in (None, 80, 443):
-            return JSONResponse({"error": "only plain http(s) URLs on ports 80/443 can be proxied"},
-                                status_code=400)
+            return 400, "only plain http(s) URLs on ports 80/443 can be proxied"
         reason = _policy.denied_reason(url)
         if reason:
-            return JSONResponse({"error": f"refused: access policy: {reason}"},
-                                status_code=403)
+            return 403, f"refused: access policy: {reason}"
+        return None
+
+    async def _avatar_bytes(url: str) -> tuple[int, str, bytes]:
+        """``(200, media_type, body)`` from the cache or one gated fetch, else
+        ``(status, error_message, b"")``. ``url`` must have passed
+        :func:`_avatar_url_refusal`."""
         hit = _avatar_cache.get(url)
         if hit is None:
             async with _avatar_gate:
@@ -1928,10 +1931,70 @@ if RECON_AVAILABLE:
                 if hit is None:
                     status, detail, body = await _fetch_avatar(url)
                     if status != 200:
-                        return JSONResponse({"error": detail}, status_code=status)
+                        return status, detail, b""
                     _avatar_cache.put(url, detail, body)
                     hit = (detail, body)
-        ctype, body = hit
+        return 200, hit[0], hit[1]
+
+    def _report_avatar_urls(results: dict) -> list[str]:
+        """Every avatar URL a report would show, in render order, deduplicated."""
+        from recon.rows import avatar as _avatar_of
+        seen: dict[str, None] = {}
+        for row in results.get("accounts") or []:
+            u = _avatar_of(row) if isinstance(row, dict) else None
+            if u:
+                seen.setdefault(u, None)
+        grav = (results.get("email") or {}).get("gravatar") or {}
+        if isinstance(grav, dict) and isinstance(grav.get("avatar_url"), str) \
+                and grav["avatar_url"]:
+            seen.setdefault(grav["avatar_url"], None)
+        return list(seen)
+
+    async def _avatar_thumbnails(urls: list[str]) -> dict[str, str]:
+        """Server-made ``data:`` thumbnails for the avatars a saved report
+        embeds (V11: the file must never fetch from the subject's host).
+        Fetches go through the same refusal list, SSRF guard, cache and
+        concurrency gate as the proxy route; at most ``AVATAR_REPORT_MAX``
+        URLs, all within ``AVATAR_REPORT_BUDGET_S`` — whatever has not
+        finished by then is left out and the row renders without a picture."""
+        from recon.thumbnail import thumbnail_data_uri
+        out: dict[str, str] = {}
+        todo = [u for u in urls if _avatar_url_refusal(u) is None][:AVATAR_REPORT_MAX]
+        if not todo:
+            return out
+
+        async def one(url: str) -> None:
+            status, ctype, body = await _avatar_bytes(url)
+            if status == 200:
+                uri = await asyncio.to_thread(thumbnail_data_uri, body)
+                if uri:
+                    out[url] = uri
+
+        tasks = [asyncio.create_task(one(u)) for u in todo]
+        try:
+            async with asyncio.timeout(AVATAR_REPORT_BUDGET_S):
+                await asyncio.gather(*tasks, return_exceptions=True)
+        except TimeoutError:
+            for t in tasks:
+                t.cancel()
+            logging.getLogger("app").info(
+                "report thumbnails: budget of %.0fs hit, %d of %d embedded",
+                AVATAR_REPORT_BUDGET_S, len(out), len(todo))
+        return out
+
+    @app.get("/api/avatar")
+    async def avatar_proxy(u: str = Query(...)) -> Response:
+        """Relay a remote avatar so the analyst's browser never contacts the
+        subject's host. 400 for a non-http(s) URL, 403 when policy or the SSRF
+        guard refuses, 413 over 2 MiB, 415 when it is not a raster image, 502
+        when upstream fails (the client hides the image on any error)."""
+        url = u.strip()
+        refusal = _avatar_url_refusal(url)
+        if refusal is not None:
+            return JSONResponse({"error": refusal[1]}, status_code=refusal[0])
+        status, ctype, body = await _avatar_bytes(url)
+        if status != 200:
+            return JSONResponse({"error": ctype}, status_code=status)
         return Response(content=body, media_type=ctype, headers={
             "Cache-Control": "private, max-age=86400",
             "X-Content-Type-Options": "nosniff",
