@@ -30,6 +30,12 @@ Design:
   and maigret's ``proxy=`` params, and tracked in ``proxy_health``. Proxies
   whose failure rate exceeds ``PROXY_BAN_RATE`` over ``PROXY_BAN_MIN_USES``
   uses are benched for ``PROXY_RECHECK_S``.
+* Per-run diagnostics: besides the per-class tally, :meth:`RunRouter.observe`
+  keeps a ``(engine, class)`` tally, up to ``FAILED_CHECKS_CAP`` failed
+  checks with a truncated context, and scores in-run retries as recovered or
+  not. The pipeline persists these in ``summary["run"]`` so a stored case can
+  say which source failed, why, and whether the retry worked (audit
+  ``ops-observability.md`` §10 gap 6 / architecture §6).
 
 Everything degrades gracefully: if the database is unavailable the store
 disables itself (one warning) and scans run exactly as before.
@@ -88,7 +94,29 @@ CLASS_LABELS = {
 # the circuit breaker (retrying a 429 or WAF block immediately is pointless).
 TRANSIENT_CLASSES = frozenset({TIMEOUT, CONN_RESET, HTTP_5XX, DNS})
 
-_SUCCESS_STATUSES = {"claimed", "available"}
+# Decisive answers from any engine: sherlock/maigret Claimed/Available, WMN
+# claimed/available, and the signals engine's exists/absent (an adapter's
+# "no such account" is a real answer, not a failure).
+_SUCCESS_STATUSES = {"claimed", "available", "exists", "absent"}
+
+# A check the access policy refused before any request was made (WMN's
+# ``policy`` status; a detector's ``policy: …`` signal). Nothing was fetched,
+# so there is neither a success nor a failure to remember — observe() drops
+# such rows (retrieval-reliability defect 8: recording them as failures
+# tripped circuits for sites we never touched).
+POLICY_STATUS = "policy"
+
+# Per-run record of failed checks kept for summary["run"] (bounded).
+FAILED_CHECKS_CAP = 120   # ~40 KB worst case in summary["run"] (300 gave 130 KB)
+FAILED_CHECK_CONTEXT_CHARS = 80
+
+
+def is_policy_observation(status: str, context: str = "") -> bool:
+    """True when the row describes a policy refusal rather than a fetch."""
+    s = (status or "").strip().lower()
+    return (s == POLICY_STATUS
+            or (context or "").lstrip().lower().startswith("policy:"))
+
 
 _DNS_RE = re.compile(
     r"name resolution|getaddrinfo|nodename nor servname|no such host|\bdns\b"
@@ -107,6 +135,9 @@ def classify(status: str, context: str = "", exception: str = "") -> Optional[st
     """
     s = (status or "").strip().lower()
     if s in _SUCCESS_STATUSES:
+        return None
+    # Never an error: the site was not fetched at all (see POLICY_STATUS).
+    if is_policy_observation(status, context):
         return None
     if s == "waf":
         return HTTP_403_WAF
@@ -533,10 +564,17 @@ class RunRouter:
         self.store = SiteHealthStore(db_path) if db_path else None
         self.emit = emit
         self.error_counts: Counter = Counter()
+        # (engine, class) -> n; the JSON view is errors_by_engine_class().
+        self.engine_error_counts: Counter = Counter()
+        # Up to FAILED_CHECKS_CAP {engine, site, username, class, context}.
+        self.failed_checks: list[dict] = []
         self.degraded: list[dict] = []
         self._degraded_keys: set = set()
         self._transient: list[dict] = []
         self.retries_done = 0
+        # Retried sites whose re-scan came back ok (see begin_retries()).
+        self.retries_recovered = 0
+        self._retrying: set[tuple] = set()
         self.observations = 0
         self.error_observations = 0
         self.disabled = self.store is None or not self.store.available
@@ -594,15 +632,39 @@ class RunRouter:
 
         Cheap and non-blocking: updates in-memory tallies and buffers the
         observation. The buffer is persisted in :meth:`finish`.
+
+        Also keeps the per-run facts that used to die with the SSE stream
+        (ops-observability gap 6): the ``(engine, class)`` tally, up to
+        ``FAILED_CHECKS_CAP`` failed checks (context cut to
+        ``FAILED_CHECK_CONTEXT_CHARS``), and — for sites registered through
+        :meth:`begin_retries` — whether the re-scan recovered.
+
+        A policy row (status ``policy`` or a ``policy:`` context) is dropped
+        entirely: the site was never fetched, so there is nothing to observe,
+        neither a success nor a failure.
         """
+        if is_policy_observation(status, context):
+            return
         err_class = classify(status, context)
         latency_ms = query_time * 1000 if query_time else None
         ts = time.time()
         with self._lock:
             self.observations += 1
+            retry_key = (engine, username, site)
+            if retry_key in self._retrying:
+                self._retrying.discard(retry_key)
+                if err_class is None:
+                    self.retries_recovered += 1
             if err_class is not None:
                 self.error_observations += 1
                 self.error_counts[err_class] += 1
+                self.engine_error_counts[(engine, err_class)] += 1
+                if len(self.failed_checks) < FAILED_CHECKS_CAP:
+                    self.failed_checks.append({
+                        "engine": engine, "site": site, "username": username,
+                        "class": err_class,
+                        "context": (context or "")[:FAILED_CHECK_CONTEXT_CHARS],
+                    })
                 if err_class in TRANSIENT_CLASSES:
                     self._transient.append({
                         "engine": engine, "site": site, "username": username,
@@ -634,6 +696,32 @@ class RunRouter:
             self._transient = rest
         return picked
 
+    def begin_retries(self, engine: str, username: Optional[str],
+                      sites) -> int:
+        """Count a batch of in-run retries and register each site so its
+        re-scan observation can be scored: an ok result counts as recovered.
+
+        Replaces the callers' bare ``retries_done += n`` so the run can report
+        ``retries {attempted, recovered}`` (ops-observability §11 A) — before
+        this, whether a retry ever worked was not recorded anywhere. Returns
+        the number registered.
+        """
+        names = list(sites)
+        with self._lock:
+            self.retries_done += len(names)
+            for name in names:
+                self._retrying.add((engine, username, name))
+        return len(names)
+
+    def errors_by_engine_class(self) -> dict:
+        """``{engine: {class: n}}`` — the JSON-shaped (engine, class) tally."""
+        with self._lock:
+            items = list(self.engine_error_counts.items())
+        out: dict = {}
+        for (engine, cls), n in items:
+            out.setdefault(engine, {})[cls] = n
+        return out
+
     # -- end of run -------------------------------------------------------------
 
     def finish(self) -> None:
@@ -657,10 +745,16 @@ class RunRouter:
             self.store.record_proxy(self.proxy, ok)
 
     def breakdown(self) -> dict:
-        """Additive fields for the run's final done/summary payload."""
+        """Additive fields for the run's final done/summary payload.
+
+        ``retries_done`` was counted but never reported (ops-observability
+        §5 "Retries"); it and ``retries_recovered`` are additive here.
+        """
         return {
             "error_breakdown": dict(self.error_counts),
             "degraded_sources": len(self.degraded),
+            "retries_done": self.retries_done,
+            "retries_recovered": self.retries_recovered,
         }
 
 

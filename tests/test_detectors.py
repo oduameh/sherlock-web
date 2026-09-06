@@ -161,3 +161,25 @@ def test_rate_limited_detector_is_blocked_without_escalation(monkeypatch):
     out = asyncio.run(detectors.detector_for("Telegram").check("durov"))
     assert out["status"] == detectors.BLOCKED
     assert calls == {"tls": 0, "browser": 0}
+
+
+def test_challenge_page_is_blocked_not_absent():
+    """A walled detector used to answer ABSENT (and the circuit breaker
+    recorded it as healthy)."""
+    t = detectors.detector_for("Telegram")
+    wall = "<html><head><title>Just a moment...</title></head><body>Checking your browser before accessing</body></html>"
+    assert t.classify(200, wall) == detectors.BLOCKED
+    consent = "<html><head><title>Before you continue to Example</title></head><body><h1>Before you continue to Example</h1><p>We use cookies.</p></body></html>"
+    assert t.classify(200, consent) == detectors.BLOCKED
+    # A real marker on the page always wins over a stray phrase.
+    assert t.classify(200, "<div class='tgme_page_title'>Just a moment</div>") == detectors.EXISTS
+
+
+def test_transport_failure_keeps_its_exception_class(monkeypatch):
+    async def boom(url):
+        detectors._LAST_FETCH_ERROR[url] = "ConnectTimeout"
+        return None, None
+    monkeypatch.setattr(detectors, "_fetch", boom)
+    monkeypatch.setattr(detectors.stealthweb, "enabled", lambda: False)
+    out = asyncio.run(detectors.detector_for("Telegram").check("someone"))
+    assert out["status"] == detectors.BLOCKED and "ConnectTimeout" in out["signal"]

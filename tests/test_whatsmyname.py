@@ -238,3 +238,59 @@ def test_denied_high_value_host_never_triggers_stealth(monkeypatch):
                                       stealth_retry=True, budget={"left": 5}))
     assert res.context.startswith("policy:")
     assert called["n"] == 0
+
+
+# --- query_time (latency for the router's EWMA; ops-observability gap 7) ----
+
+class _SlowResp(_FakeResp):
+    async def aiter_bytes(self, _n):
+        await asyncio.sleep(0.005)
+        yield self._body
+
+
+class _SlowClient(_FakeClient):
+    def stream(self, _method, _url):
+        self.calls += 1
+        return _SlowResp(self._status, self._body)
+
+
+def test_check_site_sets_query_time_on_success():
+    # 0 of 649 WhatsMyName site_health rows had a latency: query_time was
+    # never set. It is the plain request's wall time.
+    res = asyncio.run(wmn._check_site(_SlowClient(200, "<div class=profile-header>"),
+                                      _SITE, "alice"))
+    assert res.status == wmn.CLAIMED
+    assert isinstance(res.query_time, float) and res.query_time >= 0.005
+
+
+def test_check_site_sets_query_time_on_failure():
+    class _Boom:
+        def stream(self, *_a):
+            raise RuntimeError("connection reset")
+
+    res = asyncio.run(wmn._check_site(_Boom(), _SITE, "alice"))
+    assert res.status == wmn.UNKNOWN
+    assert isinstance(res.query_time, float) and res.query_time >= 0.0
+
+
+def test_policy_result_has_no_query_time():
+    ig = dict(_SITE, name="Instagram", uri_check="https://instagram.com/{account}")
+    res = asyncio.run(wmn._check_site(_FakeClient(200, "x"), ig, "alice"))
+    assert res.status == wmn.POLICY and res.query_time is None
+
+
+def test_query_time_feeds_the_router_latency(tmp_path):
+    from dbconn import connect as db_connect
+    from recon.router import RunRouter, SiteHealthStore, init_tables
+
+    db = tmp_path / "h.db"
+    with db_connect(db) as conn:
+        init_tables(conn)
+    res = asyncio.run(wmn._check_site(_SlowClient(200, "<div class=profile-header>"),
+                                      _SITE, "alice"))
+    r = RunRouter(db)
+    r.observe("whatsmyname", res.site_name, res.status, res.context, res.query_time)
+    r.finish()
+    (row,) = SiteHealthStore(db).all_rows()
+    assert row["engine"] == "whatsmyname"
+    assert row["ewma_latency_ms"] is not None and row["ewma_latency_ms"] >= 5

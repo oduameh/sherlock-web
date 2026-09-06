@@ -274,12 +274,18 @@ async def check_account(site: str, username: str) -> Optional[dict]:
     return await a.check(username)
 
 
-async def discover(username: str) -> list[dict]:
+async def discover(username: str, stats: Optional[dict] = None) -> list[dict]:
     """DISCOVERY: query every adapter's public API for ``username`` directly,
     independent of the third-party engines. Each hit is a definitive API answer
     — far higher signal than a page guess — carrying identity + dates. Returns a
     list of ``{site, url, identity, temporal, source_url}`` for EXISTS results
     only. Never raises; failures and absences are simply omitted.
+
+    ``stats``, when given, receives every adapter's outcome —
+    ``{name: {kind, status, signal, http_status}}`` — including the ABSENT and
+    BLOCKED answers the return value omits, so the caller can observe them. A
+    blocked adapter used to be invisible to the circuit breaker and the Health
+    tab (audit ops-observability gap 8). The return shape is unchanged.
 
     This is bounded to a real handle (never fan it across name candidates): it
     is at most ``len(ADAPTERS)`` public-API calls, one per platform.
@@ -292,8 +298,20 @@ async def discover(username: str) -> list[dict]:
     async def _one(a: Adapter) -> Optional[dict]:
         try:
             res = await a.check(username)
-        except Exception:
+        except Exception as exc:
+            if stats is not None:
+                stats[a.name] = {
+                    "kind": "adapter", "status": BLOCKED,
+                    "signal": f"discover failed ({type(exc).__name__})",
+                    "http_status": None,
+                }
             return None
+        if stats is not None:
+            stats[a.name] = {
+                "kind": "adapter", "status": res.get("status"),
+                "signal": res.get("signal"),
+                "http_status": res.get("http_status"),
+            }
         if res.get("status") != EXISTS:
             return None
         return {

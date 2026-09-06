@@ -91,6 +91,7 @@
   var cards = {};             // username -> DOM refs (quick scan)
   var invRows = {};           // "username|normsite" -> {el, badgesEl, data}
   var invCards = {};          // section key -> card refs
+  var invPolicySkipped = 0;   // sites the access policy kept every engine from
   var currentInvId = null;    // investigation id (live or loaded)
   var currentInvInputs = null;
   var holeheCounts = { hits: 0, checked: 0 };
@@ -594,6 +595,20 @@
           names.slice(0, 5).join(", ") + (names.length > 5 ? "…" : ""));
   }
 
+  // skipped_policy mirrors skipped_degraded ({count, sites:[{site, engine, reason}]}):
+  // not an error and not a finding — "we did not look", once per denied site.
+  function notePolicySkipped(d) {
+    var names = (d.sites || []).map(function (s) { return s.site; });
+    toast(d.count + " site(s) not examined — access policy: " +
+          names.slice(0, 5).join(", ") + (names.length > 5 ? "…" : ""));
+  }
+
+  function retriesText(d) {
+    var r = d && d.retries;
+    if (!r || !r.attempted) return "";
+    return r.attempted + " transient failure(s) retried, " + (r.recovered || 0) + " recovered";
+  }
+
   function loadHealthSources() {
     var sum = document.getElementById("healthSummary");
     var list = document.getElementById("healthList");
@@ -749,6 +764,7 @@
     cards = {};
     invRows = {};
     invCards = {};
+    invPolicySkipped = 0;
     currentRun = [];
     currentInvId = null;
     currentInvInputs = null;
@@ -1928,6 +1944,11 @@
     invEs.addEventListener("skipped_degraded", function (e) {
       noteSkippedDegraded(JSON.parse(e.data));
     });
+    invEs.addEventListener("skipped_policy", function (e) {
+      var d = JSON.parse(e.data);
+      invPolicySkipped = d.count || 0;
+      notePolicySkipped(d);
+    });
     invEs.addEventListener("retry", function (e) {
       var d = JSON.parse(e.data);
       var c = invCards[sectionKeyFor(d)];
@@ -1946,6 +1967,9 @@
       if (bd) msg += " " + bd + ".";
       var dg = degradedText(d);
       if (dg) msg += " " + dg + ".";
+      var rt = retriesText(d);
+      if (rt) msg += " " + rt + ".";
+      if (invPolicySkipped) msg += " " + invPolicySkipped + " site(s) not examined — access policy.";
       els.overallText.textContent = msg;
       els.overallFill.style.width = "100%";
       Object.keys(invCards).forEach(function (k) {

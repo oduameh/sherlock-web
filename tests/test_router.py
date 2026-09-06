@@ -442,3 +442,95 @@ def test_sources_summary_worst_first(store):
     assert agg["sites_tracked"] == 2
     assert agg["circuits_open"] == 1
     assert agg["observations"] == 7
+
+
+# ---------------------------------------------------------------------------
+# Per-run diagnostics (summary["run"] inputs — ops-observability gap 6)
+# ---------------------------------------------------------------------------
+
+def test_observe_keeps_engine_class_tally_and_failed_checks():
+    r = RunRouter(None)
+    r.observe("sherlock", "GitHub", "Unknown", "Timeout Error", username="a")
+    r.observe("whatsmyname", "Foo", "unknown", "HTTP 503", username="a")
+    r.observe("signals", "Bluesky", "blocked",
+              "blocked: HTTP 429 — cannot determine", username="a")
+    r.observe("signals", "GitHub", "exists", "GitHub public API confirms", username="a")
+    r.observe("signals", "Telegram", "absent", "Telegram: no such profile", username="a")
+    assert r.errors_by_engine_class() == {
+        "sherlock": {"timeout": 1}, "whatsmyname": {"http_5xx": 1},
+        "signals": {"http_429": 1}}
+    assert [c["site"] for c in r.failed_checks] == ["GitHub", "Foo", "Bluesky"]
+    assert r.failed_checks[0] == {"engine": "sherlock", "site": "GitHub", "username": "a",
+                                  "class": "timeout", "context": "Timeout Error"}
+    assert r.observations == 5 and r.error_observations == 3
+    assert r.error_counts == {"timeout": 1, "http_5xx": 1, "http_429": 1}
+
+
+def test_failed_checks_are_capped_and_context_truncated():
+    r = RunRouter(None)
+    for i in range(router.FAILED_CHECKS_CAP + 25):
+        r.observe("sherlock", f"S{i}", "Unknown", "x" * 500)
+    assert len(r.failed_checks) == router.FAILED_CHECKS_CAP
+    assert all(len(c["context"]) == router.FAILED_CHECK_CONTEXT_CHARS
+               for c in r.failed_checks)
+    assert r.error_observations == router.FAILED_CHECKS_CAP + 25   # tally is not capped
+
+
+def test_begin_retries_scores_recovered_from_the_rescan_observation():
+    r = RunRouter(None)
+    r.observe("sherlock", "A", "Unknown", "Timeout Error", username="u")
+    r.observe("sherlock", "B", "Unknown", "Timeout Error", username="u")
+    recs = r.drain_transient("sherlock", "u")
+    assert {x["site"] for x in recs} == {"A", "B"}
+    assert r.begin_retries("sherlock", "u", [x["site"] for x in recs]) == 2
+    r.observe("sherlock", "A", "Claimed", username="u")                    # recovered
+    r.observe("sherlock", "B", "Unknown", "Timeout Error", username="u")   # still failing
+    assert r.retries_done == 2 and r.retries_recovered == 1
+    bd = r.breakdown()
+    assert bd["retries_done"] == 2 and bd["retries_recovered"] == 1
+    assert set(bd) >= {"error_breakdown", "degraded_sources"}      # nothing renamed
+    # A later plain observation of A is no longer a retry.
+    r.observe("sherlock", "A", "Claimed", username="u")
+    assert r.retries_recovered == 1
+    # A different username's observation of the same site is not this retry.
+    r.begin_retries("sherlock", "u", ["C"])
+    r.observe("sherlock", "C", "Claimed", username="other")
+    assert r.retries_recovered == 1
+
+
+def test_policy_rows_are_never_observed():
+    r = RunRouter(None)
+    r.observe("whatsmyname", "Instagram", "policy", "policy: instagram.com robots.txt")
+    r.observe("signals", "Steam", "blocked", "policy: steamcommunity.com disallows")
+    assert r.observations == 0 and r.error_observations == 0
+    assert r.failed_checks == [] and r.error_counts == {}
+    assert classify("policy", "policy: x") is None
+    assert classify("blocked", "policy: x") is None
+    assert router.is_policy_observation("blocked", "  policy: x")
+    assert not router.is_policy_observation("blocked", "blocked: HTTP 403")
+
+
+@pytest.mark.parametrize("status,context,expected", [
+    # Signals engine (adapters/detectors) vocabulary: exists/absent decide,
+    # blocked is a failure classified by its reason.
+    ("exists", "GitHub public API confirms this account exists", None),
+    ("absent", "Telegram: no such profile", None),
+    ("blocked", "blocked: HTTP 429 — cannot determine", "http_429"),
+    ("blocked", "blocked: HTTP 403 — cannot determine", "http_403_waf"),
+    ("blocked", "HTTP 503: Steam: blocked — cannot determine", "http_5xx"),
+    ("blocked", "request failed (ReadTimeout)", "timeout"),
+    ("blocked", "request failed (ConnectError)", "conn_reset"),
+    ("blocked", "response was not JSON — cannot determine", "unknown"),
+])
+def test_classify_signals_engine_outcomes(status, context, expected):
+    assert classify(status, context) == expected
+
+
+def test_signals_observations_reach_site_health(store):
+    # An adapter block used to be invisible to the breaker and the Health tab.
+    r = RunRouter(store.db_path)
+    r.observe("signals", "Bluesky", "blocked", "blocked: HTTP 429 — cannot determine")
+    r.observe("signals", "Telegram", "absent", "Telegram: no such profile")
+    r.finish()
+    assert _circuit(store, "Bluesky", "signals")["window"][0]["class"] == "http_429"
+    assert _circuit(store, "Telegram", "signals")["window"][0]["ok"] == 1
