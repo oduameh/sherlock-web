@@ -126,3 +126,82 @@ def test_assert_public_url_blocks_non_http_scheme():
 def test_assert_public_url_allows_public_ip_literal():
     # No network call — an IP literal is validated without resolving.
     _run("http://8.8.8.8/")
+
+
+# --- tier-3 session lifecycle (regression) ----------------------------------
+
+def test_session_is_started_not_just_constructed(monkeypatch):
+    """AsyncStealthySession only records options in its constructor — without
+    an awaited start() every fetch raises "Context manager has been closed"
+    and tier 3 silently returns nothing. This regression guards that await."""
+    started = {"n": 0}
+
+    class _FakeSession:
+        def __init__(self, **kw):
+            self.kwargs = kw
+
+        async def start(self):
+            started["n"] += 1
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(stealthweb, "AsyncStealthySession", _FakeSession)
+    monkeypatch.setattr(stealthweb, "_session", None)
+    monkeypatch.setattr(stealthweb, "_session_dead", False)
+    monkeypatch.setattr(stealthweb, "_session_lock", None)
+
+    session = asyncio.run(stealthweb._get_session())
+    assert session is not None
+    assert started["n"] == 1, "start() was never awaited — tier 3 would be dead"
+    # The cost-cutting options must survive.
+    assert session.kwargs.get("disable_resources") is True
+    assert session.kwargs.get("block_ads") is True
+
+
+def test_failed_start_disables_tier3_instead_of_raising(monkeypatch):
+    """A missing browser binary must degrade to 'tier 3 off', never crash."""
+    class _Boom:
+        def __init__(self, **kw):
+            pass
+
+        async def start(self):
+            raise RuntimeError("Executable doesn't exist")
+
+    monkeypatch.setattr(stealthweb, "AsyncStealthySession", _Boom)
+    monkeypatch.setattr(stealthweb, "_session", None)
+    monkeypatch.setattr(stealthweb, "_session_dead", False)
+    monkeypatch.setattr(stealthweb, "_session_lock", None)
+
+    assert asyncio.run(stealthweb._get_session()) is None
+    assert stealthweb._session_dead is True
+    monkeypatch.setattr(stealthweb, "_session_dead", False)
+
+
+def test_cloudflare_solver_is_opt_in(monkeypatch):
+    """The solver forces a 60s timeout ceiling, so it must default to off."""
+    seen = {}
+
+    class _Session:
+        async def fetch(self, url, **kw):
+            seen.update(kw)
+
+            class _R:
+                status = 200
+                html_content = "<html>ok</html>"
+            return _R()
+
+    async def _fake_get_session():
+        return _Session()
+
+    monkeypatch.setattr(stealthweb, "_get_session", _fake_get_session)
+
+    async def _ok(url):
+        return None
+    monkeypatch.setattr(safeweb, "assert_public_url", _ok)
+
+    asyncio.run(stealthweb.fetch_browser("https://example.com"))
+    assert seen.get("solve_cloudflare") is False
+    asyncio.run(stealthweb.fetch_browser("https://example.com",
+                                         solve_cloudflare=True))
+    assert seen.get("solve_cloudflare") is True

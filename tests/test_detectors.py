@@ -77,3 +77,58 @@ def test_discover_never_raises_and_empty_is_noop(monkeypatch):
     monkeypatch.setattr(detectors, "_fetch", boom)
     monkeypatch.setattr(detectors.stealthweb, "enabled", lambda: False)
     assert asyncio.run(detectors.discover("someone")) == []
+
+
+# --- tier-3 escalation for JS-rendered / walled pages -----------------------
+
+def test_shell_page_escalates_to_the_browser(monkeypatch):
+    """A JS shell must reach the real browser — otherwise `classify` calls a
+    live account ABSENT (a false negative)."""
+    calls = {"tls": 0, "browser": 0}
+
+    async def fake_fetch(url):
+        return 200, "<html><body><div id=root></div></body></html>"   # shell
+
+    async def fake_tls(url):
+        calls["tls"] += 1
+        return 200, "<html><body><div id=root></div></body></html>"   # still a shell
+
+    async def fake_browser(url, solve_cloudflare=False):
+        calls["browser"] += 1
+        return 200, "<html><div class='tgme_page_title'>Pavel</div></html>"
+
+    monkeypatch.setattr(detectors, "_fetch", fake_fetch)
+    monkeypatch.setattr(detectors.stealthweb, "enabled", lambda: True)
+    monkeypatch.setattr(detectors.stealthweb, "fetch_tls", fake_tls)
+    monkeypatch.setattr(detectors.stealthweb, "fetch_browser", fake_browser)
+    detectors._browser_budget["left"] = detectors.BROWSER_BUDGET
+
+    t = detectors.detector_for("Telegram")
+    out = asyncio.run(t.check("durov"))
+    assert calls["tls"] == 1 and calls["browser"] == 1
+    assert out["status"] == detectors.EXISTS   # rescued from a false ABSENT
+
+
+def test_browser_budget_is_respected(monkeypatch):
+    async def fake_fetch(url):
+        return 200, "<html><body><div id=root></div></body></html>"
+
+    async def fake_tls(url):
+        return 200, "<html><body><div id=root></div></body></html>"
+
+    used = {"n": 0}
+
+    async def fake_browser(url, solve_cloudflare=False):
+        used["n"] += 1
+        return 200, "<html><body><div id=root></div></body></html>"
+
+    monkeypatch.setattr(detectors, "_fetch", fake_fetch)
+    monkeypatch.setattr(detectors.stealthweb, "enabled", lambda: True)
+    monkeypatch.setattr(detectors.stealthweb, "fetch_tls", fake_tls)
+    monkeypatch.setattr(detectors.stealthweb, "fetch_browser", fake_browser)
+    detectors._browser_budget["left"] = 1
+
+    t = detectors.detector_for("Telegram")
+    asyncio.run(t.check("a"))
+    asyncio.run(t.check("b"))
+    assert used["n"] == 1, "budget must cap browser escalations"

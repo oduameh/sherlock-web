@@ -221,7 +221,7 @@ async def _get_session():
             return None
         if _session is None:
             try:
-                _session = AsyncStealthySession(
+                session = AsyncStealthySession(
                     max_pages=2,
                     headless=True,
                     solve_cloudflare=True,
@@ -232,10 +232,17 @@ async def _get_session():
                     block_ads=True,
                     timeout=int(_TIER3_TIMEOUT_S * 1000),
                 )
+                # The constructor only records options — it does NOT launch the
+                # browser. Without start() every fetch raises "Context manager
+                # has been closed" and tier 3 silently returns nothing, so this
+                # await is what actually makes the stealth browser exist.
+                await session.start()
+                _session = session
             except Exception as exc:
                 logger.warning(
                     "stealth browser unavailable (%s) — tier 3 disabled "
-                    "(install browsers with: scrapling install)", exc
+                    "(install the browser with: ./venv/bin/patchright install "
+                    "chromium)", exc
                 )
                 _session_dead = True
                 return None
@@ -243,10 +250,16 @@ async def _get_session():
 
 
 async def fetch_browser(url: str, timeout: float = _TIER3_TIMEOUT_S,
+                        solve_cloudflare: bool = False,
                         ) -> tuple[Optional[int], Optional[str]]:
-    """Fetch ``url`` through the shared headless stealth browser, solving
-    Cloudflare challenges. Same ``(status, html)`` contract; ``(None, None)``
-    on any failure. Never raises."""
+    """Fetch ``url`` through the shared headless stealth browser. Same
+    ``(status, html)`` contract; ``(None, None)`` on any failure. Never raises.
+
+    ``solve_cloudflare`` is opt-in per call because the solver is expensive:
+    Scrapling forces the timeout up to 60 s whenever it is on, and logs an
+    error for every page that turns out not to be challenged. Callers pass it
+    only when a challenge was actually detected (see :func:`has_challenge_markers`).
+    """
     global _session_dead
 
     if not enabled():
@@ -263,7 +276,7 @@ async def fetch_browser(url: str, timeout: float = _TIER3_TIMEOUT_S,
         return None, None
     try:
         resp = await asyncio.wait_for(
-            session.fetch(url, solve_cloudflare=True), timeout=timeout
+            session.fetch(url, solve_cloudflare=solve_cloudflare), timeout=timeout
         )
     except Exception as exc:
         msg = str(exc).lower()

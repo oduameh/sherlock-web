@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Optional
 
 from recon import policy, safeweb, stealthweb
@@ -37,6 +38,11 @@ USER_AGENT = ("sherlock-web/1.0 (OSINT account verification; "
 EXISTS = "exists"
 ABSENT = "absent"
 BLOCKED = "blocked"
+
+# Per-sweep cap on tier-3 (headless browser) escalations — each costs seconds.
+# Reset at the start of every :func:`discover` call.
+BROWSER_BUDGET = int(os.environ.get("RECON_DETECTOR_BROWSER_BUDGET") or "3")
+_browser_budget = {"left": BROWSER_BUDGET}
 
 
 class HtmlDetector:
@@ -101,6 +107,18 @@ class HtmlDetector:
             st2, html2 = await stealthweb.fetch_tls(url)
             if st2 is not None:
                 status, html = st2, html2
+            # Still walled or still a JS shell? Only the real browser can
+            # render it. Without this a single-page profile returns an empty
+            # shell and `classify` would call a live account ABSENT — a false
+            # negative. Budget-capped: the browser costs seconds per page.
+            if (stealthweb.should_escalate(status, html)
+                    and _browser_budget["left"] > 0):
+                _browser_budget["left"] -= 1
+                st3, html3 = await stealthweb.fetch_browser(
+                    url,
+                    solve_cloudflare=stealthweb.has_challenge_markers(html or ""))
+                if st3 is not None:
+                    status, html = st3, html3
 
         verdict = self.classify(status, html)
         out["http_status"] = status
@@ -209,6 +227,7 @@ async def discover(username: str) -> list:
     Never raises. Bounded to a real handle — never fanned across candidates."""
     if not username:
         return []
+    _browser_budget["left"] = BROWSER_BUDGET   # fresh budget per sweep
 
     async def _one(d: HtmlDetector) -> Optional[dict]:
         try:
