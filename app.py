@@ -161,14 +161,21 @@ async def basic_auth_gate(request: Request, call_next):
 # Exclusions (dead / false-positive-prone sites) come from the live list when it
 # was fetched, else from the vendored snapshot recon/data/sherlock-exclusions.txt.
 _SITES_CACHE_DIR = BASE_DIR / "recon" / "data" / "cache"
-_SITES_MAX_AGE_S = float(os.environ.get("SHERLOCK_SITES_MAX_AGE_H") or "168") * 3600
 _VENDORED_EXCLUSIONS = BASE_DIR / "recon" / "data" / "sherlock-exclusions.txt"
 _SITES_FETCH_TIMEOUT_S = 5.0
+_SITES_MIN_COUNT = 200          # a real Sherlock list has ~400 entries
+
+
+def _sites_max_age_s() -> float:
+    try:
+        return float(os.environ.get("SHERLOCK_SITES_MAX_AGE_H") or "168") * 3600
+    except ValueError:
+        return 168 * 3600
 
 
 def _read_exclusions(path: Path) -> set:
     try:
-        return {ln.strip() for ln in path.read_text().splitlines()
+        return {ln.strip().lower() for ln in path.read_text().splitlines()
                 if ln.strip() and not ln.startswith("#")}
     except OSError:
         return set()
@@ -181,53 +188,115 @@ def _fetch_text_with_timeout(url: str) -> str:
     return r.text
 
 
+def _sites_from_json_text(text: str) -> list:
+    """Parse a Sherlock data.json payload into site objects, or raise.
+
+    Validates the *shape* before anything is cached: valid JSON of the wrong
+    shape (a list, a string, a dict of non-sites) used to pass a bare
+    ``json.loads`` guard, get cached with a fresh mtime, and then make every
+    boot for a week fail inside ``SitesInformation``.
+    """
+    import tempfile
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("site list is not a JSON object")
+    entries = {k: v for k, v in data.items() if k != "$schema"}
+    if len(entries) < _SITES_MIN_COUNT or not all(
+            isinstance(v, dict) and isinstance(v.get("url"), str) for v in entries.values()):
+        raise ValueError(f"site list has the wrong shape ({len(entries)} entries)")
+    # SitesInformation insists on a path ending in .json; load from a temp file
+    # so a bad payload can never poison the cache.
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        fh.write(text)
+        tmp = fh.name
+    try:
+        # honor_exclusions=False: the library would fetch the list remotely.
+        return list(SitesInformation(data_file_path=tmp, honor_exclusions=False))
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def _load_sherlock_sites(source: str | None = None, cache_dir: Path | None = None,
                          fetch=None, now: float | None = None):
-    """Return ``(sites, label)`` per the modes above. Pure apart from the cache
-    directory and the optional fetch; parameters exist so tests can exercise
-    every fallback without the network."""
+    """Return ``(sites, label)`` per the modes documented above.
+
+    ``auto``: a cached copy of the live list, refreshed with a timeout when
+    older than SHERLOCK_SITES_MAX_AGE_H; on any failure the stale cache, then
+    the bundled copy. Every payload is validated by actually loading it before
+    it is cached; the cache is written atomically; a cache that fails to load
+    is deleted and never blocks boot. A fetched list is used even when the
+    cache directory cannot be written. Parameters exist so tests can exercise
+    every path without the network.
+    """
     source = (source or os.environ.get("SHERLOCK_SITES_SOURCE") or "auto").strip().lower()
     log = logging.getLogger("app")
     import sherlock_project
     bundled = Path(sherlock_project.__file__).resolve().parent / "resources" / "data.json"
+    vendored_excl = _read_exclusions(_VENDORED_EXCLUSIONS)
 
-    def load(path: Path):
-        # honor_exclusions=False: the library would fetch the list remotely.
-        return list(SitesInformation(data_file_path=str(path), honor_exclusions=False))
+    def load_bundled():
+        return _sites_from_json_text(bundled.read_text()), vendored_excl, "bundled"
 
     if source == "remote":
         return list(SitesInformation()), "remote"
     if source == "bundled":
-        sites, excl, label = load(bundled), _read_exclusions(_VENDORED_EXCLUSIONS), "bundled"
+        sites, excl, label = load_bundled()
     else:
         from sherlock_project.sites import EXCLUSIONS_URL, MANIFEST_URL
         cache_dir = cache_dir or _SITES_CACHE_DIR
-        data_file, excl_file = cache_dir / "sherlock-data.json", cache_dir / "sherlock-exclusions.txt"
+        data_file = cache_dir / "sherlock-data.json"
+        excl_file = cache_dir / "sherlock-exclusions.txt"
         now = time.time() if now is None else now
-        fresh = data_file.exists() and (now - data_file.stat().st_mtime) < _SITES_MAX_AGE_S
+        sites = excl = None
         label = "cache"
+        age = (now - data_file.stat().st_mtime) if data_file.exists() else None
+        fresh = age is not None and 0 <= age < _sites_max_age_s()
         if not fresh:
             fetch = fetch or _fetch_text_with_timeout
             try:
                 text = fetch(MANIFEST_URL)
-                json.loads(text)                       # must be valid JSON before we keep it
-                cache_dir.mkdir(parents=True, exist_ok=True)
-                data_file.write_text(text)
+                sites = _sites_from_json_text(text)          # validated before caching
+                label = "remote"
+                excl_text = None
                 try:
-                    excl_file.write_text(fetch(EXCLUSIONS_URL))
-                except Exception as exc:               # exclusions are best-effort
+                    excl_text = fetch(EXCLUSIONS_URL)
+                except Exception as exc:                     # exclusions are best-effort
                     log.info("sherlock exclusions refresh failed (%s)", exc)
-                label = "remote-cached"
+                try:
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    tmp = data_file.with_suffix(".json.tmp")
+                    tmp.write_text(text)
+                    os.replace(tmp, data_file)                # atomic: never a torn file
+                    if excl_text is not None:
+                        excl_file.write_text(excl_text)
+                    label = "remote-cached"
+                except OSError as exc:
+                    log.warning("sherlock site list fetched but not cached (%s)", exc)
+                excl = ({ln.strip().lower() for ln in excl_text.splitlines()
+                         if ln.strip() and not ln.startswith("#")}
+                        if excl_text else vendored_excl)
             except Exception as exc:
                 log.warning("sherlock site list refresh failed (%s); using %s", exc,
                             "the stale cache" if data_file.exists() else "the bundled copy")
-        if data_file.exists():
-            sites = load(data_file)
-            excl = _read_exclusions(excl_file) or _read_exclusions(_VENDORED_EXCLUSIONS)
-        else:
-            sites, excl, label = load(bundled), _read_exclusions(_VENDORED_EXCLUSIONS), "bundled"
+        if sites is None and data_file.exists():
+            try:
+                sites = _sites_from_json_text(data_file.read_text())
+                excl = _read_exclusions(excl_file) or vendored_excl
+                label = "cache"
+            except Exception as exc:
+                log.warning("cached sherlock site list unreadable (%s); deleting it", exc)
+                try:
+                    data_file.unlink()
+                except OSError:
+                    pass
+                sites = None
+        if sites is None:
+            sites, excl, label = load_bundled()
     before = len(sites)
-    sites = [st for st in sites if st.name not in excl]
+    sites = [st for st in sites if st.name.lower() not in excl]
     log.info("sherlock site list: %d sites from %s source (%d excluded)",
              len(sites), label, before - len(sites))
     return sites, label
@@ -1166,6 +1235,17 @@ if RECON_AVAILABLE:
         if sem.locked():
             emit("queued", {"max_concurrent": MAX_CONCURRENT_INVESTIGATIONS})
         started = time.monotonic()
+        # The pipeline emits `done` itself and the browser closes the stream on
+        # it. Hold that event until the summary is safely on disk, so a failed
+        # write can still surface as `fatal` instead of a row left `running`.
+        held: dict = {}
+
+        def emit_gated(event: str, payload: dict) -> None:
+            if event == "done":
+                held["done"] = payload
+                return
+            emit(event, payload)
+
         try:
             async with sem:
                 log.info("inv=%d start usernames=%s name=%r email=%s",
@@ -1179,10 +1259,12 @@ if RECON_AVAILABLE:
                     variants=inputs["variants"],
                     thorough=inputs.get("thorough", False),
                     timeout=inputs["timeout"],
-                    sher_data=sher_data, emit=emit, loop=loop,
+                    sher_data=sher_data, emit=emit_gated, loop=loop,
                     db_path=DB_PATH,
                 )
-            _set_status_safely(inv_id, "done", summary=summary)
+            _set_investigation(inv_id, "done", summary)     # may raise → failed
+            if "done" in held:
+                emit("done", held["done"])
             from recon.confidence import bucket_counts
             all_rows = (summary["accounts"] + summary["variants"]
                         + summary["name_accounts"])
@@ -1331,11 +1413,13 @@ if RECON_AVAILABLE:
             finally:
                 queue.put_nowait(None)  # sentinel
 
-        coord_task = asyncio.create_task(coordinator())
-
         async def event_gen():
-            yield f"event: meta_run\ndata: {json.dumps({'investigation_id': inv_id})}\n\n"
+            # Created here, not before the response starts: a generator the
+            # server never begins runs no `finally`, and a coordinator created
+            # outside it would have run unattended.
+            coord_task = asyncio.create_task(coordinator())
             try:
+                yield f"event: meta_run\ndata: {json.dumps({'investigation_id': inv_id})}\n\n"
                 while True:
                     try:
                         item = await asyncio.wait_for(queue.get(), timeout=15)

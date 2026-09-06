@@ -253,10 +253,6 @@ def test_queued_event_when_the_concurrency_limit_is_reached(monkeypatch):
 
 # --- site list loader --------------------------------------------------------------
 
-def _no_fetch_allowed(url):
-    raise AssertionError("fetch must not be called when the cache is fresh")
-
-
 def test_site_list_auto_mode_falls_back_to_bundled_without_network(tmp_path, caplog):
     def no_network(url):
         raise OSError("network unreachable")
@@ -281,8 +277,13 @@ def test_site_list_auto_mode_caches_a_fetched_list_and_reuses_it(tmp_path):
     assert label == "remote-cached" and len(calls) == 2
     assert (tmp_path / "sherlock-data.json").exists()
     assert "GitHub" not in {s.name for s in sites}          # live exclusions applied
-    sites2, label2 = appmod._load_sherlock_sites("auto", cache_dir=tmp_path,
-                                                 fetch=_no_fetch_allowed)
+    calls2 = []
+
+    def recording_fetch(url):
+        calls2.append(url)
+        raise AssertionError("must not be called")
+    sites2, label2 = appmod._load_sherlock_sites("auto", cache_dir=tmp_path, fetch=recording_fetch)
+    assert calls2 == [], "a fresh cache must not trigger a fetch"
     assert label2 == "cache" and len(sites2) == len(sites)
 
 
@@ -296,3 +297,67 @@ def test_bundled_mode_applies_the_vendored_exclusions():
     excl = appmod._read_exclusions(appmod._VENDORED_EXCLUSIONS)
     assert excl, "recon/data/sherlock-exclusions.txt must not be empty"
     assert not (excl & set(appmod.SITE_DATA_ALL)), "excluded sites must not be scanned"
+
+
+def test_site_list_rejects_wrong_shape_json_and_never_caches_it(tmp_path):
+    """Valid JSON of the wrong shape used to be cached with a fresh mtime and
+    then crash SitesInformation at every boot for a week (re-review blocker)."""
+    for payload in ("[]", '"str"', '{"Foo": {}}', '{"$schema": "s"}'):
+        sites, label = appmod._load_sherlock_sites("auto", cache_dir=tmp_path,
+                                                   fetch=lambda url, p=payload: p)
+        assert label == "bundled" and len(sites) > 300, payload
+        assert not (tmp_path / "sherlock-data.json").exists(), payload
+
+
+def test_site_list_deletes_an_unreadable_cache_and_boots(tmp_path):
+    (tmp_path / "sherlock-data.json").write_text("{corrupt")
+    sites, label = appmod._load_sherlock_sites(
+        "auto", cache_dir=tmp_path, fetch=lambda url: (_ for _ in ()).throw(OSError("offline")))
+    assert label == "bundled" and len(sites) > 300
+    assert not (tmp_path / "sherlock-data.json").exists()
+
+
+def test_site_list_uses_a_fetched_list_even_when_the_cache_is_unwritable(tmp_path):
+    from pathlib import Path
+    import sherlock_project
+    payload = (Path(sherlock_project.__file__).parent / "resources" / "data.json").read_text()
+    unwritable = tmp_path / "file-not-dir"
+    unwritable.write_text("x")                      # mkdir(cache_dir) will fail
+    sites, label = appmod._load_sherlock_sites(
+        "auto", cache_dir=unwritable, fetch=lambda url: payload if url.endswith(".json") else "")
+    assert label == "remote" and len(sites) > 300
+
+
+def test_done_is_only_sent_after_the_summary_is_written(monkeypatch):
+    """A failed `done` write must surface as `fatal`, not leave a row that the
+    client saw finish but the database still calls running."""
+    async def pipeline(**kw):
+        kw["emit"]("done", {"found": 1})
+        return dict(SUMMARY)
+    monkeypatch.setattr(appmod, "run_pipeline", pipeline)
+    real_set = appmod._set_investigation
+
+    def failing_set(inv_id, status, summary=None, **kw):
+        if status == "done":
+            raise RuntimeError("disk full")
+        return real_set(inv_id, status, summary, **kw)
+    monkeypatch.setattr(appmod, "_set_investigation", failing_set)
+
+    async def scenario():
+        with db_connect(appmod.DB_PATH) as conn:
+            iid = insert_returning_id(conn,
+                "INSERT INTO investigations (created_at, inputs, status)"
+                " VALUES (?,?,'pending')",
+                ("2026-01-01 00:00:00", json.dumps({
+                    "name": "", "usernames": ["alice"], "email": "", "phone": "",
+                    "domain": "", "location": "", "variants": False,
+                    "thorough": False, "timeout": 5})))
+        assert appmod._claim_investigation(iid)
+        events = []
+        await appmod.run_investigation(iid, appmod._get_investigation(iid)["inputs"], {},
+                                       lambda e, p: events.append(e), asyncio.get_running_loop())
+        return iid, events
+
+    iid, events = asyncio.run(scenario())
+    assert "done" not in events and "fatal" in events
+    assert _row(iid)["status"] == "failed" and "disk full" in _row(iid)["error"]
