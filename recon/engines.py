@@ -12,18 +12,31 @@ import re
 import threading
 from typing import Any, Callable, Optional
 
+from recon import policy
+
 logger = logging.getLogger("recon.engines")
 
 # ---------------------------------------------------------------------------
 # Curated high-value site list used for variant scans.
 # Each entry: canonical tag -> aliases to try (normalized matching).
+#
+# Robots-denied platforms are deliberately absent: Twitter/X, Instagram,
+# Reddit, Pinterest, Facebook and Flickr were listed here until 2026-09-06 and
+# so were scanned on every variant / name-candidate pass by all three engines,
+# contradicting recon.policy ("denied hosts are never fetched"). The
+# authoritative rule is the URL filter applied at plan time; this list is kept
+# clean so the curated subset never *asks* for a denied host, and
+# tests/test_engines.py asserts no member matches policy.denied_name_reason.
+# HackerNews stays: Sherlock checks it on news.ycombinator.com (permitted);
+# the Maigret/WhatsMyName entries that probe the denied Firebase API are
+# removed by their URLs.
 # ---------------------------------------------------------------------------
 
 HIGH_VALUE_SITES = [
-    "GitHub", "Twitter", "Instagram", "TikTok", "YouTube", "Reddit",
+    "GitHub", "TikTok", "YouTube",
     "mastodon.social", "Bluesky", "Medium", "DEV Community", "Keybase",
-    "GitLab", "Twitch", "Steam", "Spotify", "Pinterest", "LinkedIn",
-    "Facebook", "Snapchat", "Telegram", "tumblr", "Flickr", "Behance",
+    "GitLab", "Twitch", "Steam", "Spotify", "LinkedIn",
+    "Snapchat", "Telegram", "tumblr", "Behance",
     "Dribbble", "ProductHunt", "HackerNews", "WordPress", "Vimeo",
     "SoundCloud", "Patreon", "Linktree", "About.me", "Gravatar",
     "Itch.io", "Codepen", "npm", "PyPi", "Kaggle", "Strava",
@@ -94,11 +107,42 @@ def maigret_site_names() -> list[str]:
     return [s.name for s in load_maigret_db().sites]
 
 
-def maigret_variant_sites() -> dict[str, Any]:
-    """The curated high-value subset of the maigret DB, for variant scans."""
+def maigret_url_templates(site: Any) -> list[str]:
+    """Every URL a Maigret site check may fetch, with ``{urlMain}`` /
+    ``{urlSubpath}`` resolved (Maigret 0.6.4 ``checking.py`` formats ``url``
+    and ``url_probe`` with exactly those two plus ``{username}``).
+
+    ``url`` is the profile page, ``url_probe`` the URL actually requested when
+    present (HackerNews probes the denied Firebase API behind a permitted
+    profile URL), ``url_main`` the platform itself. Any of them on a denied
+    host denies the site.
+    """
+    url_main = getattr(site, "url_main", "") or ""
+    subpath = getattr(site, "url_subpath", "") or ""
+    out: list[str] = []
+    for attr in ("url", "url_probe", "url_main"):
+        t = getattr(site, attr, None)
+        if isinstance(t, str) and t:
+            out.append(policy.fill_template(t, url_main=url_main,
+                                            url_subpath=subpath))
+    return out
+
+
+def maigret_variant_sites(policy_filtered: bool = True) -> dict[str, Any]:
+    """The curated high-value subset of the maigret DB, for variant scans.
+
+    Policy-filtered by default (defence in depth for callers outside the
+    pipeline). ``policy_filtered=False`` returns the raw subset for
+    :func:`recon.plan.plan_site_sets`, which filters *and reports* the denied
+    sites itself — it is the only caller that should pass it.
+    """
     db = load_maigret_db()
     wanted = set(_match_names(maigret_site_names(), HIGH_VALUE_SITES))
-    return {s.name: s for s in db.sites if s.name in wanted}
+    picked = {s.name: s for s in db.sites if s.name in wanted}
+    if not policy_filtered:
+        return picked
+    kept, _denied = policy.filter_site_mapping(picked, maigret_url_templates)
+    return kept
 
 
 # Default cap on the base username scan (top N by rank). A "thorough" run
@@ -157,7 +201,25 @@ async def maigret_scan(username: str, site_dict: dict[str, Any], timeout: int,
 # Sherlock helpers (site subsetting; the scan itself lives in app.py threads)
 # ---------------------------------------------------------------------------
 
-def sherlock_variant_site_data(site_data_all: dict[str, dict]) -> dict[str, dict]:
-    """The curated high-value subset of Sherlock's site data."""
+def sherlock_url_templates(info: dict) -> list[str]:
+    """Every URL a Sherlock site check may fetch: ``url`` (the ``{}`` template
+    Sherlock formats with the handle), ``urlProbe`` when the check hits a
+    different endpoint, and ``urlMain`` (the platform itself)."""
+    return [info[k] for k in ("url", "urlProbe", "urlMain")
+            if isinstance(info.get(k), str) and info[k]]
+
+
+def sherlock_variant_site_data(site_data_all: dict[str, dict],
+                               policy_filtered: bool = True) -> dict[str, dict]:
+    """The curated high-value subset of Sherlock's site data.
+
+    Policy-filtered by default (defence in depth: app.py's classic stream and
+    the watchlist monitor call this directly). ``policy_filtered=False`` is
+    for :func:`recon.plan.plan_site_sets`, which filters and reports itself.
+    """
     picked = _match_names(list(site_data_all), HIGH_VALUE_SITES)
-    return {n: site_data_all[n] for n in picked}
+    subset = {n: site_data_all[n] for n in picked}
+    if not policy_filtered:
+        return subset
+    kept, _denied = policy.filter_site_mapping(subset, sherlock_url_templates)
+    return kept

@@ -49,11 +49,12 @@ import io
 import logging
 import math
 import re
+import warnings
 from collections import Counter, defaultdict
 from typing import Optional
 from urllib.parse import urlparse
 
-from recon import safeweb
+from recon import policy, safeweb
 from recon.confidence import (
     AVATAR_WEIGHT,
     BIO_WEIGHT,
@@ -74,6 +75,11 @@ BIO_MIN_TOKENS = 5
 MAX_AVATARS = 30             # unique avatar URLs downloaded per run
 AVATAR_TIMEOUT_S = 8
 AVATAR_MAX_BYTES = 5 * 1024 * 1024
+# Decoded-size cap (security F-4). The byte cap bounds the *file*, not the
+# decoded bitmap: a 12000x12000 blank PNG is ~18 KB on the wire and ~144 MB
+# (mode "L") once decoded, x5 concurrent downloads. Pillow's own bomb check
+# only warns below ~179 M pixels. A profile avatar is never 2000x2000.
+AVATAR_MAX_PIXELS = 4_000_000
 
 # Frequency rules for "this image is the site's default, not a person's face".
 PLACEHOLDER_HASH_MIN_ROWS = 3        # one hash on >= this many rows anywhere
@@ -147,13 +153,32 @@ _EDGE_WORDS = {"on", "at", "in", "by", "the", "a", "an", "of", "from", "to",
                "contact", "and", "or", "|", "-", "·", ":", "•"}
 
 
-def average_hash(image_bytes: bytes) -> Optional[int]:
-    """8x8 average hash as a 64-bit int. None if the image can't be read."""
-    try:
-        from PIL import Image
+def _open_avatar(image_bytes: bytes):
+    """Open an avatar for hashing, refusing decompression bombs (F-4).
 
-        img = Image.open(io.BytesIO(image_bytes)).convert("L").resize((8, 8))
-        pixels = list(img.tobytes())  # 64 grayscale bytes, one per pixel
+    ``Image.open`` reads only the header, so the dimensions are known before
+    any pixel is decoded; ``.convert`` is what allocates the full bitmap.
+    Returns None when ``width * height`` exceeds :data:`AVATAR_MAX_PIXELS`,
+    and Pillow's ``DecompressionBombWarning`` (raised for >89 M pixels) is
+    turned into an error so the caller's ``except`` returns None as well.
+    """
+    from PIL import Image
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", Image.DecompressionBombWarning)
+        img = Image.open(io.BytesIO(image_bytes))
+    if img.width * img.height > AVATAR_MAX_PIXELS:
+        return None
+    return img
+
+
+def _average_hash_n(image_bytes: bytes, n: int) -> Optional[int]:
+    try:
+        img = _open_avatar(image_bytes)
+        if img is None:
+            return None
+        img = img.convert("L").resize((n, n))
+        pixels = list(img.tobytes())  # n*n grayscale bytes, one per pixel
         avg = sum(pixels) / len(pixels)
         bits = 0
         for p in pixels:
@@ -161,24 +186,19 @@ def average_hash(image_bytes: bytes) -> Optional[int]:
         return bits
     except Exception:
         return None
+
+
+def average_hash(image_bytes: bytes) -> Optional[int]:
+    """8x8 average hash as a 64-bit int. None if the image can't be read or
+    would decode to more than :data:`AVATAR_MAX_PIXELS` pixels."""
+    return _average_hash_n(image_bytes, 8)
 
 
 def average_hash16(image_bytes: bytes) -> Optional[int]:
     """16x16 average hash as a 256-bit int — the corroboration hash. A photo
     reused across sites still matches here; two different generic images that
-    happen to agree at 8x8 no longer do."""
-    try:
-        from PIL import Image
-
-        img = Image.open(io.BytesIO(image_bytes)).convert("L").resize((16, 16))
-        pixels = list(img.tobytes())
-        avg = sum(pixels) / len(pixels)
-        bits = 0
-        for p in pixels:
-            bits = (bits << 1) | (1 if p >= avg else 0)
-        return bits
-    except Exception:
-        return None
+    happen to agree at 8x8 no longer do. Same size cap as :func:`average_hash`."""
+    return _average_hash_n(image_bytes, 16)
 
 
 def hamming(a: int, b: int) -> int:
@@ -451,13 +471,22 @@ async def _download_avatars(rows: list[dict]) -> None:
     """Attach ``avatar_hash`` to rows that have an avatar URL (in place).
 
     Known placeholders are not fetched; rows sharing one URL share one fetch.
+    Avatars hosted on a robots-denied host (``og:image`` on ``pbs.twimg.com``
+    is common) are never requested (security F-2): the access policy applies
+    to every fetch path, not only profile pages.
     """
     sem = asyncio.Semaphore(5)
     by_url: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
         url = _avatar_url(r)
-        if url and r.get("avatar_hash") is None and not is_placeholder_avatar(url):
-            by_url[url].append(r)
+        if not url or r.get("avatar_hash") is not None:
+            continue
+        if is_placeholder_avatar(url):
+            continue
+        if policy.denied_reason(url):
+            logger.debug("avatar not fetched (access policy): %s", url)
+            continue
+        by_url[url].append(r)
     targets = list(by_url.items())[:MAX_AVATARS]
     if not targets:
         return

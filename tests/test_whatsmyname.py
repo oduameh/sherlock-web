@@ -89,14 +89,99 @@ def test_variant_subset_is_high_value_and_smaller():
 
 def test_denied_host_is_never_fetched():
     # A robots-disallowed host must be skipped before any request and reported
-    # as "policy: ...", never available/absent.
+    # with the distinct POLICY status, never available/absent — and not UNKNOWN
+    # either: until 2026-09-06 this returned UNKNOWN + "policy:" context, which
+    # the pipeline emitted as an error row and the router recorded as a site
+    # failure (audit defect 8).
     denied = dict(_SITE, name="Facebook",
                   uri_check="https://facebook.com/{account}")
     client = _FakeClient(200, "profile-header")   # would classify CLAIMED if fetched
     res = asyncio.run(wmn._check_site(client, denied, "alice"))
-    assert res.status == wmn.UNKNOWN
+    assert res.status == wmn.POLICY
+    assert res.status not in (wmn.UNKNOWN, wmn.CLAIMED, wmn.AVAILABLE)
     assert res.context.startswith("policy:")
     assert client.calls == 0            # never touched the network
+
+
+def test_policy_status_is_distinct_and_not_an_error_class():
+    assert wmn.POLICY == "policy"
+    assert len({wmn.CLAIMED, wmn.AVAILABLE, wmn.UNKNOWN, wmn.POLICY}) == 4
+    # classify_response never produces it: there is no response to classify.
+    for code in (200, 404, 403, 503):
+        assert wmn.classify_response(_SITE, code, "") != wmn.POLICY
+
+
+def test_variant_subset_contains_no_denied_host():
+    from recon import policy
+    for s in wmn.variant_sites():
+        assert not policy.is_denied_template(s["uri_check"]), s["name"]
+    # The raw subset (for the plan, which filters and reports itself) is a
+    # superset; it may still carry denied entries such as Hacker News' Firebase API.
+    raw = wmn.variant_sites(policy_filtered=False)
+    assert {s["name"] for s in wmn.variant_sites()} <= {s["name"] for s in raw}
+
+
+def test_url_templates_is_the_fetched_uri_only():
+    assert wmn.url_templates({"uri_check": "https://a/{account}",
+                              "uri_pretty": "https://b/{account}"}) == ["https://a/{account}"]
+    assert wmn.url_templates({}) == []
+
+
+def test_whatsmyname_scan_yields_policy_result_without_fetching(monkeypatch):
+    # Direct callers of the scanner still get a POLICY result per denied site
+    # (plan-time filtering normally removes them first).
+    class _Client(_FakeClient):
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    client = _Client(200, "profile-header")
+    monkeypatch.setattr(wmn.safeweb, "async_client", lambda **k: client)
+    got = []
+    sites = [dict(_SITE, name="Instagram", uri_check="https://instagram.com/{account}"),
+             dict(_SITE)]
+    asyncio.run(wmn.whatsmyname_scan("alice", sites, 5, got.append))
+    by = {r.site_name: r for r in got}
+    assert by["Instagram"].status == wmn.POLICY
+    assert by["Example"].status == wmn.CLAIMED
+    assert client.calls == 1            # only the permitted site was fetched
+
+
+# --- pipeline handling of POLICY results ------------------------------------
+
+def test_pipeline_neither_observes_nor_reports_policy_results():
+    """A POLICY result must reach neither router.observe (a fake failure in
+    site_health tripped circuits for sites we never touched) nor the error
+    stream; CLAIMED/UNKNOWN/AVAILABLE are handled exactly as before."""
+    from recon import pipeline
+    from recon.router import RunRouter
+
+    router = RunRouter(None)             # store unavailable: in-memory tallies only
+    observed, found, errors = [], [], []
+
+    def dispatch(res):
+        return pipeline.dispatch_wmn_result(
+            res,
+            observe=lambda r: (observed.append(r.site_name),
+                               router.observe("whatsmyname", r.site_name,
+                                              r.status, r.context or "")),
+            on_found=lambda r: found.append(r.site_name),
+            on_error=lambda r: errors.append(r.site_name))
+
+    pol = wmn.WmnResult(wmn.POLICY, "Instagram", "https://instagram.com/alice",
+                        "social", "policy: instagram.com robots.txt …")
+    assert dispatch(pol) == "policy"
+    assert observed == [] and errors == [] and found == []
+    assert router.observations == 0 and router.error_observations == 0
+
+    assert dispatch(wmn.WmnResult(wmn.CLAIMED, "GitHub", "u", "coding")) == "found"
+    assert dispatch(wmn.WmnResult(wmn.UNKNOWN, "Foo", "u", None, "HTTP 503")) == "error"
+    assert dispatch(wmn.WmnResult(wmn.AVAILABLE, "Bar", "u", None)) == "available"
+    assert observed == ["GitHub", "Foo", "Bar"]
+    assert found == ["GitHub"] and errors == ["Foo"]
+    assert router.observations == 3 and router.error_observations == 1
 
 
 def test_stealth_retry_recovers_a_high_value_unknown(monkeypatch):

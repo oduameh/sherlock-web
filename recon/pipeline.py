@@ -33,6 +33,7 @@ from recon.names import generate_name_candidates
 from recon.permutations import generate_variants
 from recon.phone_accounts import ignorant_available, ignorant_scan
 from recon.phone_pivot import phone_intel
+from recon.plan import plan_site_sets
 from recon.router import RunRouter, retry_delay
 from recon.validate import is_probably_email
 from recon import brokers
@@ -41,6 +42,28 @@ from recon import whatsmyname
 logger = logging.getLogger("recon.pipeline")
 
 ERROR_STATUSES = {QueryStatus.UNKNOWN, QueryStatus.WAF, QueryStatus.ILLEGAL}
+
+
+def dispatch_wmn_result(result, *, observe: Callable, on_found: Callable,
+                        on_error: Callable) -> str:
+    """Route one WhatsMyName result; returns what was done.
+
+    ``policy``: the site's host is robots-denied, so it was never fetched —
+    there is nothing to observe (recording it as a failure tripped circuits
+    for sites we never touched: audit defect 8) and nothing to report as an
+    error. ``found`` / ``error`` / ``available`` are observed by the router as
+    before. Pure apart from the callbacks.
+    """
+    if result.status == whatsmyname.POLICY:
+        return "policy"
+    observe(result)
+    if result.status == whatsmyname.CLAIMED:
+        on_found(result)
+        return "found"
+    if result.status == whatsmyname.UNKNOWN:
+        on_error(result)
+        return "error"
+    return "available"
 
 # Name-candidate scans fan out across a few workers (they can be 20 handles).
 NAME_SHERLOCK_SHARDS = 3
@@ -368,16 +391,18 @@ async def run_pipeline(
                 def on_result(result, _name=scanned_name, _g=group):
                     nonlocal checked
                     checked += 1
-                    router.observe("whatsmyname", result.site_name,
-                                   result.status, result.context or "",
-                                   result.query_time, username=_name)
-                    if result.status == whatsmyname.CLAIMED:
-                        _handle_found("whatsmyname", _name, result.site_name,
-                                      result.site_url_user, None, _g,
-                                      result.category)
-                    elif result.status == whatsmyname.UNKNOWN:
-                        _handle_error("whatsmyname", _name, result.site_name,
-                                      result.status, result.context or "", _g)
+                    dispatch_wmn_result(
+                        result,
+                        observe=lambda r: router.observe(
+                            "whatsmyname", r.site_name, r.status,
+                            r.context or "", r.query_time, username=_name),
+                        on_found=lambda r: _handle_found(
+                            "whatsmyname", _name, r.site_name,
+                            r.site_url_user, None, _g, r.category),
+                        on_error=lambda r: _handle_error(
+                            "whatsmyname", _name, r.site_name, r.status,
+                            r.context or "", _g),
+                    )
                     _handle_progress("whatsmyname", _name, checked, total, _g)
 
                 try:
@@ -496,31 +521,36 @@ async def run_pipeline(
     # --- plan --------------------------------------------------------------
     candidates = generate_name_candidates(name) if name else []
 
-    # Adaptive routing: drop open-circuit sites before any engine runs, and
-    # record every observation the engines produce. Disabled (no-op) when the
-    # DB is unavailable.
+    # Site sets: access policy first (robots-denied hosts are removed from
+    # every engine's set before any engine runs — recon.policy's promise,
+    # previously kept only by our own fetchers), then adaptive routing drops
+    # open-circuit sites and records every observation the engines produce
+    # (disabled / no-op when the DB is unavailable).
     router = RunRouter(db_path, emit=emit)
-    sher_data = router.filter_sites(sher_data, "sherlock")
     # Thorough runs scan maigret's entire database (~3200 sites) for the base
     # username instead of the top ~1200 by rank — broader long-tail coverage at
     # the cost of runtime.
     mai_limit = None if thorough else engines.DEFAULT_MAIGRET_LIMIT
-    mai_all = router.filter_sites(
-        engines.maigret_all_sites(mai_limit) if engines.maigret_available()
-        else {},
-        "maigret")
-    sher_reduced = engines.sherlock_variant_site_data(sher_data)
-    mai_reduced = router.filter_sites(
-        engines.maigret_variant_sites() if engines.maigret_available() else {},
-        "maigret")
-    # WhatsMyName: a third engine over ~700 categorized sites. filter_sites
-    # wants a dict, so key the site defs by name, filter open circuits, unwrap.
-    wmn_all = list(router.filter_sites(
-        {s["name"]: s for s in whatsmyname.all_sites()}, "whatsmyname").values())
-    wmn_reduced = list(router.filter_sites(
-        {s["name"]: s for s in whatsmyname.variant_sites()},
-        "whatsmyname").values())
+    have_maigret = engines.maigret_available()
+    # The curated subsets are taken raw here so the plan filters and *reports*
+    # every denied site itself; the helpers filter on their own for other callers.
+    site_plan = plan_site_sets(
+        sherlock=sher_data,
+        maigret=engines.maigret_all_sites(mai_limit) if have_maigret else {},
+        maigret_reduced=(engines.maigret_variant_sites(policy_filtered=False)
+                         if have_maigret else {}),
+        whatsmyname=whatsmyname.all_sites(),
+        whatsmyname_reduced=whatsmyname.variant_sites(policy_filtered=False),
+        circuit_filter=router.filter_sites,
+    )
+    sher_data, sher_reduced = site_plan.sherlock, site_plan.sherlock_reduced
+    mai_all, mai_reduced = site_plan.maigret, site_plan.maigret_reduced
+    wmn_all, wmn_reduced = site_plan.whatsmyname, site_plan.whatsmyname_reduced
     router.announce_skipped()
+    # Additive event: what the access policy kept every engine away from, once
+    # per (site, engine). Not an error and not a finding — "we did not look".
+    if site_plan.skipped_policy:
+        emit("skipped_policy", site_plan.skipped_event())
 
     emit("meta", {
         "name": name, "usernames": usernames, "email": email, "phone": phone,

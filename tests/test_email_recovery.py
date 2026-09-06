@@ -6,8 +6,82 @@ stitch the account to the phone in the graph. These verify the matching is
 meaningful (tail digits) yet conservative (no coincidental short matches).
 """
 
+import asyncio
+import logging
+
+from recon import email_pivot
 from recon.email_pivot import annotate_recovery, masked_recovery_matches_phone
 from recon.graph import build_graph
+
+
+# --- access policy on holehe modules (security F-2) -------------------------
+
+def _holehe(monkeypatch, functions, **kw):
+    monkeypatch.setattr(email_pivot, "_holehe_functions", lambda: functions)
+    got: list = []
+    res = asyncio.run(email_pivot.holehe_scan("a@b.com", got.append, delay=0, **kw))
+    return res, got
+
+
+def test_holehe_scan_skips_modules_on_denied_hosts(monkeypatch, caplog):
+    """holehe ships instagram/twitter/pinterest/flickr modules that post the
+    address to robots-denied hosts, and every one ran on every email pivot.
+    They must be skipped and emit nothing (not checked is not 'not
+    registered'); permitted modules run unchanged."""
+    ran = []
+
+    async def instagram(email, client, out):        # denied by name
+        ran.append("instagram")
+        out.append({"name": "instagram", "domain": "instagram.com", "exists": True})
+
+    async def twitter(email, client, out):          # denied by name
+        ran.append("twitter")
+        out.append({"name": "twitter", "domain": "twitter.com", "exists": True})
+
+    async def reset_helper(email, client, out):     # denied by its domain constant
+        ran.append("reset_helper")
+        domain = "pinterest.com"
+        out.append({"name": "helper", "domain": domain, "exists": True})
+
+    async def github(email, client, out):
+        ran.append("github")
+        out.append({"name": "github", "domain": "github.com", "exists": True,
+                    "rateLimit": False})
+
+    caplog.set_level(logging.DEBUG, logger="recon.email_pivot")
+    res, got = _holehe(monkeypatch, [instagram, twitter, reset_helper, github])
+    assert ran == ["github"]
+    assert [e["site"] for e in res] == ["github"]
+    assert [e["site"] for e in got] == ["github"]
+    assert got[0]["exists"] is True
+    assert "skipped by access policy" in caplog.text
+    for name in ("instagram", "twitter", "reset_helper"):
+        assert name in caplog.text
+
+
+def test_holehe_only_subset_still_honours_policy(monkeypatch):
+    async def instagram(email, client, out):
+        out.append({"name": "instagram", "exists": True})
+
+    async def github(email, client, out):
+        out.append({"name": "github", "exists": True})
+
+    res, _ = _holehe(monkeypatch, [instagram, github], only={"instagram", "github"})
+    assert [e["site"] for e in res] == ["github"]
+
+
+def test_real_holehe_modules_exclude_denied_platforms():
+    """Against the installed holehe (1.61): exactly flickr/instagram/pinterest/
+    twitter are denied, derived from policy.DENIED_HOSTS — nothing else."""
+    if not email_pivot.holehe_available():
+        import pytest
+        pytest.skip("holehe not installed")
+    from recon import policy
+    fns = email_pivot._holehe_functions()
+    kept, skipped = policy.partition_check_functions(fns)
+    assert sorted(skipped) == ["flickr", "instagram", "pinterest", "twitter"]
+    assert len(kept) == len(fns) - 4
+    assert {fn.__name__ for fn in kept} >= {"github", "spotify", "snapchat"}
 
 
 def test_masked_recovery_matches_phone_tail():

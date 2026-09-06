@@ -21,7 +21,7 @@ import asyncio
 import logging
 from typing import Callable, Optional
 
-from recon import safeweb
+from recon import policy, safeweb
 
 logger = logging.getLogger("recon.phone_accounts")
 
@@ -109,6 +109,13 @@ async def ignorant_scan(phone_e164: str, on_result: Callable[[dict], None],
         return results
     if only is not None:
         functions = [fn for fn in functions if fn.__name__.lower() in only]
+    # Access policy: ignorant's instagram module posts to a robots-denied host
+    # and ran on every phone pivot (security F-2). Skipped modules emit
+    # nothing — not checked is not "not registered".
+    functions, skipped = policy.partition_check_functions(functions)
+    if skipped:
+        logger.debug("ignorant: %d module(s) skipped by access policy: %s",
+                     len(skipped), ", ".join(skipped))
 
     async with safeweb.async_client(timeout=IGNORANT_MODULE_TIMEOUT_S) as client:
         for fn in functions:

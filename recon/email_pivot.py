@@ -13,7 +13,7 @@ import logging
 import re
 from typing import Callable, Optional
 
-from recon import safeweb
+from recon import policy, safeweb
 
 logger = logging.getLogger("recon.email_pivot")
 
@@ -125,6 +125,14 @@ async def holehe_scan(email: str, on_result: Callable[[dict], None],
         return results
     if only is not None:
         functions = [fn for fn in functions if fn.__name__.lower() in only]
+    # Access policy: holehe ships instagram/twitter/pinterest/flickr modules
+    # that post to robots-denied hosts, and every one ran on every email
+    # pivot (security F-2). Skipped modules emit nothing — they were not
+    # checked, and a missing row must never read as "not registered".
+    functions, skipped = policy.partition_check_functions(functions)
+    if skipped:
+        logger.debug("holehe: %d module(s) skipped by access policy: %s",
+                     len(skipped), ", ".join(skipped))
 
     async with safeweb.async_client(timeout=HOLEHE_MODULE_TIMEOUT_S) as client:
         for fn in functions:

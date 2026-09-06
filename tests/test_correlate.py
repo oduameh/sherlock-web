@@ -29,6 +29,103 @@ def test_average_hash_bad_bytes_returns_none():
     assert average_hash(b"not an image") is None
 
 
+# --- F-4: decompression bombs -------------------------------------------------
+
+def _png_1bit(width: int, height: int) -> bytes:
+    """A valid, fully decodable 1-bit greyscale PNG of the given size, built
+    by hand so a 12000x12000 image is ~18 KB on the wire (all-zero rows
+    deflate ~1000:1) yet 144 M pixels once decoded."""
+    import struct
+    import zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 1, 0, 0, 0, 0)
+    row = b"\x00" * (1 + (width + 7) // 8)           # filter byte + packed bits
+    comp = zlib.compressobj(9)
+    body = b"".join(comp.compress(row) for _ in range(height)) + comp.flush()
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", body)
+            + chunk(b"IEND", b""))
+
+
+def test_average_hash_rejects_decompression_bomb():
+    """The 5 MB byte cap bounds the file, not the bitmap: before 2026-09-06
+    both hash functions decoded this 144 M-pixel image in full (Pillow only
+    warns below ~179 M pixels). Now: None, before any pixel is decoded."""
+    import time
+
+    from recon.correlate import AVATAR_MAX_PIXELS, average_hash16
+
+    bomb = _png_1bit(12000, 12000)
+    assert len(bomb) < 64 * 1024                       # tiny on the wire
+    assert 12000 * 12000 > AVATAR_MAX_PIXELS
+    t = time.perf_counter()
+    assert average_hash(bomb) is None
+    assert average_hash16(bomb) is None
+    assert time.perf_counter() - t < 0.5
+
+
+def test_average_hash_rejects_images_over_the_pixel_cap_below_pillows_threshold():
+    # 9 M pixels: under Pillow's own bomb warning, over our cap — our check
+    # must be the one that rejects it.
+    from recon.correlate import average_hash16
+    big = _png_1bit(3000, 3000)
+    assert average_hash(big) is None and average_hash16(big) is None
+    # A large-but-plausible avatar under the cap still hashes.
+    ok = _png_1bit(1600, 1600)                         # 2.56 M pixels
+    assert average_hash(ok) is not None and average_hash16(ok) is not None
+
+
+# --- F-2: avatar downloads obey the access policy ----------------------------
+
+def test_download_avatars_never_fetches_denied_hosts(monkeypatch):
+    """``og:image`` frequently points at pbs.twimg.com, a denied host; the
+    downloader must make zero client calls for it while still fetching a
+    permitted avatar (proving the stub is live)."""
+    from recon import correlate
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    fetched: list[str] = []
+
+    async def fake_fetch_capped(client, url, max_bytes):
+        fetched.append(url)
+        return _png_bytes(120)
+
+    monkeypatch.setattr(correlate.safeweb, "async_client", lambda **k: _Client())
+    monkeypatch.setattr(correlate.safeweb, "fetch_capped", fake_fetch_capped)
+
+    denied_row = {"site": "X", "username": "a",
+                  "enrichment": {"og_image": "https://pbs.twimg.com/profile_images/1/x.jpg"}}
+    denied_row2 = {"site": "Reddit", "username": "a",
+                   "enrichment": {"jsonld_image": "https://i.redd.it/abc123.jpg"}}
+    ok_row = {"site": "GitHub", "username": "a",
+              "enrichment": {"og_image": "https://avatars.githubusercontent.com/u/1?v=4"}}
+    asyncio.run(correlate._download_avatars([denied_row, denied_row2, ok_row]))
+    assert fetched == ["https://avatars.githubusercontent.com/u/1?v=4"]
+    assert "avatar_hash" not in denied_row and "avatar_hash" not in denied_row2
+    assert ok_row.get("avatar_hash") is not None
+
+
+def test_download_avatars_all_denied_opens_no_client(monkeypatch):
+    from recon import correlate
+
+    def boom(**k):
+        raise AssertionError("client must not be opened when nothing is fetchable")
+
+    monkeypatch.setattr(correlate.safeweb, "async_client", boom)
+    row = {"enrichment": {"og_image": "https://pbs.twimg.com/profile_images/1/x.jpg"}}
+    asyncio.run(correlate._download_avatars([row]))
+    assert "avatar_hash" not in row
+
+
 def test_name_similarity():
     assert name_similarity("John Smith", "john smith") == 1.0
     assert name_similarity("John Smith", "Jane Doe") < 0.5
