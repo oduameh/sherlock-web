@@ -17,6 +17,8 @@ if [ ! -x "$PY" ]; then
 fi
 echo "== ruff"
 "$PY" -m ruff check .
+echo "== lockcheck"
+"$PY" scripts/lockcheck.py
 echo "== node --check static/js/app.js"
 node --check static/js/app.js
 echo "== pytest"
