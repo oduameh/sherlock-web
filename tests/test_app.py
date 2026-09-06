@@ -11,6 +11,7 @@ and the rule that a GET on /stream can never start a second run.
 """
 
 import asyncio
+import os
 import json
 import logging
 
@@ -361,3 +362,192 @@ def test_done_is_only_sent_after_the_summary_is_written(monkeypatch):
     iid, events = asyncio.run(scenario())
     assert "done" not in events and "fatal" in events
     assert _row(iid)["status"] == "failed" and "disk full" in _row(iid)["error"]
+
+
+# --- HTTP-layer hardening (increment H1) -------------------------------------------
+
+def _pending(client):
+    return client.post("/api/investigate", json={"usernames": "alice"}).json()["investigation_id"]
+
+
+def test_cross_site_post_is_refused_and_writes_nothing(client):
+    before = client.get("/api/watchlist").json()
+    r = client.post("/api/watchlist", json={"inputs": {"usernames": "eve"}},
+                    headers={"Sec-Fetch-Site": "cross-site", "Origin": "https://evil.example"})
+    assert r.status_code == 403 and "cross-site" in r.json()["error"]
+    assert client.get("/api/watchlist").json() == before
+    # A foreign Origin alone (older browsers without Sec-Fetch-Site) is enough.
+    r = client.post("/api/investigate", json={"usernames": "eve"},
+                    headers={"Origin": "https://evil.example"})
+    assert r.status_code == 403
+    # The console's own origin and header-less local tools are fine.
+    r = client.post("/api/investigate", json={"usernames": "alice"},
+                    headers={"Origin": "http://testserver", "Sec-Fetch-Site": "same-origin"})
+    assert r.status_code == 200
+
+
+def test_scan_starting_get_is_protected_like_a_write(client):
+    iid = _pending(client)
+    r = client.get(f"/api/investigate/{iid}/stream", headers={"Sec-Fetch-Site": "cross-site"})
+    assert r.status_code == 403
+    assert _row(iid)["status"] == "pending", "a refused request must not claim the row"
+    r = client.get("/api/search/stream?usernames=alice", headers={"Sec-Fetch-Site": "cross-site"})
+    assert r.status_code == 403
+
+
+def test_foreign_host_header_is_refused(client):
+    r = client.get("/api/history", headers={"Host": "evil.example"})
+    assert r.status_code == 400 and "Host" in r.json()["error"]
+
+
+def test_json_endpoints_require_json_content_type(client):
+    r = client.post("/api/investigate", content=b'{"usernames":"alice"}',
+                    headers={"content-type": "text/plain"})
+    assert r.status_code == 415
+
+
+def test_request_limits(client):
+    r = client.post("/api/investigate", json={"usernames": ",".join(f"u{i}" for i in range(21))})
+    assert r.status_code == 400 and "at most" in r.json()["error"]
+    r = client.post("/api/investigate", content=b"x" * (70 * 1024),
+                    headers={"content-type": "application/json"})
+    assert r.status_code == 413
+    r = client.post("/api/alerts/mark_seen", json={"ids": list(range(501))})
+    assert r.status_code == 400
+
+
+def test_malformed_bodies_are_400_not_500(client):
+    assert client.post("/api/investigate", json={"usernames": "alice", "timeout": "abc"}).status_code == 400
+    assert client.post("/api/watchlist", json={"inputs": []}).status_code == 400
+    assert client.post("/api/watchlist", json={"inputs": {"usernames": "a"}, "interval_hours": "x"}).status_code == 400
+    assert client.post("/api/alerts/mark_seen", json={"ids": ["x"]}).status_code == 400
+    assert client.post("/api/alerts/mark_seen", content=b"", headers={"content-type": "application/json"}).status_code == 200
+
+
+def test_security_headers_and_csp_on_html(client):
+    r = client.get("/")
+    assert r.headers["X-Frame-Options"] == "DENY"
+    assert r.headers["X-Content-Type-Options"] == "nosniff"
+    assert r.headers["Referrer-Policy"] == "no-referrer"
+    csp = r.headers["Content-Security-Policy"]
+    assert "script-src 'self'" in csp and "frame-ancestors 'none'" in csp
+    assert "unsafe-inline" not in csp.split("style-src")[0]      # no inline scripts
+    assert "Content-Security-Policy" not in client.get("/api/history").headers
+    # The one former inline script now loads from a file the CSP allows.
+    assert client.get("/static/js/sw-cleanup.js").status_code == 200
+    assert "<script>" not in client.get("/").text
+
+
+def test_health_endpoint(client):
+    r = client.get("/api/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["db_ok"] is True and body["backend"] == "sqlite"
+    for key in ("commit", "uptime_s", "investigations", "deps", "stealth", "sites", "max_concurrent"):
+        assert key in body, key
+    assert body["sites"]["source"] == "bundled" and body["sites"]["sherlock"] > 300
+
+
+def test_delete_investigation_cascades_to_history(client):
+    iid = _pending(client)
+    with client.stream("GET", f"/api/investigate/{iid}/stream") as r:
+        "".join(r.iter_text())
+    assert _runs_for(iid) == 1
+    r = client.delete(f"/api/investigate/{iid}")
+    assert r.status_code == 200 and r.json() == {"deleted": iid}
+    assert client.get(f"/api/investigate/{iid}").status_code == 404
+    assert _runs_for(iid) == 0
+    assert client.delete(f"/api/investigate/{iid}").status_code == 404
+    assert client.delete("/api/history/999999").status_code == 404
+
+
+def test_legacy_recon_stream_is_gone_but_reports_remain(client):
+    assert client.get("/api/recon/stream?usernames=alice").status_code == 404
+    assert client.get("/api/recon/report/999999").status_code == 404   # route exists
+
+
+def test_site_picker_has_no_denied_hosts(client):
+    from recon import engines, policy
+    names = {s["name"] for s in client.get("/api/sites").json()}
+    for name in names:
+        info = appmod.SITE_DATA_ALL[name]
+        assert policy.denied_site_reason(engines.sherlock_url_templates(info)) is None, name
+
+
+def test_database_file_is_private():
+    import stat
+    mode = stat.S_IMODE(os.stat(appmod.DB_PATH).st_mode)
+    assert mode & 0o077 == 0, oct(mode)
+
+
+# --- H1 review probes ---------------------------------------------------------------
+
+def test_network_starting_get_pivots_are_cross_site_protected(client):
+    for path in ("/api/brokers?name=x", "/api/domain?domain=example.com",
+                 "/api/investigate/1/breach", "/api/investigate/1/footprint",
+                 "/api/investigate/1/timeline", "/api/investigate/1/report"):
+        r = client.get(path, headers={"Sec-Fetch-Site": "cross-site"})
+        assert r.status_code == 403, path
+    for path in ("/api/history", "/api/sites", "/api/health", "/api/watchlist",
+                 "/api/alerts", "/api/investigate/1", "/api/investigate/1/graph"):
+        r = client.get(path, headers={"Sec-Fetch-Site": "cross-site"})
+        assert r.status_code != 403, path
+
+
+def test_origin_port_must_match_the_console(client):
+    r = client.post("/api/investigate", json={"usernames": "alice"},
+                    headers={"Origin": "http://testserver:4173"})
+    assert r.status_code == 403
+    r = client.post("/api/investigate", json={"usernames": "alice"},
+                    headers={"Origin": "http://testserver"})
+    assert r.status_code == 200
+
+
+def test_host_header_userinfo_trick_is_refused(client):
+    r = client.get("/api/history", headers={"Host": "evil.example@testserver"})
+    assert r.status_code == 400
+
+
+def test_quick_scan_username_cap(client):
+    names = ",".join(f"u{i}" for i in range(21))
+    r = client.get(f"/api/search/stream?usernames={names}")
+    assert r.status_code == 400 and "at most" in r.json()["error"]
+
+
+def test_chunked_bodies_are_still_limited(client):
+    def gen():
+        yield b"x" * (70 * 1024)
+    r = client.post("/api/investigate", content=gen(), headers={"content-type": "application/json"})
+    assert r.status_code == 413
+
+    def gen2():
+        yield b'{"usernames": "alice"}'
+    r = client.post("/api/investigate", content=gen2(), headers={"content-type": "text/plain"})
+    assert r.status_code == 415
+
+
+def test_delete_refuses_a_running_investigation(client):
+    iid = _pending(client)
+    assert appmod._claim_investigation(iid)
+    r = client.delete(f"/api/investigate/{iid}")
+    assert r.status_code == 409 and r.json()["status"] == "running"
+
+
+def test_health_is_reachable_without_credentials_when_a_password_is_set(monkeypatch):
+    monkeypatch.setattr(appmod, "APP_PASSWORD", "s3cret")
+    with TestClient(appmod.app) as c:
+        r = c.get("/api/health")
+        assert r.status_code == 200 and set(r.json()) == {"ok", "db_ok", "uptime_s"}
+        assert c.get("/api/history").status_code == 401
+        import base64
+        tok = base64.b64encode(b"x:s3cret").decode()
+        full = c.get("/api/health", headers={"Authorization": f"Basic {tok}"}).json()
+        assert "investigations" in full and "deps" in full
+
+
+def test_allowed_hosts_parsing_handles_ipv6_and_ports():
+    assert appmod._host_only("[::1]:8420") == "::1"
+    assert appmod._host_only("::1") == "::1"                  # bare IPv6 is not split
+    assert appmod._host_only("LocalHost:8420") == "localhost"
+    assert appmod._host_only("127.0.0.1") == "127.0.0.1"
+    assert "" not in appmod.ALLOWED_HOSTS

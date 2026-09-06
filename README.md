@@ -180,6 +180,45 @@ Scrapling is pre-validated by the same SSRF guard as plain traffic
 as-is; tier 3 needs the browser download plus headroom (~1 GB RAM) — test
 locally before enabling it on a small instance.
 
+## Request protection, limits and health
+
+The console is an unauthenticated API on loopback, so it protects itself from
+the pages the analyst (or the headless browser tier) visits:
+
+- **Host allow-list** — requests whose `Host` is not `localhost` /
+  `127.0.0.1` / `::1` are refused (400). Deployments set
+  `APP_ALLOWED_HOSTS=my.host.example` (comma-separated; `*` disables the check
+  and logs a warning; the default is open when only `APP_PASSWORD` is set).
+- **No cross-site writes or scans** — `/api/*` requests that write, start a
+  scan or query third parties are refused (403) when the browser marks them
+  `Sec-Fetch-Site: cross-site`/`same-site` or sends an `Origin` that is not
+  this console (host **and** port). Pure reads (history, sites, health,
+  watchlist, alerts, a stored investigation and its graph) are exempt. Local
+  tools such as `curl` send neither header and keep working.
+- **Limits** — JSON endpoints require `Content-Type: application/json` (415);
+  bodies over 64 KiB are refused (413); at most 20 usernames per scan or
+  investigation and 500 alert ids per request (400); malformed bodies are a
+  400 naming the field, never a 500.
+- **Headers** — every response carries `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: no-referrer` and `X-Frame-Options: DENY`; every HTML page
+  a Content-Security-Policy (`script-src 'self'`, `frame-ancestors 'none'`,
+  the God's Eye origin as the only `frame-src`).
+- **`GET /api/health`** — `{ok, db_ok, backend, commit, uptime_s,
+  investigations{status: n}, in_flight, max_concurrent, deps, stealth,
+  sites}`; 503 when the database is unreachable. Reachable without
+  credentials even behind `APP_PASSWORD` (liveness fields only until
+  authenticated). Railway's health check uses it.
+- **Retention** — `DELETE /api/investigate/{id}` (also removes its history
+  rows; 409 while it is running) and `DELETE /api/history/{id}`. The SQLite
+  file and its WAL are created with mode 0600.
+- **Runs** — at most `RECON_MAX_CONCURRENT_INVESTIGATIONS` (default 2)
+  investigations run at once; further streams wait and announce `queued`.
+  `SHERLOCK_DB_PATH` points the SQLite database elsewhere (tests use a
+  temporary file). `SHERLOCK_SITES_SOURCE` = `auto` (default: a cached copy of
+  Sherlock's live site list refreshed at most every `SHERLOCK_SITES_MAX_AGE_H`
+  hours with a 5 s timeout, falling back to the stale cache, then the bundled
+  copy) | `bundled` | `remote`.
+
 ## Access gate (optional)
 
 Set the `APP_PASSWORD` environment variable to put the whole app behind HTTP
@@ -299,15 +338,14 @@ New capabilities:
   enrichment, variant matches, email pivot, correlation clusters). Works for
   classic sherlock runs too, in a reduced form.
 
-New endpoints:
+Endpoints:
 
-- `GET /api/recon/stream?usernames=alice&email=a@b.c&variants=true&timeout=10&nsfw=false&sites=`
-  — SSE stream (`meta`, `engine_start`, `found`, `merged`, `error`, `progress`,
-  `engine_done`, `engine_error`, `variants_planned`, `phase`, `enriched`,
-  `email`, `email_done`, `correlation`, `done`, `fatal` events). The `done`
-  event carries `history_id` for report download. `sites` is an optional
-  case-insensitive subset applied to both engines.
-- `GET /api/recon/report/{history_id}` — self-contained HTML report.
+- `GET /api/recon/report/{history_id}` — self-contained HTML report for a
+  stored deep-recon run.
+- The v2 `GET /api/recon/stream` endpoint was **removed on 2026-09-06**: it was
+  a frozen copy of the investigation pipeline with no UI caller, no adaptive
+  routing and no access-policy filtering. Use `POST /api/investigate` +
+  `GET /api/investigate/{id}/stream` (v3 below), which cover everything it did.
 
 Storage: recon runs share the `runs` table (new `kind` column, added by an
 automatic migration on startup — existing rows keep working). Enrichment,
@@ -399,8 +437,8 @@ New/changed endpoints:
 Storage: new `investigations`, `watchlist`, and `watch_alerts` tables, plus a
 nullable `runs.investigation_id` column linking history rows to
 investigations — all created by automatic migrations on startup; existing
-rows keep working. `/api/recon/stream` and the classic endpoints are
-unchanged.
+rows keep working. The classic quick-scan endpoints are unchanged (the v2
+stream endpoint was removed, see above).
 
 Graceful degradation: `phonenumbers` missing → phone pivot returns an
 "unavailable" result; `sigma.min.js`/`graphology.umd.min.js` missing → the

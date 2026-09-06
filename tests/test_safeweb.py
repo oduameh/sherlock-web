@@ -98,3 +98,11 @@ def test_policy_table_matches_the_observed_robots_for_x_image_cdn():
     for host in ("scontent.cdninstagram.com", "scontent.xx.fbcdn.net", "i.pinimg.com",
                  "styles.redditmedia.com"):
         assert policy.denied_reason(f"https://{host}/a.jpg"), host
+
+
+@pytest.mark.parametrize("ip", ["100.64.0.1", "2002:7f00:1::1", "::ffff:10.0.0.5",
+                                "2001:0:4136:e378:8000:63bf:3fff:fdd2"])
+def test_shared_address_space_and_6to4_are_not_public(ip):
+    """RFC 6598 shared space and 6to4 (which can encode 127.0.0.1) passed the
+    explicit checks; is_global rejects them (security audit F-9)."""
+    assert _is_public_ip(ip) is False

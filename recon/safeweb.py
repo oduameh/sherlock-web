@@ -51,7 +51,18 @@ def _is_public_ip(ip: str) -> bool:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return False
-    return not (
+    # Transition addresses embed an IPv4 address that decides the answer:
+    # 6to4 2002:7f00:1::1 encodes 127.0.0.1, ::ffff:10.0.0.5 is private,
+    # Teredo carries a server and a client address (security audit F-9).
+    inner = getattr(addr, "sixtofour", None) or getattr(addr, "ipv4_mapped", None)
+    if inner is not None:
+        return _is_public_ip(str(inner))
+    teredo = getattr(addr, "teredo", None)
+    if teredo:
+        return all(_is_public_ip(str(x)) for x in teredo)
+    # is_global also rejects the shared-address space (100.64.0.0/10,
+    # RFC 6598) that the explicit checks below let through.
+    return addr.is_global and not (
         addr.is_private
         or addr.is_loopback
         or addr.is_link_local

@@ -29,7 +29,18 @@ import weakref
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+# httpx logs every request at INFO (~800 lines per investigation); Scrapling
+# installs a second handler that duplicated every line.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("scrapling").propagate = False
+# Files this process creates (the SQLite database and its WAL, caches, logs)
+# hold subject data; keep them private to this user.
+os.umask(0o077)
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -54,13 +65,10 @@ try:
     from recon import engines as recon_engines
     from recon import monitor as recon_monitor
     from recon.connections import find_connections, subject_identifiers
-    from recon.correlate import correlate as recon_correlate
     from recon.dossier import render_dossier
-    from recon.email_pivot import gravatar_lookup, holehe_available, holehe_scan
-    from recon.enrich import enrich_profiles
+    from recon.email_pivot import holehe_available
     from recon.exposure import exposure_summary
     from recon.graph import build_graph
-    from recon.permutations import generate_variants
     from recon.pipeline import run_pipeline
     from recon.report import render_report
     from recon.timeline import (
@@ -116,6 +124,161 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="sherlock-web", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
+# Request protection for a local, unauthenticated API
+# ---------------------------------------------------------------------------
+# The console runs unauthenticated on loopback. Without these checks any web
+# page the analyst visits — or, with the headless tier, any page the tool
+# itself renders — could POST to it (create investigations, plant recurring
+# watches, delete them) and DNS rebinding could read every stored case. See
+# docs/audit/2026-09-06/security.md F-1, F-8, F-10, F-13.
+
+APP_STARTED_AT = time.time()
+
+
+def _app_commit() -> str:
+    sha = os.environ.get("GIT_SHA") or os.environ.get("RAILWAY_GIT_COMMIT_SHA")
+    if sha:
+        return sha[:12]
+    try:
+        head = (BASE_DIR / ".git" / "HEAD").read_text().strip()
+        if head.startswith("ref: "):
+            return (BASE_DIR / ".git" / head[5:]).read_text().strip()[:12]
+        return head[:12]
+    except OSError:
+        return "unknown"
+
+
+APP_COMMIT = _app_commit()
+MAX_USERNAMES_PER_REQUEST = 20
+MAX_BODY_BYTES = 64 * 1024
+MAX_ALERT_IDS = 500
+_JSON_POST_PATHS = ("/api/investigate", "/api/watchlist", "/api/alerts/mark_seen")
+
+
+def _raw_host(request: Request) -> str:
+    """The Host header as the browser sent it (lower-cased, no userinfo
+    tricks): `evil.example@localhost` must not parse as `localhost`."""
+    host = request.headers.get("host", "").strip().lower()
+    if "@" in host or "/" in host or " " in host:
+        return ""
+    return host
+
+
+def _host_only(netloc: str) -> str:
+    """Hostname without port; IPv6 brackets removed. A bare IPv6 address
+    (`::1`, no brackets, no port) is returned whole — splitting it at the
+    first colon produced "", which then matched the empty host that the
+    userinfo trick (`evil.example@localhost`) reduces to."""
+    netloc = netloc.strip().lower()
+    if netloc.startswith("["):
+        return netloc[1:netloc.find("]")] if "]" in netloc else ""
+    if netloc.count(":") > 1:
+        return netloc
+    return netloc.split(":", 1)[0]
+
+
+def _allowed_hosts() -> set:
+    raw = os.environ.get("APP_ALLOWED_HOSTS")
+    if raw is None:
+        # A deployment (password gate configured) serves on a public hostname we
+        # cannot know; a local run is loopback only.
+        return {"*"} if os.environ.get("APP_PASSWORD") else {"localhost", "127.0.0.1", "::1"}
+    return {_host_only(h) for h in raw.split(",") if h.strip()} - {""}
+
+
+ALLOWED_HOSTS = _allowed_hosts()
+if "*" in ALLOWED_HOSTS:
+    logging.getLogger("app").warning(
+        "APP_ALLOWED_HOSTS is open (*): set it to the public hostname of this deployment")
+
+
+# GETs that only read the database. Everything else under /api/ either writes
+# or starts network activity toward third parties (scans, pivots, reports that
+# re-query GitHub/Nominatim/Cavalier) and gets the cross-site guard. An
+# allow-list, not a deny-list: a new endpoint is protected by default.
+_PURE_READ_RE = re.compile(
+    r"^/api/(?:history(?:/\d+)?|sites|health(?:/sources)?|watchlist|alerts|godseye/status"
+    r"|investigate/\d+(?:/graph|/exposure|/connections)?)$")
+
+
+def _is_pure_read(method: str, path: str) -> bool:
+    return method == "GET" and bool(_PURE_READ_RE.match(path))
+
+
+def _cross_site_reason(request: Request) -> str | None:
+    """Why this /api request must be refused as cross-site, or None."""
+    site = request.headers.get("sec-fetch-site", "").lower()
+    if site in ("cross-site", "same-site"):
+        return f"Sec-Fetch-Site is {site}"
+    origin = request.headers.get("origin")
+    if origin and origin != "null":
+        try:
+            from urllib.parse import urlsplit
+            onetloc = (urlsplit(origin).netloc or "").lower()
+        except Exception:
+            onetloc = ""
+        # Host and port must both match: a page served from localhost:4173
+        # (God's Eye) is not this console on localhost:8420.
+        if not onetloc or onetloc != _raw_host(request):
+            return f"Origin {origin} is not this console"
+    elif origin == "null":
+        return "opaque Origin"
+    return None
+
+
+@app.middleware("http")
+async def request_protection(request: Request, call_next):
+    path = request.url.path
+    # 1. Host header allow-list (DNS rebinding sends a foreign Host to our port).
+    host = _host_only(_raw_host(request))
+    if "*" not in ALLOWED_HOSTS and (not host or host not in ALLOWED_HOSTS):
+        return JSONResponse({"error": "unexpected Host header"}, status_code=400)
+    if path.startswith("/api/"):
+        # 2. No cross-site writes, scan starts or third-party pivots.
+        if not _is_pure_read(request.method, path):
+            why = _cross_site_reason(request)
+            if why:
+                return JSONResponse({"error": f"cross-site request refused ({why})"},
+                                    status_code=403)
+        # 3. Bounded bodies, JSON only where JSON is expected.
+        length = request.headers.get("content-length")
+        if length and length.isdigit() and int(length) > MAX_BODY_BYTES:
+            return JSONResponse({"error": "request body too large"}, status_code=413)
+        if request.method == "POST" and any(path.startswith(p) for p in _JSON_POST_PATHS) \
+                and length and length != "0":
+            ctype = request.headers.get("content-type", "").split(";")[0].strip().lower()
+            if ctype != "application/json":
+                return JSONResponse({"error": "Content-Type must be application/json"},
+                                    status_code=415)
+    response = await call_next(request)
+    # 4. Security headers; a CSP on every HTML document we serve.
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    ctype = response.headers.get("content-type", "")
+    if ctype.startswith("text/html"):
+        response.headers.setdefault("Content-Security-Policy", _content_security_policy())
+    return response
+
+
+def _content_security_policy() -> str:
+    frame_src = "'none'"
+    try:
+        from urllib.parse import urlsplit
+        g = urlsplit(GODSEYE_URL)
+        if g.scheme and g.netloc:
+            frame_src = f"{g.scheme}://{g.netloc}"
+    except Exception:
+        pass
+    return ("default-src 'self'; script-src 'self'; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com data:; "
+            "img-src * data: blob:; connect-src 'self'; "
+            f"frame-src {frame_src}; frame-ancestors 'none'; base-uri 'self'; "
+            "form-action 'self'; object-src 'none'")
+
+
+# ---------------------------------------------------------------------------
 # Optional access gate (Railway deployments etc.)
 # ---------------------------------------------------------------------------
 
@@ -124,18 +287,26 @@ app = FastAPI(title="sherlock-web", lifespan=lifespan)
 APP_PASSWORD = os.environ.get("APP_PASSWORD") or None
 
 
+def _is_authorized(request: Request) -> bool:
+    if APP_PASSWORD is None:
+        return True
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(auth[6:], validate=True).decode("utf-8")
+            _, _, password = decoded.partition(":")
+            return secrets.compare_digest(password, APP_PASSWORD)
+        except Exception:
+            return False
+    return False
+
+
 @app.middleware("http")
 async def basic_auth_gate(request: Request, call_next):
-    if APP_PASSWORD is not None:
-        authorized = False
-        auth = request.headers.get("authorization", "")
-        if auth.startswith("Basic "):
-            try:
-                decoded = base64.b64decode(auth[6:], validate=True).decode("utf-8")
-                _, _, password = decoded.partition(":")
-                authorized = secrets.compare_digest(password, APP_PASSWORD)
-            except Exception:
-                authorized = False
+    # /api/health stays reachable for the platform health check (it answers
+    # with liveness only when unauthenticated).
+    if APP_PASSWORD is not None and request.url.path != "/api/health":
+        authorized = _is_authorized(request)
         if not authorized:
             return Response(
                 "Unauthorized",
@@ -304,6 +475,16 @@ def _load_sherlock_sites(source: str | None = None, cache_dir: Path | None = Non
 
 _ALL_SITES, SITES_SOURCE = _load_sherlock_sites()
 SITE_DATA_ALL = {s.name: s.information for s in _ALL_SITES}
+if RECON_AVAILABLE:
+    # robots-denied hosts are never scanned by any path — including the classic
+    # quick scan and the site picker (the pipeline filters again with reasons).
+    from recon import policy as _policy
+    SITE_DATA_ALL, _DENIED_SHERLOCK_SITES = _policy.filter_site_mapping(
+        SITE_DATA_ALL, recon_engines.sherlock_url_templates)
+    if _DENIED_SHERLOCK_SITES:
+        logging.getLogger("app").info(
+            "sherlock sites on robots-denied hosts excluded everywhere: %s",
+            ", ".join(_DENIED_SHERLOCK_SITES))
 NSFW_NAMES = {s.name for s in _ALL_SITES if s.is_nsfw}
 
 
@@ -410,6 +591,11 @@ def _init_db() -> None:
 
 
 _init_db()
+if not dbconn.IS_POSTGRES:
+    try:
+        os.chmod(DB_PATH, 0o600)
+    except OSError:
+        pass
 
 
 def save_run(username: str, found: int, total: int, results,
@@ -651,6 +837,10 @@ async def search_stream(
             iter(['event: fatal\ndata: {"message": "no usernames given"}\n\n']),
             media_type="text/event-stream",
         )
+    if len(names) > MAX_USERNAMES_PER_REQUEST:
+        return JSONResponse(
+            {"error": f"at most {MAX_USERNAMES_PER_REQUEST} usernames per scan"},
+            status_code=400)
 
     # Build the site subset; empty selection = all sites. Case-insensitive.
     selected = {s.strip().lower() for s in sites.split(",") if s.strip()}
@@ -716,349 +906,99 @@ async def search_stream(
 
 if RECON_AVAILABLE:
 
-    class _ReconSherlockNotify(QueryNotify):
-        """Forwards Sherlock per-site results to the recon coordinator."""
+    from pydantic import BaseModel, Field, ValidationError
 
-        def __init__(self, scanned_name, variant_of, emit_threadsafe):
-            super().__init__()
-            self.scanned_name = scanned_name
-            self.variant_of = variant_of
-            self.emit = emit_threadsafe
-            self.checked = 0
-            self.total = 0
+    class InvestigateBody(BaseModel):
+        name: str = ""
+        usernames: str | list[str] = Field(default_factory=list)
+        email: str = ""
+        phone: str = ""
+        domain: str = ""
+        location: str = ""
+        variants: bool = False
+        thorough: bool = False
+        timeout: int = 10
 
-        def update(self, result) -> None:
-            self.checked += 1
-            status = result.status
-            if status == QueryStatus.CLAIMED:
-                self.emit(
-                    "found", "sherlock", self.scanned_name, result.site_name,
-                    result.site_url_user, result.query_time, self.variant_of,
-                )
-            elif status in ERROR_STATUSES:
-                self.emit(
-                    "error", "sherlock", self.scanned_name, result.site_name,
-                    str(status.value), result.context or "", self.variant_of,
-                )
-            self.emit(
-                "progress", "sherlock", self.scanned_name,
-                self.checked, self.total, self.variant_of,
-            )
+    class WatchInputs(BaseModel):
+        usernames: str | list[str] = Field(default_factory=list)
+        email: str = ""
+        name: str = ""
 
-    def _recon_sherlock_worker(items, site_data, timeout, emit_threadsafe,
-                               loop, done_event):
-        """Thread entry: scan (username, variant_of) pairs sequentially."""
+    class WatchBody(BaseModel):
+        inputs: WatchInputs = Field(default_factory=WatchInputs)
+        label: str = ""
+        interval_hours: int | None = None
+
+    class MarkSeenBody(BaseModel):
+        ids: list[int] = Field(default_factory=list)
+
+    def _split_usernames(raw) -> list[str]:
+        if isinstance(raw, str):
+            raw = re.split(r"[,\n]+", raw)
+        return [str(u).strip() for u in raw if str(u).strip()]
+
+    async def _parse_body(request: Request, model, allow_empty: bool = False):
+        """(model instance, None) or (None, 400 JSON). Malformed bodies used
+        to raise inside the handler and answer 500 with a stack trace."""
         try:
-            for scanned_name, variant_of in items:
-                notify = _ReconSherlockNotify(scanned_name, variant_of,
-                                              emit_threadsafe)
-                notify.total = len(site_data)
-                emit_threadsafe("engine_start", "sherlock", scanned_name,
-                                len(site_data), variant_of)
-                sherlock(scanned_name, site_data, notify, timeout=timeout)
-                emit_threadsafe("engine_done", "sherlock", scanned_name,
-                                variant_of)
-        except Exception as exc:
-            emit_threadsafe("engine_error", "sherlock",
-                            f"{type(exc).__name__}: {exc}")
-        finally:
-            loop.call_soon_threadsafe(done_event.set)
+            raw = await request.body()
+        except Exception:
+            return None, JSONResponse({"error": "unreadable body"}, status_code=400)
+        # Chunked uploads carry no Content-Length, so the middleware could not
+        # size or type them; enforce both here as well.
+        if len(raw) > MAX_BODY_BYTES:
+            return None, JSONResponse({"error": "request body too large"}, status_code=413)
+        if raw.strip():
+            ctype = request.headers.get("content-type", "").split(";")[0].strip().lower()
+            if ctype != "application/json":
+                return None, JSONResponse({"error": "Content-Type must be application/json"},
+                                          status_code=415)
+        try:
+            data = json.loads(raw) if raw.strip() else ({} if allow_empty else None)
+        except Exception:
+            return None, JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        if data is None or not isinstance(data, dict):
+            return None, JSONResponse({"error": "JSON object expected"}, status_code=400)
+        try:
+            return model.model_validate(data), None
+        except ValidationError as exc:
+            first = exc.errors()[0] if exc.errors() else {}
+            loc = ".".join(str(x) for x in first.get("loc", ())) or "body"
+            return None, JSONResponse(
+                {"error": f"invalid field {loc}: {first.get('msg', 'invalid')}"},
+                status_code=400)
 
-    @app.get("/api/recon/stream")
-    async def recon_stream(
-        request: Request,
-        usernames: str = Query(""),
-        email: str = Query(""),
-        variants: bool = Query(False),
-        timeout: int = Query(10, ge=1, le=120),
-        nsfw: bool = Query(False),
-        sites: str = Query(""),
-    ) -> StreamingResponse:
-        email = email.strip()
-        names = [u.strip() for u in re.split(r"[,\n]+", usernames) if u.strip()]
-        if email and not is_probably_email(email):
-            return StreamingResponse(
-                iter([f'event: fatal\ndata: {json.dumps({"message": f"invalid email: {email}"})}\n\n']),
-                media_type="text/event-stream",
-            )
-        if not names and email:
-            names = [email.split("@", 1)[0]]
-        if not names and not email:
-            return StreamingResponse(
-                iter(['event: fatal\ndata: {"message": "give a username or an email"}\n\n']),
-                media_type="text/event-stream",
-            )
+    @app.delete("/api/investigate/{inv_id}")
+    def delete_investigation(inv_id: int) -> JSONResponse:
+        """Remove a case and its history rows (subject data retention, F-5)."""
+        with db_connect(DB_PATH) as conn:
+            row = conn.execute("SELECT id, status FROM investigations WHERE id = ?",
+                               (inv_id,)).fetchone()
+            if row is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            if row[1] == "running":
+                # The pipeline would keep running and re-create an orphan
+                # history row; stop the stream first (it cancels the run).
+                return JSONResponse({"error": "investigation is running; stop it first",
+                                     "status": "running"}, status_code=409)
+            conn.execute("DELETE FROM runs WHERE investigation_id = ?", (inv_id,))
+            conn.execute("DELETE FROM investigations WHERE id = ?", (inv_id,))
+        return JSONResponse({"deleted": inv_id})
 
-        queue: asyncio.Queue = asyncio.Queue()
-        loop = asyncio.get_running_loop()
+    @app.delete("/api/history/{run_id}")
+    def delete_history_run(run_id: int) -> JSONResponse:
+        with db_connect(DB_PATH) as conn:
+            row = conn.execute("SELECT id FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if row is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+        return JSONResponse({"deleted": run_id})
 
-        # --- shared run state (mutated on the event loop only) -----------
-        rows: dict[tuple[str, str], dict] = {}
-        accounts: list[dict] = []
-        variant_rows: list[dict] = []
-        email_state: dict = {"gravatar": None, "holehe": []}
-
-        def emit(event: str, payload: dict) -> None:
-            queue.put_nowait((event, payload))
-
-        def handle_found(engine, scanned_name, site, url, query_time,
-                         variant_of):
-            key = (scanned_name, recon_engines.normalize_site(site))
-            row = rows.get(key)
-            if row is not None:
-                if engine not in row["engines"]:
-                    row["engines"].append(engine)
-                    emit("merged", {
-                        "username": scanned_name, "site": row["site"],
-                        "engines": row["engines"], "variant_of": variant_of,
-                    })
-                return
-            row = {
-                "username": scanned_name, "site": site, "url": url,
-                "engines": [engine], "variant_of": variant_of,
-                "query_time": query_time,
-            }
-            rows[key] = row
-            (variant_rows if variant_of else accounts).append(row)
-            emit("found", dict(row))
-
-        def handle_error(engine, scanned_name, site, status, context,
-                         variant_of):
-            emit("error", {
-                "engine": engine, "username": scanned_name, "site": site,
-                "status": status, "context": context, "variant_of": variant_of,
-            })
-
-        def handle_progress(engine, scanned_name, checked, total, variant_of):
-            emit("progress", {
-                "engine": engine, "username": scanned_name,
-                "checked": checked, "total": total, "variant_of": variant_of,
-            })
-
-        def emit_threadsafe(kind, *args):
-            """Route worker-thread callbacks onto the event loop."""
-            handler = {
-                "found": handle_found,
-                "error": handle_error,
-                "progress": handle_progress,
-            }.get(kind)
-            if handler is not None:
-                loop.call_soon_threadsafe(handler, *args)
-            else:
-                loop.call_soon_threadsafe(
-                    _engine_lifecycle, kind, *args
-                )
-
-        def _engine_lifecycle(kind, engine, *args):
-            if kind == "engine_start":
-                scanned_name, total, variant_of = args
-                emit("engine_start", {
-                    "engine": engine, "username": scanned_name,
-                    "total": total, "variant_of": variant_of,
-                })
-            elif kind == "engine_done":
-                scanned_name, variant_of = args
-                emit("engine_done", {
-                    "engine": engine, "username": scanned_name,
-                    "variant_of": variant_of,
-                })
-            elif kind == "engine_error":
-                emit("engine_error", {"engine": engine, "message": args[0]})
-
-        # --- engine workers ----------------------------------------------
-        def start_sherlock(items, site_data):
-            done = asyncio.Event()
-            threading.Thread(
-                target=_recon_sherlock_worker,
-                args=(items, site_data, timeout, emit_threadsafe, loop, done),
-                daemon=True,
-            ).start()
-            return done
-
-        async def maigret_worker(items, site_dict):
-            if not recon_engines.maigret_available():
-                _engine_lifecycle("engine_error", "maigret",
-                                  "maigret package not installed")
-                return
-            from maigret.result import MaigretCheckStatus
-
-            total = len(site_dict)
-            for scanned_name, variant_of in items:
-                _engine_lifecycle("engine_start", "maigret", scanned_name,
-                                  total, variant_of)
-                checked = 0
-
-                def on_result(result, _name=scanned_name, _vo=variant_of):
-                    nonlocal checked
-                    checked += 1
-                    st = result.status  # MaigretCheckStatus enum
-                    if st == MaigretCheckStatus.CLAIMED:
-                        handle_found("maigret", _name, result.site_name,
-                                     result.site_url_user, None, _vo)
-                    elif st in (MaigretCheckStatus.UNKNOWN,
-                                MaigretCheckStatus.ILLEGAL):
-                        handle_error("maigret", _name, result.site_name,
-                                     str(st.value),
-                                     result.context or "", _vo)
-                    handle_progress("maigret", _name, checked, total, _vo)
-
-                try:
-                    await recon_engines.maigret_scan(
-                        scanned_name, site_dict, timeout, on_result
-                    )
-                except Exception as exc:
-                    _engine_lifecycle("engine_error", "maigret",
-                                      f"{type(exc).__name__}: {exc}")
-                _engine_lifecycle("engine_done", "maigret", scanned_name,
-                                  variant_of)
-
-        async def email_worker(addr):
-            grav = await gravatar_lookup(addr)
-            email_state["gravatar"] = grav
-            emit("email", {
-                "source": "gravatar", "email": addr, "found": bool(grav),
-                "profile": grav,
-            })
-            if holehe_available():
-                def on_holehe(entry):
-                    email_state["holehe"].append(entry)
-                    emit("email", {"source": "holehe", "email": addr, **entry})
-
-                await holehe_scan(addr, on_holehe)
-            else:
-                emit("email", {"source": "holehe", "email": addr,
-                               "error": "holehe not installed"})
-            hits = sum(1 for h in email_state["holehe"] if h.get("exists"))
-            emit("email_done", {"email": addr, "holehe_hits": hits,
-                                "gravatar": bool(grav)})
-
-        # --- coordinator ---------------------------------------------------
-        async def coordinator():
-            params = {"usernames": names, "email": email,
-                      "variants": variants, "timeout": timeout, "nsfw": nsfw}
-            try:
-                # Site subsets.
-                selected = {s.strip().lower() for s in sites.split(",")
-                            if s.strip()}
-                sher_data = {
-                    n: i for n, i in SITE_DATA_ALL.items()
-                    if (not selected or n.lower() in selected)
-                    and (nsfw or n not in NSFW_NAMES)
-                }
-                mai_sites = (
-                    {n: s for n, s in recon_engines.maigret_all_sites().items()
-                     if not selected or n.lower() in selected}
-                    if recon_engines.maigret_available() else {}
-                )
-                emit("meta", {
-                    **params, "sherlock_sites": len(sher_data),
-                    "maigret_sites": len(mai_sites),
-                })
-
-                base_items = [(n, None) for n in names]
-                sher_done = start_sherlock(base_items, sher_data)
-                mai_task = asyncio.create_task(maigret_worker(base_items,
-                                                              mai_sites))
-                email_task = (asyncio.create_task(email_worker(email))
-                              if email else None)
-                await sher_done.wait()
-                await mai_task
-
-                # Variants phase (reduced high-value site list).
-                if variants:
-                    sher_reduced = recon_engines.sherlock_variant_site_data(
-                        sher_data)
-                    mai_reduced = (
-                        recon_engines.maigret_variant_sites()
-                        if recon_engines.maigret_available() else {}
-                    )
-                    if selected:  # honor an explicit site selection
-                        sher_reduced = {n: i for n, i in sher_reduced.items()
-                                        if n.lower() in selected}
-                        mai_reduced = {n: s for n, s in mai_reduced.items()
-                                       if n.lower() in selected}
-                    for base in names:
-                        vs = generate_variants(base)
-                        emit("variants_planned", {"base": base, "variants": vs,
-                                                  "sites": len(sher_reduced)})
-                        if not vs:
-                            continue
-                        v_items = [(v, base) for v in vs]
-                        v_done = start_sherlock(v_items, sher_reduced)
-                        await maigret_worker(v_items, mai_reduced)
-                        await v_done.wait()
-
-                # Enrichment phase.
-                all_rows = accounts + variant_rows
-                emit("phase", {"phase": "enriching",
-                               "targets": min(40, len(all_rows))})
-                def on_enriched(row, data):
-                    emit("enriched", {
-                        "username": row["username"], "site": row["site"],
-                        "url": row["url"], "variant_of": row["variant_of"],
-                        "enrichment": data,
-                        "verification": row.get("verification"),
-                    })
-                await enrich_profiles(all_rows, on_enriched)
-
-                # Correlation phase.
-                clusters = await recon_correlate(all_rows)
-                emit("correlation", {"clusters": clusters})
-
-                # Wait for the email pivot before persisting.
-                if email_task is not None:
-                    await email_task
-
-                # Persist + finish.
-                subject = ", ".join(names) if names else email
-                total_checked = len(sher_data) + len(mai_sites)
-                results = {
-                    "params": params,
-                    "accounts": accounts,
-                    "variants": variant_rows,
-                    "email": email_state,
-                    "correlation": clusters,
-                }
-                run_id = save_run(subject, len(accounts), total_checked,
-                                  results, kind="recon")
-                emit("done", {
-                    "history_id": run_id,
-                    "found": len(accounts),
-                    "variant_hits": len(variant_rows),
-                    "clusters": len(clusters),
-                    "email_hits": sum(
-                        1 for h in email_state["holehe"] if h.get("exists")),
-                })
-            except Exception as exc:
-                emit("fatal", {"message": f"{type(exc).__name__}: {exc}"})
-            finally:
-                queue.put_nowait(None)  # sentinel
-
-        coord_task = asyncio.create_task(coordinator())
-
-        async def event_gen():
-            try:
-                while True:
-                    try:
-                        item = await asyncio.wait_for(queue.get(), timeout=15)
-                    except asyncio.TimeoutError:
-                        if await request.is_disconnected():
-                            break
-                        yield ": keepalive\n\n"
-                        continue
-                    if item is None:
-                        break
-                    event, payload = item
-                    yield f"event: {event}\ndata: {json.dumps(payload)}\n\n"
-            except asyncio.CancelledError:
-                coord_task.cancel()
-                raise
-
-        return StreamingResponse(
-            event_gen(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+    # The v2 "/api/recon/stream" endpoint — a 350-line frozen copy of the
+    # investigation pipeline with no frontend caller, no adaptive routing and no
+    # policy filtering — was removed on 2026-09-06 (target architecture §3).
+    # /api/recon/report/{run_id} stays so stored kind="recon" history rows
+    # still render.
 
     @app.get("/api/recon/report/{run_id}")
     def recon_report(run_id: int) -> Response:
@@ -1296,29 +1236,25 @@ if RECON_AVAILABLE:
 
     @app.post("/api/investigate")
     async def create_investigation(request: Request) -> JSONResponse:
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-        if not isinstance(body, dict):
-            return JSONResponse({"error": "JSON object expected"},
-                                status_code=400)
-
-        raw_users = body.get("usernames") or []
-        if isinstance(raw_users, str):
-            raw_users = re.split(r"[,\n]+", raw_users)
-        usernames = [u.strip() for u in raw_users if str(u).strip()]
+        body, err = await _parse_body(request, InvestigateBody)
+        if err is not None:
+            return err
+        usernames = _split_usernames(body.usernames)
+        if len(usernames) > MAX_USERNAMES_PER_REQUEST:
+            return JSONResponse(
+                {"error": f"at most {MAX_USERNAMES_PER_REQUEST} usernames per investigation"},
+                status_code=400)
 
         inputs = {
-            "name": str(body.get("name") or "").strip(),
+            "name": body.name.strip(),
             "usernames": usernames,
-            "email": str(body.get("email") or "").strip(),
-            "phone": str(body.get("phone") or "").strip(),
-            "domain": str(body.get("domain") or "").strip().lower(),
-            "location": str(body.get("location") or "").strip(),
-            "variants": bool(body.get("variants")),
-            "thorough": bool(body.get("thorough")),
-            "timeout": max(1, min(120, int(body.get("timeout") or 10))),
+            "email": body.email.strip(),
+            "phone": body.phone.strip(),
+            "domain": body.domain.strip().lower(),
+            "location": body.location.strip(),
+            "variants": bool(body.variants),
+            "thorough": bool(body.thorough),
+            "timeout": max(1, min(120, int(body.timeout))),
         }
         if not (inputs["name"] or usernames or inputs["email"]
                 or inputs["phone"] or inputs["domain"]):
@@ -1676,28 +1612,25 @@ if RECON_AVAILABLE:
 
     @app.post("/api/watchlist")
     async def create_watch(request: Request) -> JSONResponse:
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-        inputs = body.get("inputs") or {}
-        if isinstance(inputs.get("usernames"), str):
-            inputs["usernames"] = [
-                u.strip() for u in re.split(r"[,\n]+", inputs["usernames"])
-                if u.strip()
-            ]
-        if not (inputs.get("usernames") or inputs.get("email")
-                or inputs.get("name")):
+        body, err = await _parse_body(request, WatchBody)
+        if err is not None:
+            return err
+        usernames = _split_usernames(body.inputs.usernames)
+        if len(usernames) > MAX_USERNAMES_PER_REQUEST:
+            return JSONResponse(
+                {"error": f"at most {MAX_USERNAMES_PER_REQUEST} usernames per watch"},
+                status_code=400)
+        inputs = {"usernames": usernames, "email": body.inputs.email.strip(),
+                  "name": body.inputs.name.strip()}
+        if not (usernames or inputs["email"] or inputs["name"]):
             return JSONResponse(
                 {"error": "watch needs usernames, email, or name"},
                 status_code=400,
             )
-        label = str(body.get("label") or "").strip() or (
-            ", ".join(inputs.get("usernames") or [])
-            or inputs.get("email") or inputs.get("name"))
-        interval = max(recon_monitor.MIN_INTERVAL_HOURS,
-                       int(body.get("interval_hours")
-                           or recon_monitor.DEFAULT_INTERVAL_HOURS))
+        label = body.label.strip() or (
+            ", ".join(usernames) or inputs["email"] or inputs["name"])
+        interval = min(24 * 365, max(recon_monitor.MIN_INTERVAL_HOURS,
+                                     int(body.interval_hours or recon_monitor.DEFAULT_INTERVAL_HOURS)))
         with db_connect(DB_PATH) as conn:
             watch_id = insert_returning_id(
                 conn,
@@ -1755,17 +1688,18 @@ if RECON_AVAILABLE:
 
     @app.post("/api/alerts/mark_seen")
     async def mark_alerts_seen(request: Request) -> JSONResponse:
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        ids = (body or {}).get("ids") or []
+        body, err = await _parse_body(request, MarkSeenBody, allow_empty=True)
+        if err is not None:
+            return err
+        ids = list(body.ids or [])
+        if len(ids) > MAX_ALERT_IDS:
+            return JSONResponse({"error": f"at most {MAX_ALERT_IDS} ids"}, status_code=400)
         with db_connect(DB_PATH) as conn:
             if ids:
                 conn.execute(
                     f"UPDATE watch_alerts SET seen = 1 WHERE id IN"
                     f" ({','.join('?' for _ in ids)})",
-                    [int(i) for i in ids],
+                    ids,
                 )
             else:
                 conn.execute("UPDATE watch_alerts SET seen = 1 WHERE seen = 0")
@@ -1774,14 +1708,58 @@ if RECON_AVAILABLE:
     # The background watchlist monitor is started from the app lifespan handler
     # (see ``lifespan`` above), which also cancels it cleanly on shutdown.
 
-else:
+# ---------------------------------------------------------------------------
+# Process health (always registered, never behind the password gate)
+# ---------------------------------------------------------------------------
 
-    @app.get("/api/recon/stream")
-    async def recon_stream_unavailable() -> StreamingResponse:
-        return StreamingResponse(
-            iter(['event: fatal\ndata: {"message": "recon package unavailable"}\n\n']),
-            media_type="text/event-stream",
-        )
+@app.get("/api/health")
+def health(request: Request) -> JSONResponse:
+    """Process health for operators and the platform health check: is the
+    database reachable, which optional engines are present, is the stealth
+    browser alive, how many investigations are in flight."""
+    db_ok = True
+    counts: dict = {}
+    try:
+        with db_connect(DB_PATH) as conn:
+            conn.execute("SELECT 1").fetchone()
+            for status, n in conn.execute(
+                    "SELECT status, COUNT(*) FROM investigations GROUP BY status"):
+                counts[status] = n
+    except Exception:
+        db_ok = False
+    try:
+        from recon import stealthweb
+        stealth = {"enabled": stealthweb.enabled(),
+                   "tier3_dead": bool(getattr(stealthweb, "_session_dead", False))}
+    except Exception:
+        stealth = {"enabled": False, "tier3_dead": None}
+    deps: dict = {"recon": RECON_AVAILABLE}
+    if RECON_AVAILABLE:
+        deps["maigret"] = recon_engines.maigret_available()
+        deps["holehe"] = holehe_available()
+        try:
+            from recon.phone_accounts import ignorant_available
+            deps["ignorant"] = ignorant_available()
+        except Exception:
+            deps["ignorant"] = False
+    body = {
+        "ok": db_ok,
+        "db_ok": db_ok,
+        "backend": "postgres" if dbconn.IS_POSTGRES else "sqlite",
+        "commit": APP_COMMIT,
+        "uptime_s": int(time.time() - APP_STARTED_AT),
+        "investigations": counts,
+        "in_flight": counts.get("running", 0),
+        "max_concurrent": globals().get("MAX_CONCURRENT_INVESTIGATIONS"),
+        "deps": deps,
+        "stealth": stealth,
+        "sites": {"sherlock": len(SITE_DATA_ALL), "source": SITES_SOURCE},
+    }
+    if APP_PASSWORD is not None and not _is_authorized(request):
+        # A platform health check must work without credentials, but an
+        # unauthenticated caller learns only liveness.
+        body = {"ok": db_ok, "db_ok": db_ok, "uptime_s": body["uptime_s"]}
+    return JSONResponse(body, status_code=200 if db_ok else 503)
 
 
 # ---------------------------------------------------------------------------
