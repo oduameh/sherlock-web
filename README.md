@@ -35,6 +35,15 @@ security-guard coverage for the recon engines — no network required):
 
 ## Persistence — SQLite or Postgres
 
+**Schema versions.** Tables are created and upgraded by the ordered migration
+list in `dbschema.py` (tracked in a `schema_version` table on both backends;
+mirrored to `PRAGMA user_version` on SQLite). Adding a column or index means
+appending a migration, never editing an old one. **Backup (SQLite):** the
+database runs in WAL mode, so copy it with `sqlite3 history.db ".backup out.db"`
+rather than `cp` (the app also checkpoints the WAL on shutdown). Since
+2026-09-06 an investigation's summary is stored once, in `investigations`;
+its history row only points at it.
+
 The backend is chosen by the `DATABASE_URL` environment variable:
 
 - **Unset (default)** — SQLite (`history.db`), zero-config for local development.
