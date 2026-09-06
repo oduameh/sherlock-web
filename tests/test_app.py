@@ -551,3 +551,41 @@ def test_allowed_hosts_parsing_handles_ipv6_and_ports():
     assert appmod._host_only("LocalHost:8420") == "localhost"
     assert appmod._host_only("127.0.0.1") == "127.0.0.1"
     assert "" not in appmod.ALLOWED_HOSTS
+
+
+# --- Increment I: the summary is stored once; history rows point at it -----------------
+
+def test_history_row_is_slim_but_the_api_shape_is_unchanged(client):
+    iid = _pending(client)
+    with client.stream("GET", f"/api/investigate/{iid}/stream") as r:
+        "".join(r.iter_text())
+    with db_connect(appmod.DB_PATH) as conn:
+        run_id, raw = conn.execute(
+            "SELECT id, results FROM runs WHERE investigation_id = ?", (iid,)).fetchone()
+    assert json.loads(raw) == {"investigation_id": iid, "slim": True}
+    body = client.get(f"/api/history/{run_id}").json()
+    assert body["kind"] == "investigation" and body["investigation_id"] == iid
+    assert set(body["results"]) >= {"accounts", "variants", "name_accounts"}   # the full summary
+    # An old-style row that still carries a full summary is returned as is.
+    with db_connect(appmod.DB_PATH) as conn:
+        old = insert_returning_id(conn,
+            "INSERT INTO runs (ts, username, found, total, results, kind, investigation_id)"
+            " VALUES (?,?,?,?,?,?,?)",
+            ("2026-01-01 00:00:00", "legacy", 1, 1, json.dumps({"accounts": [1]}), "investigation", None))
+    assert client.get(f"/api/history/{old}").json()["results"] == {"accounts": [1]}
+
+
+def test_schema_is_versioned_on_the_app_database():
+    import dbschema
+    with db_connect(appmod.DB_PATH) as conn:
+        assert dbschema.current_version(conn) == dbschema.SCHEMA_VERSION
+
+
+def test_legacy_report_route_redirects_investigation_rows(client):
+    iid = _pending(client)
+    with client.stream("GET", f"/api/investigate/{iid}/stream") as r:
+        "".join(r.iter_text())
+    with db_connect(appmod.DB_PATH) as conn:
+        run_id = conn.execute("SELECT id FROM runs WHERE investigation_id = ?", (iid,)).fetchone()[0]
+    r = client.get(f"/api/recon/report/{run_id}", follow_redirects=False)
+    assert r.status_code == 307 and r.headers["location"] == f"/api/investigate/{iid}/report"

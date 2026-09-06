@@ -68,6 +68,8 @@ def init_tables(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_watch_alerts_watch"
+                 " ON watch_alerts (watch_id)")
 
 
 # ---------------------------------------------------------------------------

@@ -64,7 +64,13 @@ for _h in logging.getLogger().handlers:
 os.umask(0o077)
 
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 import dbconn
@@ -140,6 +146,22 @@ async def lifespan(app: FastAPI):
             await stealthweb.aclose()
         except Exception:
             pass
+        if not dbconn.IS_POSTGRES:
+            # Fold the write-ahead log back into the main file so a plain copy
+            # of history.db is complete (the WAL held ~1 MB of unmerged data).
+            # Off the event loop: it can wait up to the busy timeout.
+            def _checkpoint():
+                with db_connect(DB_PATH) as conn:
+                    return conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            try:
+                busy, log_pages, done = await asyncio.to_thread(_checkpoint)
+                if busy:
+                    logging.getLogger("app").warning(
+                        "WAL checkpoint could not complete (busy); %d pages remain", log_pages)
+                else:
+                    logging.getLogger("app").info("WAL checkpoint: %d pages folded", done)
+            except Exception:
+                logging.getLogger("app").warning("WAL checkpoint failed", exc_info=True)
 
 
 app = FastAPI(title="sherlock-web", lifespan=lifespan)
@@ -513,18 +535,6 @@ NSFW_NAMES = {s.name for s in _ALL_SITES if s.is_nsfw}
 # SQLite history
 # ---------------------------------------------------------------------------
 
-def _ensure_column(conn, table: str, column: str, decl: str) -> None:
-    """Add ``column`` to ``table`` if missing — on SQLite (PRAGMA) and Postgres
-    (ADD COLUMN IF NOT EXISTS). The bridge until the versioned migration list
-    lands; every call is idempotent."""
-    if dbconn.IS_POSTGRES:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {decl}")
-        return
-    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
-    if column not in cols:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
-
-
 def _now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -558,57 +568,20 @@ def sweep_stuck_investigations() -> int:
 
 
 def _init_db() -> None:
-    with db_connect(DB_PATH) as conn:
-        conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS runs (
-                id {dbconn.PK},
-                ts TEXT NOT NULL,
-                username TEXT NOT NULL,
-                found INTEGER NOT NULL,
-                total INTEGER NOT NULL,
-                results TEXT NOT NULL,
-                kind TEXT NOT NULL DEFAULT 'sherlock',
-                investigation_id INTEGER
-            )
-            """
-        )
-        # Migration for pre-existing SQLite databases created before the `kind`
-        # / `investigation_id` columns existed. A fresh database (SQLite or
-        # Postgres) already has them from the CREATE above, so this is
-        # SQLite-only (PRAGMA table_info is SQLite-specific).
-        if not dbconn.IS_POSTGRES:
-            cols = [r[1] for r in conn.execute("PRAGMA table_info(runs)")]
-            if "kind" not in cols:
-                conn.execute(
-                    "ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL"
-                    " DEFAULT 'sherlock'"
-                )
-            if "investigation_id" not in cols:
-                conn.execute(
-                    "ALTER TABLE runs ADD COLUMN investigation_id INTEGER"
-                )
-        conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS investigations (
-                id {dbconn.PK},
-                created_at TEXT NOT NULL,
-                inputs TEXT NOT NULL,
-                summary TEXT,
-                status TEXT NOT NULL DEFAULT 'pending',
-                started_at TEXT,
-                finished_at TEXT,
-                error TEXT
-            )
-            """
-        )
-        # Lifecycle columns for databases created before they existed. A
-        # failed or interrupted investigation must be able to say why.
-        for col in ("started_at", "finished_at", "error"):
-            _ensure_column(conn, "investigations", col, "TEXT")
+    """Create or upgrade the schema through the versioned migration list
+    (dbschema.MIGRATIONS). The monitor and router tables are created first so
+    the index migration can see them."""
+    import dbschema
+
+    def extra(conn):
         if RECON_AVAILABLE:
             recon_monitor.init_tables(conn)
         recon_router.init_tables(conn)
+
+    with db_connect(DB_PATH) as conn:
+        version = dbschema.migrate(conn, extra_tables=extra)
+    logging.getLogger("app").info("database schema v%d (%s)", version,
+                                  "postgres" if dbconn.IS_POSTGRES else DB_PATH)
 
 
 _init_db()
@@ -617,6 +590,28 @@ if not dbconn.IS_POSTGRES:
         os.chmod(DB_PATH, 0o600)
     except OSError:
         pass
+
+
+def _resolve_run_results(results_json: str, kind: str, investigation_id):
+    """A history row's results. Investigation rows written after 2026-09-06
+    hold only a pointer (`{"investigation_id": n, "slim": true}`); the summary
+    is read from the investigations table so the API shape is unchanged.
+    Older rows that still carry the full summary are returned as they are."""
+    try:
+        results = json.loads(results_json)
+    except Exception:
+        return {}
+    if kind == "investigation" and isinstance(results, dict) and results.get("slim"):
+        with db_connect(DB_PATH) as conn:
+            row = conn.execute("SELECT summary FROM investigations WHERE id = ?",
+                               (investigation_id,)).fetchone()
+        if row and row[0]:
+            try:
+                return json.loads(row[0])
+            except Exception:
+                return {}
+        return {}
+    return results
 
 
 def save_run(username: str, found: int, total: int, results,
@@ -670,7 +665,7 @@ def get_run(run_id: int) -> JSONResponse:
             "username": row[2],
             "found": row[3],
             "total": row[4],
-            "results": json.loads(row[5]),
+            "results": _resolve_run_results(row[5], row[6], row[7]),
             "kind": row[6],
             "investigation_id": row[7],
         }
@@ -1025,13 +1020,19 @@ if RECON_AVAILABLE:
     def recon_report(run_id: int) -> Response:
         with db_connect(DB_PATH) as conn:
             row = conn.execute(
-                "SELECT ts, username, results, kind FROM runs WHERE id = ?",
+                "SELECT ts, username, results, kind, investigation_id FROM runs WHERE id = ?",
                 (run_id,),
             ).fetchone()
         if row is None:
             return Response("not found", status_code=404)
-        ts, username, results_json, kind = row
-        results = json.loads(results_json)
+        ts, username, results_json, kind, inv_id = row
+        if kind == "investigation":
+            # The v2 renderer never understood investigation summaries (it
+            # 500'd on them); the dossier is the report for these rows.
+            if inv_id is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            return RedirectResponse(url=f"/api/investigate/{inv_id}/report", status_code=307)
+        results = _resolve_run_results(results_json, kind, inv_id)
         if kind == "recon":
             run = {
                 "subject": username,
@@ -1235,10 +1236,12 @@ if RECON_AVAILABLE:
             try:
                 # Persist the honest headline: verification-confirmed accounts
                 # only, not the raw union of every speculative "handle exists"
-                # hit. A failure here must not relabel a finished run.
+                # hit. A failure here must not relabel a finished run. The
+                # summary itself lives once, in investigations.summary — the
+                # history row only points at it (it used to be stored twice).
                 run_id = save_run(_subject_label(inputs), n_found, len(all_rows),
-                                  summary, kind="investigation",
-                                  investigation_id=inv_id)
+                                  {"investigation_id": inv_id, "slim": True},
+                                  kind="investigation", investigation_id=inv_id)
                 emit("saved", {"history_id": run_id, "investigation_id": inv_id})
             except Exception:
                 log.exception("inv=%d finished but its history row failed", inv_id)
