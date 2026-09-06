@@ -332,7 +332,11 @@ async def enrich_profiles(rows: list[dict],
         fallback_status = t2_status
         if browser_budget["left"] > 0:
             browser_budget["left"] -= 1
-            t3_status, t3_html = await stealthweb.fetch_browser(url)
+            # Only pay for the Cloudflare solver when the cheaper tier actually
+            # saw a challenge — it forces a 60 s timeout ceiling per page.
+            challenged = stealthweb.has_challenge_markers(t2_html or "")
+            t3_status, t3_html = await stealthweb.fetch_browser(
+                url, solve_cloudflare=challenged)
             if t3_html and not stealthweb.should_escalate(t3_status, t3_html):
                 stealth_used["browser"] += 1
                 return t3_status, t3_html, "scrapling_browser"
