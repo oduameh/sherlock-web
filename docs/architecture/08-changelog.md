@@ -117,6 +117,39 @@ quick-scan cap missing, health unreachable behind the gate, chunked bodies, DELE
 running case) — all landed with the probes as tests; the fix also uncovered that a bare
 IPv6 entry in the allow-list parsed to "" and matched the userinfo Host trick.
 
+### E — observability · PR #60 · 2026-09-06
+After a run, `history.db` alone answers what was tried, which source failed, why, which
+retries ran and recovered, and how confident the result is: `summary["run"]` (bounded,
+schema 1) holds planned site counts and budgets, `skipped_policy`, `skipped_degraded`,
+errors by class and by engine×class, up to 120 failed checks with class and context,
+retries attempted/recovered, engine errors, signals-engine outcomes, verification counts,
+per-phase timings, and an honest `not_recorded` list (stealth-ladder attempts, WMN stealth
+retries, detector browser escalations, budget consumption, fetch status histogram — still
+to come with G2). The signals engine is observed by the circuit breaker (a walled detector
+is now `blocked`, not `absent`); WhatsMyName latency is measured (0 of 649 rows had it);
+every log line during a run carries `inv=<id>`; `done` carries `elapsed_s`/`retries`; the
+UI shows `skipped_policy`.
+Verification: gate green; live on the merged server: run id on router/engine/plan lines;
+a completed run's summary carries `run` (checked after the merge).
+Review: merge-after-fixes (1 rebase blocker — keep H1's email-free log line; 7 should-fixes)
+— all landed.
+
+### I — data layer · PR #59 · 2026-09-06
+`dbschema.py`: an append-only migration list tracked in a `schema_version` table
+(primary key) on SQLite and Postgres, mirrored to `PRAGMA user_version`; v1 baseline
+including the columns older files gained through inline ALTERs, v2 indexes for the
+queries the app runs; the monitor creates its own `watch_alerts` index on every boot so a
+first boot without the recon package can never skip it. The investigation summary is
+stored once: the history row written on completion holds a pointer and
+`/api/history/{id}` resolves it by join (older full rows untouched). The legacy report
+route redirects investigation rows to the dossier (it 500'd before). WAL checkpoint on
+shutdown off the event loop with its result logged; README documents `.backup` and the
+versioning rule.
+Verification: reviewer probed a copy of the real database (67 runs, 56 investigations,
+2 177 site_health rows): identical row counts, `[1, 2]`, four indexes used by `EXPLAIN`,
+`integrity_check` ok, second run a no-op; live: the real database migrated at boot.
+Review: merge-after-fixes (3 should-fixes, 2 nits) — all landed.
+
 ### Gate script · PR #51 · 2026-09-06
 `./scripts/gate.sh` runs ruff, `node --check` and the suite, failing fast; merges are
 gated on it.
