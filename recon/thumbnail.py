@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import base64
 import io
+import re
 
 THUMB_PX = 56                    # 2× the 28 px avatar the report's CSS shows
 MAX_PIXELS = 24_000_000          # decode cap: a 24 MP frame is ~96 MiB of RGBA
 DATA_URI_PREFIX = "data:image/png;base64,"
+_B64 = re.compile(r"[A-Za-z0-9+/]+={0,2}")
 
 
 def thumbnail_data_uri(body: bytes, px: int = THUMB_PX) -> str | None:
@@ -48,6 +50,8 @@ def thumbnail_data_uri(body: bytes, px: int = THUMB_PX) -> str | None:
 
 
 def is_thumbnail_uri(value: object) -> bool:
-    """True only for a URI this module produced (the renderer's allow-list)."""
+    """True only for a URI this module produced (the renderer's allow-list):
+    the PNG prefix followed by base64 alphabet — nothing that could close an
+    attribute or open a tag can pass."""
     return isinstance(value, str) and value.startswith(DATA_URI_PREFIX) \
-        and value[len(DATA_URI_PREFIX):].isascii()
+        and _B64.fullmatch(value[len(DATA_URI_PREFIX):]) is not None

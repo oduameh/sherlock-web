@@ -68,6 +68,7 @@ def test_decompression_bombs_are_refused_before_decoding(monkeypatch):
 def test_is_thumbnail_uri_accepts_only_what_this_module_makes():
     assert is_thumbnail_uri(thumbnail_data_uri(_png()))
     for bad in (None, "", "https://cdn.example/a.png", "data:image/svg+xml,evil",
-                "data:image/png;base64,é", "javascript:alert(1)",
+                "data:image/png;base64,é", "javascript:alert(1)", "data:image/png;base64,",
+                'data:image/png;base64,AAAA" onerror="alert(1)', "data:image/png;base64,AA<>",
                 "DATA:IMAGE/PNG;BASE64,AAAA", b"data:image/png;base64,AAAA"):
         assert not is_thumbnail_uri(bad), bad
