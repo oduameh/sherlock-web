@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SIGNALS OPS — OSINT Investigations</title>
+<title>Signals Ops — OSINT identity investigations</title>
+<meta name="description" content="Signals Ops is an OSINT investigation console: turn one clue — a name, username, email, phone, or domain — into a correlated, confidence-scored identity graph, footprint map, and exposure report.">
 <link rel="manifest" href="/manifest.webmanifest">
 <meta name="theme-color" content="#0a0c0a">
 <link rel="icon" type="image/png" href="/static/icons/icon-192.png">
@@ -25,7 +26,7 @@
 
 <!-- ============ SIDEBAR ============ -->
 <aside id="sidebar" class="sidebar" aria-label="Primary">
-  <div class="brand">
+  <button class="brand" id="brandHome" type="button" aria-label="Signals Ops — go to Investigate">
     <span class="brand-mark" aria-hidden="true">
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
         <circle cx="10.5" cy="10.5" r="6.5"/><line x1="15.2" y1="15.2" x2="21" y2="21"/>
@@ -35,7 +36,7 @@
       <strong>Signals Ops</strong>
       <small>tactical recon console</small>
     </span>
-  </div>
+  </button>
 
   <nav class="side-nav" role="tablist" aria-label="Sections">
     <button class="app-tab active" data-tab="investigate" type="button" role="tab" aria-selected="true" aria-controls="tabInvestigate">
@@ -70,6 +71,12 @@
 
   <div class="side-foot">
     <span class="side-foot-hint">SYSTEM_MSG: one clue in // full identity out. Standby for enrichment.</span>
+    <nav class="side-foot-links" aria-label="About">
+      <a href="https://github.com/oduameh/sherlock-web" target="_blank" rel="noopener noreferrer">Source</a>
+      <span aria-hidden="true">·</span>
+      <a href="https://github.com/oduameh/sherlock-web/issues" target="_blank" rel="noopener noreferrer">Report an issue</a>
+    </nav>
+    <span class="side-foot-copy">&copy; <span id="copyYear">2026</span> Signals Ops · public-data OSINT</span>
   </div>
 </aside>
 
@@ -532,7 +539,7 @@
           </ol>
           <div class="gev-actions">
             <button id="gevRecheck" class="btn btn-ghost btn-sm" type="button">Recheck</button>
-            <a id="gevOpen" class="btn btn-ghost btn-sm" href="#" target="_blank" rel="noopener">Open in new tab &#8599;</a>
+            <a id="gevOpen" class="btn btn-ghost btn-sm" href="http://localhost:4173" target="_blank" rel="noopener">Open in new tab &#8599;</a>
           </div>
           <p class="gev-note">Runs separately with its own keys, which stay on your machine. Set <code>GODSEYE_URL</code> if you host it elsewhere. Third-party app (MIT) by Bilawal Sidhu.</p>
         </div>
