@@ -220,6 +220,10 @@ the pages the analyst (or the headless browser tier) visits:
   `127.0.0.1` / `::1` are refused (400). Deployments set
   `APP_ALLOWED_HOSTS=my.host.example` (comma-separated; `*` disables the check
   and logs a warning; the default is open when only `APP_PASSWORD` is set).
+  Without an explicit list the default is loopback plus the hostnames the
+  platform injects (`RAILWAY_PUBLIC_DOMAIN`, `RAILWAY_PRIVATE_DOMAIN`) and
+  Railway's health-check host, so a plain Railway deploy works. `/api/health`
+  answers under any Host header (platforms probe it under their own).
 - **No cross-site writes or scans** — `/api/*` requests that write, start a
   scan or query third parties are refused (403) when the browser marks them
   `Sec-Fetch-Site: cross-site`/`same-site` or sends an `Origin` that is not

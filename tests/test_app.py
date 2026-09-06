@@ -655,3 +655,30 @@ def test_avatar_proxy_is_registered_behind_the_cross_site_guard(client):
     assert client.get("/api/avatar?u=javascript%3Aalert(1)").status_code == 400
     r = client.get("/api/avatar?u=https%3A%2F%2Fwww.instagram.com%2Fx.jpg")
     assert r.status_code == 403 and "access policy" in r.json()["error"]
+
+
+# --- Railway hotfix: health checks and platform hostnames ------------------------
+
+def test_health_answers_under_any_host_header(client):
+    """Railway probes /api/health with Host: healthcheck.railway.app; refusing it
+    marked every deployment from #54 to #64 failed. Only health is exempt."""
+    r = client.get("/api/health", headers={"Host": "healthcheck.railway.app"})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert client.get("/api/sites", headers={"Host": "healthcheck.railway.app"}).status_code == 400
+    assert client.get("/", headers={"Host": "evil.example"}).status_code == 400
+
+
+def test_allowed_hosts_default_includes_the_platforms_hostnames():
+    loopback = {"localhost", "127.0.0.1", "::1"}
+    assert appmod._allowed_hosts({}) == loopback
+    railway = {"RAILWAY_PUBLIC_DOMAIN": "signals.up.railway.app",
+               "RAILWAY_PRIVATE_DOMAIN": "signals.railway.internal",
+               "RAILWAY_ENVIRONMENT": "production"}
+    assert appmod._allowed_hosts(railway) == loopback | {
+        "signals.up.railway.app", "signals.railway.internal", "healthcheck.railway.app"}
+    # A Railway box without the domain variables still passes its health probe.
+    assert appmod._allowed_hosts({"RAILWAY_ENVIRONMENT": "production"}) == \
+        loopback | {"healthcheck.railway.app"}
+    # An explicit list is exactly that list; a password without a list stays open.
+    assert appmod._allowed_hosts({**railway, "APP_ALLOWED_HOSTS": "my.host.example"}) == {"my.host.example"}
+    assert appmod._allowed_hosts({**railway, "APP_PASSWORD": "x"}) == {"*"}

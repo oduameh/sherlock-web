@@ -220,12 +220,30 @@ def _host_only(netloc: str) -> str:
     return netloc.split(":", 1)[0]
 
 
-def _allowed_hosts() -> set:
-    raw = os.environ.get("APP_ALLOWED_HOSTS")
+# Railway injects its hostnames into the environment; its health checks arrive
+# with this Host (docs.railway.com/guides/healthchecks), so a deployment that
+# refused it never became healthy (every deploy from #54 to #64 failed).
+RAILWAY_HEALTHCHECK_HOST = "healthcheck.railway.app"
+_PLATFORM_HOST_VARS = ("RAILWAY_PUBLIC_DOMAIN", "RAILWAY_PRIVATE_DOMAIN")
+
+
+def _platform_hosts(env: "dict | os._Environ" = os.environ) -> set:
+    """Hostnames the hosting platform tells us about (Railway today)."""
+    hosts = {_host_only(env.get(v, "")) for v in _PLATFORM_HOST_VARS} - {""}
+    if hosts or any(k.startswith("RAILWAY_") for k in env):
+        hosts.add(RAILWAY_HEALTHCHECK_HOST)
+    return hosts
+
+
+def _allowed_hosts(env: "dict | os._Environ" = os.environ) -> set:
+    raw = env.get("APP_ALLOWED_HOSTS")
     if raw is None:
-        # A deployment (password gate configured) serves on a public hostname we
-        # cannot know; a local run is loopback only.
-        return {"*"} if os.environ.get("APP_PASSWORD") else {"localhost", "127.0.0.1", "::1"}
+        # No explicit list: loopback plus whatever hostnames the platform
+        # injected. A password-gated deployment on a hostname we cannot know
+        # (a custom domain) stays open, with a warning.
+        if env.get("APP_PASSWORD"):
+            return {"*"}
+        return {"localhost", "127.0.0.1", "::1"} | _platform_hosts(env)
     return {_host_only(h) for h in raw.split(",") if h.strip()} - {""}
 
 
@@ -273,8 +291,11 @@ def _cross_site_reason(request: Request) -> str | None:
 async def request_protection(request: Request, call_next):
     path = request.url.path
     # 1. Host header allow-list (DNS rebinding sends a foreign Host to our port).
+    #    The process health check is exempt: platforms probe it under their own
+    #    hostname, and unauthenticated it answers liveness only.
     host = _host_only(_raw_host(request))
-    if "*" not in ALLOWED_HOSTS and (not host or host not in ALLOWED_HOSTS):
+    if path != "/api/health" and "*" not in ALLOWED_HOSTS \
+            and (not host or host not in ALLOWED_HOSTS):
         return JSONResponse({"error": "unexpected Host header"}, status_code=400)
     if path.startswith("/api/"):
         # 2. No cross-site writes, scan starts or third-party pivots.
