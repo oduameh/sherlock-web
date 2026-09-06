@@ -50,6 +50,26 @@ Review: approved with two should-fixes, landed. **Process defect**: #49 was merg
 two failing assertions because a multi-step script continued past an aborted patch step;
 fixed in #50 and prevented by `scripts/gate.sh` (#51).
 
+### A — investigation lifecycle · PR #53 · 2026-09-06
+State machine `pending → running → done | failed | cancelled | interrupted`: an atomic claim
+moves pending→running; any non-pending stream answers 409 (a GET used to re-run finished
+cases and a disconnect stranded them — 7 of 53 rows); `cancelled` on disconnect
+(`CancelledError` used to slip past `except Exception`); `failed` with the reason persisted
+in `investigations.error` and logged; `started_at`/`finished_at`; startup sweep of stale
+`running` and 24 h-old `pending` rows; at most two concurrent runs with a `queued` event;
+`done` held until the summary is on disk. A cancelled run now cancels every engine/pivot
+task it spawned and flushes routing observations on any exit (live: 2 log lines after a
+cancel instead of 543+). Boot no longer needs the internet: the Sherlock list is a cached
+live copy refreshed weekly with a 5 s timeout, validated by loading before caching, atomic,
+falling back to the stale cache then the bundled file (vendored exclusions snapshot). The
+EventSource never auto-reconnects. `SHERLOCK_DB_PATH` makes the database injectable; first
+HTTP-layer tests.
+Verification: gate green (423 at merge); live on the real database (7 + 4 rows repaired,
+cancel path, 409 guard, site list `433 sites from cache source (48 excluded)`).
+Review: two independent reviews (initial: six should-fixes; re-review: one blocker on the
+loader — a wrong-shape payload cached with a fresh mtime would have broken boot for a week
+— and four should-fixes); all landed before merge.
+
 ### Gate script · PR #51 · 2026-09-06
 `./scripts/gate.sh` runs ruff, `node --check` and the suite, failing fast; merges are
 gated on it.
