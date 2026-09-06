@@ -1,4 +1,4 @@
-from recon.verify import verify_username
+from recon.verify import CONTROL_HANDLE, verify_username
 
 
 def test_confirmed_via_structured_metadata():
@@ -25,12 +25,16 @@ def test_soft_404_phrase_flagged():
 
 def test_control_probe_flags_serve_all_sites():
     # A site that returns the same page for a real and a nonexistent handle is
-    # a soft-404 factory — the "hit" is a false positive.
-    page = ("<html><head><title>Acme</title></head>"
+    # a soft-404 factory — the "hit" is a false positive. Such sites stamp
+    # their site-wide Open Graph tags on every page; that metadata is what
+    # distinguishes a soft-404 factory from a metadata-free WAF block page
+    # (see test_identical_metadata_free_page_is_a_block_page_not_a_refutation).
+    page = ("<html><head><title>Acme</title>"
+            '<meta property="og:title" content="Acme — join today"></head>'
             "<body>Join Acme today. Sign up now.</body></html>")
+    meta = {"title": "Acme", "og_title": "Acme — join today"}
     v = verify_username("whoever", "https://acme.com/whoever", page,
-                        {"title": "Acme"}, status=200,
-                        control_html=page, control_extracted={"title": "Acme"})
+                        meta, status=200, control_html=page, control_extracted=meta)
     assert v["status"] == "likely_false_positive"
 
 
@@ -209,3 +213,174 @@ def test_consent_wall_is_indeterminate_not_a_lead():
                         {"title": "Before you continue to YouTube"}, status=200)
     assert v["status"] == "indeterminate"
     assert "consent/cookie wall" in v["signals"][0]
+
+
+def test_vendor_script_tag_on_a_real_profile_is_not_a_block_page():
+    """DataDome/PerimeterX put their script tag on every page of a protected
+    site. That raw token may cost a stealth fetch, but it must never turn a real
+    profile into "blocked"."""
+    html = ("<html><head><script src='https://js.datadome.co/tags.js'></script>"
+            "<title>janedoe (Jane Doe) · Example</title></head><body>"
+            + "Jane posts about gardening and cats. " * 10 + "</body></html>")
+    v = verify_username("janedoe", "https://x/janedoe", html,
+                        {"title": "janedoe (Jane Doe) · Example"}, status=200)
+    assert v["status"] == "confirmed"
+
+
+# --- V1: a not-found page that echoes the handle (retrieval audit §3c) -------
+
+ECHO_PAGE = (
+    "<html><head><title>Profile johnsmith77 not found | ExampleSite</title>"
+    '<meta property="og:title" content="Profile johnsmith77 not found | ExampleSite">'
+    "</head><body><h1>Profile johnsmith77 not found</h1>"
+    "<p>We could not find a member with that name. Try searching instead.</p>"
+    "</body></html>"
+)
+ECHO_META = {"title": "Profile johnsmith77 not found | ExampleSite",
+             "og_title": "Profile johnsmith77 not found | ExampleSite"}
+ECHO_CONTROL = ECHO_PAGE.replace("johnsmith77", CONTROL_HANDLE)
+ECHO_CONTROL_META = {k: v.replace("johnsmith77", CONTROL_HANDLE) for k, v in ECHO_META.items()}
+
+
+def test_handle_echo_soft_404_with_control_is_flagged():
+    """Reproduced pair: used to verify as ``confirmed 72`` because the fixed
+    phrases need adjacency, the titles differ by the handle and the 4-gram
+    overlap of two short pages that differ by one token is < 0.90."""
+    v = verify_username("johnsmith77", "https://examplesite.com/johnsmith77",
+                        ECHO_PAGE, ECHO_META, status=200,
+                        control_html=ECHO_CONTROL, control_extracted=ECHO_CONTROL_META)
+    assert v["status"] == "likely_false_positive"
+    assert v["control_probe"] == "ran"
+
+
+def test_handle_echo_soft_404_without_control_is_flagged():
+    v = verify_username("johnsmith77", "https://examplesite.com/johnsmith77",
+                        ECHO_PAGE, ECHO_META, status=200)
+    assert v["status"] == "likely_false_positive"
+    assert "not-found" in v["signals"][0]
+
+
+def test_handle_echo_soft_404_with_failed_control_is_flagged_and_labelled():
+    v = verify_username("johnsmith77", "https://examplesite.com/johnsmith77",
+                        ECHO_PAGE, ECHO_META, status=200, control_failed=True)
+    assert v["status"] == "likely_false_positive"
+    assert v["control_probe"] == "failed"
+
+
+def test_control_comparison_masks_both_handles():
+    """A template page with no not-found wording that differs from the control
+    only by the echoed handle must still read as the same template."""
+    page = ("<html><head><title>jdoe77 | Acme members</title>"
+            "<meta property='og:title' content='jdoe77 on Acme'></head>"
+            "<body><h1>jdoe77</h1><p>Welcome to Acme. Sign up to see jdoe77's "
+            "activity, friends and photos. Join today.</p></body></html>")
+    meta = {"title": "jdoe77 | Acme members", "og_title": "jdoe77 on Acme"}
+    ctrl = page.replace("jdoe77", CONTROL_HANDLE)
+    ctrl_meta = {k: v.replace("jdoe77", CONTROL_HANDLE) for k, v in meta.items()}
+    v = verify_username("jdoe77", "https://acme.com/jdoe77", page, meta, status=200,
+                        control_html=ctrl, control_extracted=ctrl_meta)
+    assert v["status"] == "likely_false_positive"
+    assert "indistinguishable" in v["signals"][0]
+
+
+def test_real_profile_that_differs_from_the_control_is_still_confirmed():
+    page = ("<html><head><title>torvalds (Linus Torvalds) · GitHub</title></head>"
+            "<body><h1>Linus Torvalds</h1><p>Followers 200k · repositories 7 · "
+            "Portland, OR · linux kernel maintainer</p></body></html>")
+    ctrl = ("<html><head><title>Page not found · GitHub</title></head>"
+            "<body><h1>404</h1><p>This is not the web page you are looking for.</p>"
+            "</body></html>")
+    v = verify_username("torvalds", "https://github.com/torvalds", page,
+                        {"title": "torvalds (Linus Torvalds) · GitHub"}, status=200,
+                        control_html=ctrl, control_extracted={"title": "Page not found · GitHub"})
+    assert v["status"] == "confirmed"
+
+
+# --- V2: unlisted WAF pages are blocked, not refuted and not leads -----------
+
+AKAMAI_PAGE = (
+    "<html><head><title>Access Denied</title></head><body><h1>Access Denied</h1>"
+    "<p>You don't have permission to access \"http://www.example.com/johnsmith77\" "
+    "on this server.</p><p>Reference #18.4f1d2c17.1725600000.1a2b3c4d</p></body></html>"
+)
+IMPERVA_PAGE = (
+    "<html><head><title>Pardon Our Interruption</title></head><body>"
+    "<h1>Pardon Our Interruption...</h1><p>As you were browsing something about your "
+    "browser made us think you were a bot. There are a few reasons this might happen.</p>"
+    "<p>Incapsula incident ID: 123-456</p></body></html>"
+)
+
+
+def test_akamai_access_denied_is_blocked_not_refuted():
+    """Served identically for the real and the control handle, so the control
+    rule used to call it ``likely_false_positive`` (tier "refuted")."""
+    for ctrl in (AKAMAI_PAGE, None):
+        v = verify_username("johnsmith77", "https://x/johnsmith77", AKAMAI_PAGE,
+                            {"title": "Access Denied"}, status=200,
+                            control_html=ctrl,
+                            control_extracted={"title": "Access Denied"} if ctrl else None)
+        assert v["status"] == "indeterminate", ctrl is not None
+        assert "anti-bot challenge page" in v["signals"][0]
+
+
+def test_imperva_pardon_our_interruption_is_blocked_not_a_lead():
+    """Used to be ``unconfirmed 45`` — a lead adding footprint points."""
+    for ctrl in (IMPERVA_PAGE, None):
+        v = verify_username("johnsmith77", "https://x/johnsmith77", IMPERVA_PAGE,
+                            {"title": "Pardon Our Interruption"}, status=200,
+                            control_html=ctrl,
+                            control_extracted={"title": "Pardon Our Interruption"} if ctrl else None)
+        assert v["status"] == "indeterminate", ctrl is not None
+
+
+def test_identical_metadata_free_page_is_a_block_page_not_a_refutation():
+    """A WAF whose wording is not in any list: identical to the control and
+    carrying no profile metadata → blocked ("likely a block page"), never
+    "likely false positive"."""
+    page = ("<html><head><title>Error</title></head><body><h1>Error</h1>"
+            "<p>Your request could not be processed at this time. Please contact "
+            "the site administrator if the problem persists.</p></body></html>")
+    v = verify_username("someone", "https://x/someone", page, {"title": "Error"},
+                        status=200, control_html=page, control_extracted={"title": "Error"})
+    assert v["status"] == "indeterminate"
+    assert "block page" in v["signals"][0]
+
+
+# --- control-probe honesty and fetch-error class -----------------------------
+
+def test_failed_control_probe_is_labelled_failed_and_noted():
+    """A rate-limited/timeout control used to be recorded as "not_applicable"
+    and the resulting ``confirmed`` verdict said nothing about it."""
+    v = verify_username("someone", "https://x/someone",
+                        "<html><body>a real and distinct profile page</body></html>",
+                        {"title": "someone"}, status=200, control_failed=True)
+    assert v["control_probe"] == "failed"
+    assert v["status"] == "confirmed"
+    assert any("control probe failed" in s for s in v["signals"])
+
+
+def test_control_probe_not_applicable_only_when_none_was_wanted():
+    v = verify_username("someone", "https://x/someone",
+                        "<html><body>a real and distinct profile page</body></html>",
+                        {"title": "someone"}, status=200)
+    assert v["control_probe"] == "not_applicable"
+    assert not any("control probe failed" in s for s in v["signals"])
+
+
+def test_failed_control_is_labelled_even_on_blocked_status():
+    v = verify_username("someone", "https://x/someone", None, {}, status=403,
+                        control_failed=True)
+    assert v["status"] == "indeterminate"
+    assert v["control_probe"] == "failed"
+
+
+def test_fetch_error_class_is_in_the_signal():
+    v = verify_username("alice", "https://x/alice", None, {}, fetch_error="ConnectTimeout")
+    assert v["status"] == "indeterminate"
+    assert "ConnectTimeout" in v["signals"][0]
+
+
+def test_non_html_response_is_named_in_the_signal():
+    v = verify_username("alice", "https://x/alice", None, {}, status=200)
+    assert v["status"] == "indeterminate"
+    assert "non-HTML" in v["signals"][0]

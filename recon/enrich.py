@@ -3,24 +3,60 @@
 Fetches each found profile page (public HTML only) and extracts <title>,
 Open Graph tags, and JSON-LD Person fields. Regex-based parsing wrapped in
 try/except everywhere: weird HTML must never crash a run. Responses are
-streamed and capped so memory stays bounded.
+streamed and capped so memory stays bounded, and every parser is linear in the
+input (security audit F-3 — the old ``<title>(.*?)</title>`` took >20 s on a
+280 KB page a subject could serve us).
+
+Retrieval rules (retrieval audit V7 and traces a/c):
+
+* **A rate limit is answered by backing off, never by more requests.** A
+  429/503 from the plain client used to trigger the stealth ladder (two more
+  requests to the same host within seconds) and then the control probe (a
+  fourth), and every other row on that host repeated the pattern. Now the
+  first 429/503 records a per-host backoff (``Retry-After`` if present, else
+  60 s); the row is ``indeterminate`` with ``reason: rate_limited``; later rows
+  on that host are given the same verdict *without fetching*; the ladder never
+  runs for it. Fetches to one host are serialised so "later" is well-defined.
+* **A failed control probe is reported as failed, not cached as "no control".**
+  Only a control fetch that produced a page (2xx with HTML) or a decisive
+  absence (404/410) is cached per host; a transport failure, non-HTML body or
+  blocking status is retried once later in the run and otherwise surfaces as
+  ``control_probe: "failed"`` on the verdict.
+* **The exception class survives.** ``ConnectTimeout``/``ReadError``/… is put in
+  the verdict signal ("no HTML retrieved (ConnectTimeout)") so a stored case
+  can say why nothing was retrieved.
 """
 
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import html as _html
 import json
 import logging
 import os
-import re
-from typing import Any, Callable, Optional
+import time
+from datetime import datetime, timezone
+from typing import Any, Callable, NamedTuple, Optional
 from urllib.parse import urlparse
 
 import httpx
 
 from recon import adapters, policy, safeweb, stealthweb
-from recon.verify import verify_username
+from recon.htmltext import (
+    META_CONTENT_RE,
+    META_KEY_RE,
+    TAG_RE,
+    TITLE_RE,
+    WS_RE,
+    iter_jsonld_blocks,
+    iter_tags,
+)
+from recon.stealthweb import RATE_LIMIT_STATUSES
+from recon.verify import CONTROL_HANDLE, verify_username
+
+__all__ = ["CONTROL_HANDLE", "FetchResult", "enrich_profiles",
+           "strip_template_fields", "rate_limited_verdict"]
 
 logger = logging.getLogger("recon.enrich")
 
@@ -34,28 +70,25 @@ TIMEOUT_S = 10
 # Per-run cap on tier-3 (headless browser) fetches — each one costs seconds.
 STEALTH_BROWSER_BUDGET = int(os.environ.get("RECON_STEALTH_BUDGET") or "8")
 
-# A handle that will not exist anywhere. Fetching a site at this handle gives a
-# "known-negative" page to compare each real hit against (soft-404 detection).
-CONTROL_HANDLE = "qzx9no7such8user2wj"
+# Per-host backoff after a 429/503: the ``Retry-After`` header when present
+# (clamped), else this default. Per run — nothing persists across runs yet.
+DEFAULT_BACKOFF_S = 60.0
+MAX_BACKOFF_S = 3600.0
 
-_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
-_META_OG_RE = re.compile(
-    r'<meta[^>]+(?:property|name)=["\'](og:[a-z_]+)["\'][^>]*>', re.I
-)
-_CONTENT_ATTR_RE = re.compile(r'content=["\'](.*?)["\']', re.I | re.S)
-_JSONLD_RE = re.compile(
-    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
-    re.I | re.S,
-)
-_TAG_RE = re.compile(r"<[^>]+>")
+# A control probe that fails is retried at most once more in the same run.
+CONTROL_MAX_ATTEMPTS = 2
+
+# Statuses that prove the control handle is absent — a decisive, cacheable
+# control result even though there is no page to compare against.
+_DECISIVE_ABSENT = frozenset({404, 410})
 
 
 def _clean(text: Optional[str]) -> Optional[str]:
     if not text:
         return None
-    text = _TAG_RE.sub(" ", text)
+    text = TAG_RE.sub(" ", text)
     text = _html.unescape(text)   # decode &amp; &#233; &quot; — was silently kept
-    return re.sub(r"\s+", " ", text).strip() or None
+    return WS_RE.sub(" ", text).strip() or None
 
 
 def _clean_url(url: Optional[str]) -> Optional[str]:
@@ -93,26 +126,40 @@ def _person_fields(obj: Any, data: dict) -> None:
             _person_fields(v, data)
 
 
+def _attr(match) -> Optional[str]:
+    """First non-None group of a two-alternative (double/single quote) attribute match."""
+    if not match:
+        return None
+    return match.group(1) if match.group(1) is not None else match.group(2)
+
+
 def _extract_regex(html_text: str) -> dict:
-    """Pure-stdlib fallback extractor (used when Scrapling is unavailable)."""
+    """Pure-stdlib fallback extractor (used when Scrapling is unavailable).
+
+    Linear in the input: the title pattern is bounded, ``<meta>`` tags and
+    JSON-LD blocks are located with ``str.find`` (F-3) and only the text of one
+    tag at a time meets a regex.
+    """
     data: dict[str, Any] = {}
-    m = _TITLE_RE.search(html_text)
+    m = TITLE_RE.search(html_text)
     if m:
         data["title"] = _clean(m.group(1))
-    for tag_m in _META_OG_RE.finditer(html_text):
-        prop = tag_m.group(1).lower()
-        c = _CONTENT_ATTR_RE.search(tag_m.group(0))
-        if not c:
+    for tag in iter_tags(html_text, "meta"):
+        prop = (_attr(META_KEY_RE.search(tag)) or "").lower()
+        if not prop.startswith("og:"):
+            continue
+        content = _attr(META_CONTENT_RE.search(tag))
+        if content is None:
             continue
         if prop == "og:title":
-            data["og_title"] = _clean(c.group(1))
+            data["og_title"] = _clean(content)
         elif prop == "og:description":
-            data["og_description"] = _clean(c.group(1))
+            data["og_description"] = _clean(content)
         elif prop == "og:image":
-            data["og_image"] = _clean_url(c.group(1))
-    for m in _JSONLD_RE.finditer(html_text):
+            data["og_image"] = _clean_url(content)
+    for block in iter_jsonld_blocks(html_text):
         try:
-            parsed = json.loads(m.group(1).strip())
+            parsed = json.loads(block.strip())
         except Exception:
             continue
         _person_fields(parsed, data)
@@ -222,17 +269,57 @@ def _extract(html: str, url: str = "") -> dict:
     return data
 
 
-async def _fetch_page(client: httpx.AsyncClient,
-                      url: str) -> tuple[Optional[int], Optional[str]]:
-    """GET a page (≤ MAX_BODY_BYTES). Returns (status_code, html). ``html`` is
-    None for a non-HTML response or a read error; ``status_code`` is None only
-    when the request itself failed (DNS/timeout/etc.)."""
+# ---------------------------------------------------------------------------
+# Fetching
+# ---------------------------------------------------------------------------
+
+class FetchResult(NamedTuple):
+    """Outcome of one capped GET.
+
+    ``status`` is None only when the request itself failed (then ``error`` is
+    the exception class name, e.g. ``ConnectTimeout``); ``html`` is None for a
+    non-HTML response or a read error; ``retry_after`` is the parsed
+    ``Retry-After`` in seconds when the status was 429/503 and the header was
+    present.
+    """
+    status: Optional[int]
+    html: Optional[str]
+    error: Optional[str] = None
+    retry_after: Optional[float] = None
+
+
+def _parse_retry_after(value: Optional[str]) -> Optional[float]:
+    """``Retry-After`` → seconds (clamped to ``MAX_BACKOFF_S``), or None when
+    absent/unparseable. Accepts delta-seconds and HTTP-dates."""
+    if not value:
+        return None
+    v = value.strip()
+    if v.isdigit():
+        secs = float(v)
+    else:
+        try:
+            dt = email.utils.parsedate_to_datetime(v)
+        except Exception:
+            return None
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        secs = (dt - datetime.now(timezone.utc)).total_seconds()
+    return min(max(secs, 0.0), MAX_BACKOFF_S)
+
+
+async def _fetch_page_ex(client: httpx.AsyncClient, url: str) -> FetchResult:
+    """GET a page (≤ MAX_BODY_BYTES) and report *why* when nothing came back."""
     try:
         async with client.stream("GET", url) as resp:
             status = resp.status_code
+            retry_after = None
+            if status in RATE_LIMIT_STATUSES:
+                retry_after = _parse_retry_after(resp.headers.get("retry-after"))
             ctype = resp.headers.get("content-type", "")
             if "text/html" not in ctype and "application/xhtml" not in ctype:
-                return status, None
+                return FetchResult(status, None, None, retry_after)
             chunks: list[bytes] = []
             size = 0
             async for chunk in resp.aiter_bytes(16384):
@@ -242,9 +329,16 @@ async def _fetch_page(client: httpx.AsyncClient,
                     break
             html = b"".join(chunks).decode(resp.encoding or "utf-8",
                                            errors="replace")
-            return status, html
-    except Exception:
-        return None, None
+            return FetchResult(status, html, None, retry_after)
+    except Exception as exc:
+        return FetchResult(None, None, type(exc).__name__)
+
+
+async def _fetch_page(client: httpx.AsyncClient,
+                      url: str) -> tuple[Optional[int], Optional[str]]:
+    """Two-tuple ``(status_code, html)`` view of :func:`_fetch_page_ex`."""
+    res = await _fetch_page_ex(client, url)
+    return res.status, res.html
 
 
 def _control_url(url: Optional[str], username: Optional[str]) -> Optional[str]:
@@ -254,6 +348,26 @@ def _control_url(url: Optional[str], username: Optional[str]) -> Optional[str]:
         return None
     idx = url.rfind(username)
     return url[:idx] + CONTROL_HANDLE + url[idx + len(username):]
+
+
+def _host(url: Optional[str]) -> str:
+    return (urlparse(url or "").netloc or "").lower()
+
+
+def rate_limited_verdict(status: int, fetched: bool = True) -> dict:
+    """The verdict a rate-limited row carries. Blocked, never absent: the host
+    told us to slow down, which says nothing about whether the account exists.
+
+    ``fetched=False`` marks a row that was *not* requested because an earlier
+    request to the same host was already rate-limited this run — the same
+    status/score/reason, with an extra signal saying so.
+    """
+    signals = [f"rate limited (HTTP {status}) — not retried this run"]
+    if not fetched:
+        signals.append("not fetched: an earlier request to this host was rate "
+                       "limited and the host is backing off")
+    return {"status": "indeterminate", "score": 30, "signals": signals,
+            "reason": "rate_limited"}
 
 
 # Verify the results most likely to be false positives first: base handles are
@@ -297,17 +411,23 @@ def strip_template_fields(data: dict, control: dict) -> dict:
 async def enrich_profiles(rows: list[dict],
                           on_enriched: Callable[[dict, dict], Any],
                           limit: int = MAX_ENRICH_PER_RUN,
-                          subject_name: Optional[str] = None) -> int:
+                          subject_name: Optional[str] = None,
+                          stats: Optional[dict] = None) -> int:
     """Enrich + verify up to ``limit`` found-profile rows (mutates in place).
 
     Each fetched row gets ``row["enrichment"]`` (extracted metadata) and an
     advisory ``row["verification"]`` verdict (see :mod:`recon.verify`) — which
-    now includes a **control-probe soft-404 check** (a cached fetch of a
+    includes a **control-probe soft-404 check** (a cached fetch of a
     known-nonexistent handle per site) and, when ``subject_name`` is given, a
     profile-name attribution check. The noisiest rows (name-derived candidates)
     are verified first. ``on_enriched(row, data)`` is called once per row that
-    receives a verdict — including hard-404s and soft-404s (so the UI can label
-    them). Returns the number of profiles processed.
+    receives a verdict — including hard-404s, soft-404s and rate-limited rows
+    (so the UI can label them). Returns the number of profiles processed.
+
+    ``stats``, when given, is filled with the run's retrieval counters
+    (``stealth_tls``, ``stealth_browser``, ``rate_limited_hosts``,
+    ``rate_limited_rows``, ``backoff_s`` per host, ``control_failed_hosts``)
+    for the pipeline diagnostics to persist.
     """
     seen_urls: set[str] = set()
     targets: list[dict] = []
@@ -342,34 +462,65 @@ async def enrich_profiles(rows: list[dict],
 
     sem = asyncio.Semaphore(CONCURRENCY)
     count = 0
-    # One control fetch per site host, shared across every hit on that site.
+    # Control probe per site host, shared across every hit on that site. Only
+    # a control that produced a page (or a decisive 404/410) is cached; a
+    # failure is retried once and otherwise reported as failed.
     control_cache: dict[str, tuple] = {}
+    control_attempts: dict[str, int] = {}
     control_locks: dict[str, asyncio.Lock] = {}
+    control_failed_hosts: set[str] = set()
+    # One fetch at a time per host, so a 429 on the first row is seen before
+    # the second row on that host is requested.
+    host_locks: dict[str, asyncio.Lock] = {}
+    # host → (monotonic deadline, status that caused it)
+    host_backoff: dict[str, tuple[float, int]] = {}
+    backoff_seconds: dict[str, float] = {}
+    rate_limited = {"rows": 0}
     # Per-run budget for tier-3 (headless browser) fetches; decremented inline
     # (single event loop, no await between read and write → no lost updates).
     browser_budget = {"left": max(0, STEALTH_BROWSER_BUDGET)}
     stealth_used = {"tls": 0, "browser": 0}
 
+    def record_backoff(host: str, status: int, retry_after: Optional[float]) -> None:
+        secs = DEFAULT_BACKOFF_S if retry_after is None else retry_after
+        deadline = time.monotonic() + secs
+        prev = host_backoff.get(host)
+        if prev is None or deadline > prev[0]:
+            host_backoff[host] = (deadline, status)
+            backoff_seconds[host] = secs
+        logger.info("rate limited by %s (HTTP %d) — backing off %.0fs, no more "
+                    "requests to it this run", host, status, secs)
+
+    def active_backoff(host: str) -> Optional[int]:
+        entry = host_backoff.get(host)
+        if entry is None:
+            return None
+        deadline, status = entry
+        if time.monotonic() < deadline:
+            return status
+        return None
+
     async def escalate(url: str) -> tuple[Optional[int], Optional[str], str]:
         """Stealth ladder behind a failed/blocked plain fetch: tier-2
-        (TLS-impersonated request) first, then tier-3 (headless browser with
-        challenge solving) while budget lasts. Returns ``(status, html, via)``
-        — the best evidence found: full content from whichever tier produced
-        a usable page, else just the tier's decisive status (e.g. a real 404
-        seen through a browser fingerprint), else ``(None, None, ...)`` to
-        keep the plain result untouched."""
+        (TLS-impersonated request) first, then tier-3 (headless browser,
+        rendering only — never challenge solving) while budget lasts. Returns
+        ``(status, html, via)`` — the best evidence found: full content from
+        whichever tier produced a usable page, else just the tier's decisive
+        status (e.g. a real 404 seen through a browser fingerprint), else
+        ``(None, None, ...)`` to keep the plain result untouched. A 429/503
+        from any tier is returned as-is with no HTML so the caller backs off."""
         t2_status, t2_html = await stealthweb.fetch_tls(url)
+        if t2_status in RATE_LIMIT_STATUSES:
+            return t2_status, None, "scrapling_tls"
         if not stealthweb.should_escalate(t2_status, t2_html):
             stealth_used["tls"] += 1
             return t2_status, t2_html, "scrapling_tls"
         fallback_status = t2_status
         if browser_budget["left"] > 0:
             browser_budget["left"] -= 1
-            # Only pay for the Cloudflare solver when the cheaper tier actually
-            # saw a challenge — it forces a 60 s timeout ceiling per page.
-            challenged = stealthweb.has_challenge_markers(t2_html or "")
-            t3_status, t3_html = await stealthweb.fetch_browser(
-                url, solve_cloudflare=challenged)
+            t3_status, t3_html = await stealthweb.fetch_browser(url)
+            if t3_status in RATE_LIMIT_STATUSES:
+                return t3_status, None, "scrapling_browser"
             if t3_html and not stealthweb.should_escalate(t3_status, t3_html):
                 stealth_used["browser"] += 1
                 return t3_status, t3_html, "scrapling_browser"
@@ -379,42 +530,72 @@ async def enrich_profiles(rows: list[dict],
 
     async with safeweb.async_client(timeout=TIMEOUT_S) as client:
 
-        async def control_for(url: str, username: str) -> tuple:
-            """(status, html, extracted) for a known-nonexistent handle on this
-            site, fetched once per host. ({}, None, None) if not applicable."""
+        async def control_for(url: str, username: str
+                              ) -> tuple[Optional[int], Optional[str],
+                                         Optional[dict], bool]:
+            """``(status, html, extracted, failed)`` for a known-nonexistent
+            handle on this site. ``(None, None, None, False)`` when no control
+            URL can be built; ``failed=True`` when a control was wanted but no
+            usable result exists (fetch failed twice, or the host is backing
+            off after a rate limit)."""
             curl = _control_url(url, username)
             if not curl:
-                return None, None, None
-            host = urlparse(url).netloc
+                return None, None, None, False
+            host = _host(url)
             lock = control_locks.setdefault(host, asyncio.Lock())
             async with lock:
-                if host not in control_cache:
-                    async with sem:
-                        c_status, c_html = await _fetch_page(client, curl)
-                    c_data = {}
-                    if c_html:
-                        try:
-                            c_data = _extract(c_html)
-                        except Exception:
-                            c_data = {}
-                    control_cache[host] = (c_status, c_html, c_data)
-            return control_cache[host]
+                cached = control_cache.get(host)
+                if cached is not None:
+                    return cached[0], cached[1], cached[2], False
+                if active_backoff(host) is not None:
+                    return None, None, None, True
+                if control_attempts.get(host, 0) >= CONTROL_MAX_ATTEMPTS:
+                    return None, None, None, True
+                control_attempts[host] = control_attempts.get(host, 0) + 1
+                async with sem:
+                    res = await _fetch_page_ex(client, curl)
+                if res.status in RATE_LIMIT_STATUSES:
+                    record_backoff(host, res.status, res.retry_after)
+                    control_failed_hosts.add(host)
+                    return None, None, None, True
+                if res.status in _DECISIVE_ABSENT:
+                    # The site 404s unknown handles: decisive, and there is no
+                    # page to compare against — cache it, it is not a failure.
+                    control_cache[host] = (res.status, None, {})
+                    return res.status, None, {}, False
+                if res.status is not None and 200 <= res.status < 400 and res.html:
+                    try:
+                        c_data = _extract(res.html)
+                    except Exception:
+                        c_data = {}
+                    control_cache[host] = (res.status, res.html, c_data)
+                    return res.status, res.html, c_data, False
+                # Transport failure, non-HTML body, other 4xx/5xx: not cached,
+                # so the next row on this host retries once.
+                control_failed_hosts.add(host)
+                logger.debug("control probe failed for %s (status=%s error=%s)",
+                             host, res.status, res.error)
+                return res.status, None, None, True
+
+        async def finish(row: dict, data: dict) -> None:
+            nonlocal count
+            count += 1
+            try:
+                res = on_enriched(row, data)
+                if asyncio.iscoroutine(res):
+                    await res
+            except Exception:
+                logger.exception("on_enriched callback failed")
 
         async def work(row: dict) -> None:
-            nonlocal count
+            url = row.get("url") or ""
             # 1. Access policy: some hosts disallow all automated access. We do
             #    not fetch them, and we say so — "we did not look" is honest;
             #    inferring absence from a login wall is not.
-            reason = policy.denied_reason(row.get("url") or "")
+            reason = policy.denied_reason(url)
             if reason:
                 row["verification"] = policy.not_examined_verdict(reason)
-                count += 1
-                try:
-                    res = on_enriched(row, {})
-                    if asyncio.iscoroutine(res):
-                        await res
-                except Exception:
-                    logger.exception("on_enriched callback failed")
+                await finish(row, {})
                 return
 
             # 2. Per-site adapter: an authoritative public API beats scraping a
@@ -442,41 +623,64 @@ async def enrich_profiles(rows: list[dict],
                 if temporal:
                     row["temporal"] = temporal
                 row["evidence_source"] = result.get("source_url")
-                count += 1
-                try:
-                    res = on_enriched(row, data)
-                    if asyncio.iscoroutine(res):
-                        await res
-                except Exception:
-                    logger.exception("on_enriched callback failed")
+                await finish(row, data)
                 return
 
-            async with sem:
-                status, html = await _fetch_page(client, row["url"])
-            # Stealth ladder: only when the plain fetch looks blocked or
-            # empty, and never for decisive absences (404/410).
-            if stealthweb.enabled() and stealthweb.should_escalate(status, html):
-                esc_status, esc_html, esc_via = await escalate(row["url"])
-                if esc_html is not None:
-                    status, html = esc_status, esc_html
-                    row["fetch_via"] = esc_via
-                    logger.info("stealth fetch rescued %s via %s",
-                                row["url"], esc_via)
-                elif esc_status is not None and not (status or 0) >= 400:
-                    # No content, but a tier answered decisively — upgrade
-                    # only the status evidence (e.g. a browser-seen 404).
-                    status = esc_status
-            c_status, c_html, c_data = await control_for(
-                row["url"], row.get("username"))
+            # 3. Plain fetch, one row at a time per host.
+            host = _host(url)
+            hlock = host_locks.setdefault(host, asyncio.Lock())
+            fetch_error: Optional[str] = None
+            async with hlock:
+                limited = active_backoff(host)
+                if limited is not None:
+                    row["verification"] = rate_limited_verdict(limited, fetched=False)
+                    rate_limited["rows"] += 1
+                    await finish(row, {})
+                    return
+                async with sem:
+                    res = await _fetch_page_ex(client, url)
+                status, html, fetch_error = res.status, res.html, res.error
+                if status in RATE_LIMIT_STATUSES:
+                    # V7: back off; no ladder, no control probe, no retry.
+                    record_backoff(host, status, res.retry_after)
+                    row["verification"] = rate_limited_verdict(status)
+                    rate_limited["rows"] += 1
+                    await finish(row, {})
+                    return
+                # Stealth ladder: only when the plain fetch looks blocked or
+                # empty, and never for decisive absences (404/410) or rate
+                # limits (handled above; should_escalate refuses them too).
+                if stealthweb.enabled() and stealthweb.should_escalate(status, html):
+                    esc_status, esc_html, esc_via = await escalate(url)
+                    if esc_status in RATE_LIMIT_STATUSES:
+                        record_backoff(host, esc_status, None)
+                        row["verification"] = rate_limited_verdict(esc_status)
+                        rate_limited["rows"] += 1
+                        await finish(row, {})
+                        return
+                    if esc_html is not None:
+                        status, html = esc_status, esc_html
+                        row["fetch_via"] = esc_via
+                        logger.info("stealth fetch rescued %s via %s", url, esc_via)
+                    elif esc_status is not None and (
+                            status is None or esc_status in _DECISIVE_ABSENT):
+                        # No content, but a tier answered decisively — adopt
+                        # the status evidence: a browser-seen 404 is absence
+                        # even when the plain client was blocked, and any
+                        # status beats a transport failure.
+                        status = esc_status
+            c_status, c_html, c_data, c_failed = await control_for(
+                url, row.get("username"))
             try:
-                data = _extract(html, row.get("url") or "") if html else {}
+                data = _extract(html, url) if html else {}
             except Exception:
-                logger.exception("enrichment parse failed for %s", row["url"])
+                logger.exception("enrichment parse failed for %s", url)
                 data = {}
             row["verification"] = verify_username(
-                row.get("username"), row.get("url"), html, data,
+                row.get("username"), url, html, data,
                 status=status, control_html=c_html, control_extracted=c_data,
-                subject_name=subject_name)
+                subject_name=subject_name, control_failed=c_failed,
+                fetch_error=fetch_error)
             # Template fields: metadata that is byte-identical on the page of
             # a handle that does not exist is the site's, not the person's
             # (a site logo as og:image, "Patreon" as og:title). Stripped only
@@ -486,17 +690,22 @@ async def enrich_profiles(rows: list[dict],
                 data = strip_template_fields(data, c_data)
             if data:
                 row["enrichment"] = data
-            count += 1
-            try:
-                res = on_enriched(row, data)
-                if asyncio.iscoroutine(res):
-                    await res
-            except Exception:
-                logger.exception("on_enriched callback failed")
+            await finish(row, data)
 
         await asyncio.gather(*(work(r) for r in targets), return_exceptions=True)
-    if stealth_used["tls"] or stealth_used["browser"]:
-        logger.info("stealth ladder rescued %d profile(s) via TLS impersonation, "
-                    "%d via headless browser",
-                    stealth_used["tls"], stealth_used["browser"])
+    if stealth_used["tls"] or stealth_used["browser"] or rate_limited["rows"]:
+        logger.info("enrichment: stealth ladder rescued %d profile(s) via TLS "
+                    "impersonation, %d via headless browser; rate-limited: %d "
+                    "host(s), %d row(s) not retried",
+                    stealth_used["tls"], stealth_used["browser"],
+                    len(host_backoff), rate_limited["rows"])
+    if stats is not None:
+        stats.update({
+            "stealth_tls": stealth_used["tls"],
+            "stealth_browser": stealth_used["browser"],
+            "rate_limited_hosts": len(host_backoff),
+            "rate_limited_rows": rate_limited["rows"],
+            "backoff_s": dict(backoff_seconds),
+            "control_failed_hosts": sorted(control_failed_hosts),
+        })
     return count

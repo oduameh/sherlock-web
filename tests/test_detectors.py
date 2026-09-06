@@ -80,6 +80,8 @@ def test_discover_never_raises_and_empty_is_noop(monkeypatch):
 
 
 # --- tier-3 escalation for JS-rendered / walled pages -----------------------
+# The browser fakes accept only ``url``: the detector must never pass a solver
+# flag (F-7) — a stray ``solve_cloudflare=`` would raise here.
 
 def test_shell_page_escalates_to_the_browser(monkeypatch):
     """A JS shell must reach the real browser — otherwise `classify` calls a
@@ -93,7 +95,7 @@ def test_shell_page_escalates_to_the_browser(monkeypatch):
         calls["tls"] += 1
         return 200, "<html><body><div id=root></div></body></html>"   # still a shell
 
-    async def fake_browser(url, solve_cloudflare=False):
+    async def fake_browser(url):
         calls["browser"] += 1
         return 200, "<html><div class='tgme_page_title'>Pavel</div></html>"
 
@@ -118,7 +120,7 @@ def test_browser_budget_is_respected(monkeypatch):
 
     used = {"n": 0}
 
-    async def fake_browser(url, solve_cloudflare=False):
+    async def fake_browser(url):
         used["n"] += 1
         return 200, "<html><body><div id=root></div></body></html>"
 
@@ -132,3 +134,30 @@ def test_browser_budget_is_respected(monkeypatch):
     asyncio.run(t.check("a"))
     asyncio.run(t.check("b"))
     assert used["n"] == 1, "budget must cap browser escalations"
+
+
+def test_rate_limited_detector_is_blocked_without_escalation(monkeypatch):
+    """V7 applies to detectors too: a 429 is BLOCKED (never ABSENT) and is not
+    answered with a stealthier request."""
+    calls = {"tls": 0, "browser": 0}
+
+    async def fake_fetch(url):
+        return 429, "<html><body>Too Many Requests</body></html>"
+
+    async def fake_tls(url):
+        calls["tls"] += 1
+        return 200, "<html><div class='tgme_page_title'>Pavel</div></html>"
+
+    async def fake_browser(url):
+        calls["browser"] += 1
+        return 200, "<html><div class='tgme_page_title'>Pavel</div></html>"
+
+    monkeypatch.setattr(detectors, "_fetch", fake_fetch)
+    monkeypatch.setattr(detectors.stealthweb, "enabled", lambda: True)
+    monkeypatch.setattr(detectors.stealthweb, "fetch_tls", fake_tls)
+    monkeypatch.setattr(detectors.stealthweb, "fetch_browser", fake_browser)
+    detectors._browser_budget["left"] = detectors.BROWSER_BUDGET
+
+    out = asyncio.run(detectors.detector_for("Telegram").check("durov"))
+    assert out["status"] == detectors.BLOCKED
+    assert calls == {"tls": 0, "browser": 0}

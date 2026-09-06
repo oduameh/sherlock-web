@@ -15,8 +15,32 @@ dependency:
   impersonation (curl-cffi under the hood). Cheap (~one normal request), fixes
   TLS/JA3-class blocks. No browser involved.
 * **Tier 3** (:func:`fetch_browser`) — a shared headless stealth-browser session
-  with Cloudflare-challenge solving. Expensive (seconds per page), so callers
+  that *renders* JS-driven pages on permitted hosts (single-page-app profiles
+  whose plain HTML is an empty shell). Expensive (seconds per page), so callers
   budget it explicitly per run.
+
+**What tier 3 is not** (owner decision, security audit F-7): it never solves
+challenges. Scrapling's ``solve_cloudflare`` clicks Cloudflare's Turnstile box
+and its default ``google_search=True`` sends a forged Google ``Referer``; both
+contradict the project's "no CAPTCHA bypass / honest client" posture. The
+session is built with ``solve_cloudflare=False`` and ``google_search=False``,
+:func:`fetch_browser` has no way to switch the solver on, and a challenge page
+seen through any tier is a **blocked** outcome — the row stays
+``indeterminate``. Rendering a page is not defeating a protection; clicking a
+CAPTCHA is.
+
+Browser hygiene (F-12): downloads are disabled (``accept_downloads=False`` via
+Playwright's context options), tier-3 fetches are serialised, and the
+persistent context's cookies are cleared whenever the target host changes so
+one site cannot observe the sequence of other sites in the investigation.
+Residual: Scrapling launches a persistent context over a temporary profile
+directory, and Playwright exposes no context-level "clear storage" — DOM
+storage written by one host survives within the process until
+:func:`aclose`. Documented, not hidden.
+
+Rate limits are not escalated: a 429/503 from the plain client means "back
+off", and answering it with two more disguised requests is exactly what a
+rate-limited host is asking us not to do (:func:`should_escalate`).
 
 Everything degrades gracefully: if ``scrapling[fetchers]`` is not installed,
 or ``RECON_STEALTH=off``, both tiers are inert no-ops and behaviour is exactly
@@ -31,6 +55,10 @@ before it reaches curl-cffi or a browser. Residual caveat (documented in
 safeweb): redirect hops are followed inside curl-cffi/the browser where our
 hook cannot see them — the same accepted rebinding risk as the httpx path.
 
+The page-class helpers (:func:`visible_text`, :func:`has_challenge_markers`,
+:func:`looks_like_shell`) live in :mod:`recon.htmltext` and are re-exported
+here so existing callers keep working; the marker list is the one shared list.
+
 Environment knobs:
 
 * ``RECON_STEALTH``       ``auto`` (default: use tiers when importable) | ``off``
@@ -43,8 +71,22 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 from typing import Optional
+from urllib.parse import urlparse
+
+from recon.htmltext import (
+    CHALLENGE_MARKERS,
+    MIN_VISIBLE_CHARS,
+    has_challenge_markers,
+    looks_like_shell,
+    visible_text,
+)
+
+__all__ = [
+    "CHALLENGE_MARKERS", "MIN_VISIBLE_CHARS", "RATE_LIMIT_STATUSES",
+    "visible_text", "has_challenge_markers", "looks_like_shell",
+    "should_escalate", "enabled", "fetch_tls", "fetch_browser", "aclose",
+]
 
 logger = logging.getLogger("recon.stealthweb")
 
@@ -79,64 +121,19 @@ _MAX_HTML_BYTES = 512 * 1024
 # Chrome fingerprint. All four are valid curl_cffi aliases (resolve to latest).
 _TLS_IMPERSONATE = ["chrome", "firefox", "safari", "edge"]
 
+# Statuses that mean "you are sending too much" — never answered with more
+# requests. Enrichment records a per-host backoff for them instead.
+RATE_LIMIT_STATUSES = frozenset({429, 503})
+
 
 # ---------------------------------------------------------------------------
-# Escalation decision (pure functions — unit-tested, no network)
+# Escalation decision (pure function — unit-tested, no network)
 # ---------------------------------------------------------------------------
-
-# Phrases that identify an anti-bot interstitial rather than a real page.
-_CHALLENGE_MARKERS = (
-    "just a moment",
-    "attention required",
-    "checking your browser",
-    "verify you are a human",
-    "verifying you are human",
-    "one more step",
-    "enable javascript and cookies",
-    "ddos protection by",
-    "ddos-guard",
-    "cf-challenge",
-    "challenge-platform",
-    "datadome",
-    "perimeterx",
-    "px-captcha",
-    "captcha-delivery",
-)
-
-_SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.I | re.S)
-_TAG_RE = re.compile(r"<[^>]+>")
-_WS_RE = re.compile(r"\s+")
-
-# A page whose entire visible text is shorter than this is a JS-app shell or a
-# bare interstitial — there is nothing to extract or verify from it.
-_MIN_VISIBLE_CHARS = 80
 
 # Statuses that mean "blocked" (not "absent"): worth one better-disguised try.
-# 404/410 are deliberately absent — absence is already decisive.
-
-
-def visible_text(html: Optional[str], limit: int = 4000) -> str:
-    """Strip script/style bodies and tags → collapse whitespace → lowercase."""
-    if not html:
-        return ""
-    chunk = html[: limit * 6]
-    chunk = _SCRIPT_STYLE_RE.sub(" ", chunk)
-    return _WS_RE.sub(" ", _TAG_RE.sub(" ", chunk)).strip().lower()[:limit]
-
-
-def has_challenge_markers(html: Optional[str]) -> bool:
-    """True when the page smells like an anti-bot interstitial."""
-    if not html:
-        return False
-    low = html[:20000].lower()
-    return any(marker in low for marker in _CHALLENGE_MARKERS)
-
-
-def looks_like_shell(html: Optional[str]) -> bool:
-    """True for an empty JS-app shell / boilerplate page with no real text."""
-    if not html:
-        return False
-    return len(visible_text(html)) < _MIN_VISIBLE_CHARS
+# 404/410 are deliberately absent — absence is already decisive. 429/503 are
+# excluded too: a rate limit is answered by backing off, not by a stealthier
+# retry (retrieval audit V7 — one 429 used to trigger three more requests).
 
 
 def should_escalate(status: Optional[int], html: Optional[str]) -> bool:
@@ -146,7 +143,12 @@ def should_escalate(status: Optional[int], html: Optional[str]) -> bool:
     ``status is None`` means transport failure (TLS reset, timeout) — common
     against WAF-fronted hosts from datacenter IPs, and sometimes fixed purely
     by impersonating a browser handshake, so it escalates once.
+
+    A 429/503 never escalates, whatever the body says: the host asked us to
+    slow down, and a challenge-looking 429 body is still a rate limit.
     """
+    if status in RATE_LIMIT_STATUSES:
+        return False
     if status is not None and status >= 400 and status not in (404, 410):
         return True
     if has_challenge_markers(html):
@@ -202,12 +204,36 @@ async def fetch_tls(url: str, timeout: float = _TIER2_TIMEOUT_S,
 
 
 # ---------------------------------------------------------------------------
-# Tier 3 — shared stealth-browser session (Cloudflare solving)
+# Tier 3 — shared stealth-browser session (rendering only, never solving)
 # ---------------------------------------------------------------------------
 
 _session: Optional[AsyncStealthySession] = None
 _session_lock: Optional[asyncio.Lock] = None
 _session_dead = False
+# Tier-3 fetches are serialised so the cookie hygiene below is deterministic
+# (clearing cookies while another host's page is mid-load would break it).
+_fetch_lock: Optional[asyncio.Lock] = None
+_last_host: Optional[str] = None
+
+# Constructor options for the shared session. Kept as a dict so the posture
+# is inspectable and testable without launching a browser.
+SESSION_OPTIONS = {
+    "max_pages": 2,
+    "headless": True,
+    # F-7: never solve Cloudflare Turnstile/interstitials — a challenge page
+    # is a blocked outcome, and never send Scrapling's forged Google referer.
+    "solve_cloudflare": False,
+    "google_search": False,
+    # We only ever read the HTML for identity fields, so drop
+    # images/media/fonts and ad/tracker domains — big latency and bandwidth
+    # cut per browser page, no effect on results.
+    "disable_resources": True,
+    "block_ads": True,
+    "timeout": int(_TIER3_TIMEOUT_S * 1000),
+    # F-12: Playwright context option (Scrapling merges ``additional_args``
+    # into the persistent-context options) — no stray files on disk.
+    "additional_args": {"accept_downloads": False},
+}
 
 
 async def _get_session():
@@ -221,17 +247,7 @@ async def _get_session():
             return None
         if _session is None:
             try:
-                session = AsyncStealthySession(
-                    max_pages=2,
-                    headless=True,
-                    solve_cloudflare=True,
-                    # We only ever read the HTML for identity fields, so drop
-                    # images/media/fonts and ad/tracker domains — big latency
-                    # and bandwidth cut per browser page, no effect on results.
-                    disable_resources=True,
-                    block_ads=True,
-                    timeout=int(_TIER3_TIMEOUT_S * 1000),
-                )
+                session = AsyncStealthySession(**SESSION_OPTIONS)
                 # The constructor only records options — it does NOT launch the
                 # browser. Without start() every fetch raises "Context manager
                 # has been closed" and tier 3 silently returns nothing, so this
@@ -249,18 +265,35 @@ async def _get_session():
         return _session
 
 
+async def _clear_cookies_if_host_changed(session, url: str) -> None:
+    """F-12: wipe the persistent context's cookies when the target host differs
+    from the previous tier-3 target, so site A's cookies never travel to site B.
+    Best-effort — a failure here must never fail the fetch."""
+    global _last_host
+    host = (urlparse(url).hostname or "").lower()
+    if host and host != _last_host and _last_host is not None:
+        ctx = getattr(session, "context", None)
+        clear = getattr(ctx, "clear_cookies", None)
+        if clear is not None:
+            try:
+                await clear()
+            except Exception:
+                logger.debug("stealth tier-3 cookie clear failed", exc_info=True)
+    if host:
+        _last_host = host
+
+
 async def fetch_browser(url: str, timeout: float = _TIER3_TIMEOUT_S,
-                        solve_cloudflare: bool = False,
                         ) -> tuple[Optional[int], Optional[str]]:
-    """Fetch ``url`` through the shared headless stealth browser. Same
+    """Render ``url`` in the shared headless stealth browser. Same
     ``(status, html)`` contract; ``(None, None)`` on any failure. Never raises.
 
-    ``solve_cloudflare`` is opt-in per call because the solver is expensive:
-    Scrapling forces the timeout up to 60 s whenever it is on, and logs an
-    error for every page that turns out not to be challenged. Callers pass it
-    only when a challenge was actually detected (see :func:`has_challenge_markers`).
+    Rendering only: there is deliberately no way to enable Scrapling's
+    challenge solver from here (F-7). If the rendered page is itself a
+    challenge/WAF page the caller's :func:`should_escalate` check rejects it
+    and the row stays ``indeterminate`` — blocked, not absent.
     """
-    global _session_dead
+    global _session_dead, _fetch_lock
 
     if not enabled():
         return None, None
@@ -274,10 +307,15 @@ async def fetch_browser(url: str, timeout: float = _TIER3_TIMEOUT_S,
     except Exception as exc:
         logger.debug("stealth tier-3 blocked by SSRF guard for %s: %s", url, exc)
         return None, None
+    if _fetch_lock is None:
+        _fetch_lock = asyncio.Lock()
     try:
-        resp = await asyncio.wait_for(
-            session.fetch(url, solve_cloudflare=solve_cloudflare), timeout=timeout
-        )
+        async with _fetch_lock:
+            await _clear_cookies_if_host_changed(session, url)
+            resp = await asyncio.wait_for(
+                session.fetch(url, solve_cloudflare=False, google_search=False),
+                timeout=timeout,
+            )
     except Exception as exc:
         msg = str(exc).lower()
         if any(hint in msg for hint in ("executable", "not installed",
@@ -297,10 +335,11 @@ async def fetch_browser(url: str, timeout: float = _TIER3_TIMEOUT_S,
 
 async def aclose() -> None:
     """Shut the shared browser session down (called from app lifespan)."""
-    global _session
+    global _session, _last_host
     if _session is not None:
         try:
             await _session.close()
         except Exception:
             logger.debug("stealth session close failed", exc_info=True)
         _session = None
+    _last_host = None
