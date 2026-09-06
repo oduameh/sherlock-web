@@ -1996,16 +1996,45 @@
         " queued — " + d.max_concurrent + " already running…";
     });
     invEs.onerror = function () {
-      // Never let EventSource auto-reconnect: the server refuses to restart a
-      // non-pending investigation (409), and a lost connection cancels the run
-      // server-side, so a reconnect could only ever fail or re-run the case.
       if (!invEs) return;
       var lost = invEs.readyState !== EventSource.CLOSED;
+      var lostInvId = invId;
       stopInvestigation();
-      els.overallText.textContent = lost
-        ? "Connection to the investigation stream was lost — the run was cancelled."
-        : "Investigation stream closed.";
-      toast(lost ? "Stream lost; investigation cancelled." : "Stream closed.", "error");
+      if (!lost) {
+        els.overallText.textContent = "Investigation stream closed.";
+        toast("Stream closed.", "error");
+        return;
+      }
+      els.overallText.textContent = "Connection lost — checking investigation status…";
+      (function poll(n) {
+        fetch("/api/investigate/" + lostInvId)
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (d.status === "done") {
+              els.overallText.textContent = "Investigation completed while disconnected.";
+              toast("Investigation completed. Open the dossier to see results.", "success");
+              currentInvId = lostInvId;
+              loadHistory();
+            } else if (d.status === "running" && n < 40) {
+              els.overallText.textContent = "Connection lost — investigation still running (" + (n + 1) + ")…";
+              setTimeout(function () { poll(n + 1); }, 5000);
+            } else if (d.status === "cancelled" || d.status === "failed") {
+              els.overallText.textContent = "Investigation " + d.status + " after connection was lost.";
+              toast("Investigation " + d.status + ".", "error");
+              loadHistory();
+            } else {
+              els.overallText.textContent = "Connection lost — investigation status: " + (d.status || "unknown");
+              loadHistory();
+            }
+          })
+          .catch(function () {
+            if (n < 5) setTimeout(function () { poll(n + 1); }, 3000);
+            else {
+              els.overallText.textContent = "Connection lost. Check history for results.";
+              toast("Stream lost. Check history for results.", "error");
+            }
+          });
+      })(0);
     };
   }
 

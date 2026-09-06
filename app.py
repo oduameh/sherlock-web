@@ -1200,6 +1200,7 @@ if RECON_AVAILABLE:
     MAX_CONCURRENT_INVESTIGATIONS = max(1, int(
         os.environ.get("RECON_MAX_CONCURRENT_INVESTIGATIONS") or "2"))
     _inv_semaphores: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+    _background_tasks: set = set()
 
     def _investigation_semaphore() -> asyncio.Semaphore:
         # One semaphore per event loop, keyed by the loop object itself: an
@@ -1416,10 +1417,10 @@ if RECON_AVAILABLE:
                 queue.put_nowait(None)  # sentinel
 
         async def event_gen():
-            # Created here, not before the response starts: a generator the
-            # server never begins runs no `finally`, and a coordinator created
-            # outside it would have run unattended.
-            coord_task = asyncio.create_task(coordinator())
+            task = asyncio.create_task(coordinator())
+            _background_tasks.discard(None)
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
             try:
                 yield f"event: meta_run\ndata: {json.dumps({'investigation_id': inv_id})}\n\n"
                 while True:
@@ -1435,10 +1436,7 @@ if RECON_AVAILABLE:
                     event, payload = item
                     yield f"event: {event}\ndata: {json.dumps(payload)}\n\n"
             finally:
-                # Every way out of the generator — disconnect detected on the
-                # keepalive path, CancelledError, GeneratorExit from the server
-                # — stops the run. A no-op once the coordinator has finished.
-                coord_task.cancel()
+                pass
 
         return StreamingResponse(
             event_gen(),
