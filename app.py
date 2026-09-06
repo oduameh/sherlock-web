@@ -64,7 +64,13 @@ for _h in logging.getLogger().handlers:
 os.umask(0o077)
 
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 import dbconn
@@ -143,11 +149,19 @@ async def lifespan(app: FastAPI):
         if not dbconn.IS_POSTGRES:
             # Fold the write-ahead log back into the main file so a plain copy
             # of history.db is complete (the WAL held ~1 MB of unmerged data).
-            try:
+            # Off the event loop: it can wait up to the busy timeout.
+            def _checkpoint():
                 with db_connect(DB_PATH) as conn:
-                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    return conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            try:
+                busy, log_pages, done = await asyncio.to_thread(_checkpoint)
+                if busy:
+                    logging.getLogger("app").warning(
+                        "WAL checkpoint could not complete (busy); %d pages remain", log_pages)
+                else:
+                    logging.getLogger("app").info("WAL checkpoint: %d pages folded", done)
             except Exception:
-                logging.getLogger("app").debug("WAL checkpoint failed", exc_info=True)
+                logging.getLogger("app").warning("WAL checkpoint failed", exc_info=True)
 
 
 app = FastAPI(title="sherlock-web", lifespan=lifespan)
@@ -1012,6 +1026,12 @@ if RECON_AVAILABLE:
         if row is None:
             return Response("not found", status_code=404)
         ts, username, results_json, kind, inv_id = row
+        if kind == "investigation":
+            # The v2 renderer never understood investigation summaries (it
+            # 500'd on them); the dossier is the report for these rows.
+            if inv_id is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            return RedirectResponse(url=f"/api/investigate/{inv_id}/report", status_code=307)
         results = _resolve_run_results(results_json, kind, inv_id)
         if kind == "recon":
             run = {

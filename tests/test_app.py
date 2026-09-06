@@ -579,3 +579,13 @@ def test_schema_is_versioned_on_the_app_database():
     import dbschema
     with db_connect(appmod.DB_PATH) as conn:
         assert dbschema.current_version(conn) == dbschema.SCHEMA_VERSION
+
+
+def test_legacy_report_route_redirects_investigation_rows(client):
+    iid = _pending(client)
+    with client.stream("GET", f"/api/investigate/{iid}/stream") as r:
+        "".join(r.iter_text())
+    with db_connect(appmod.DB_PATH) as conn:
+        run_id = conn.execute("SELECT id FROM runs WHERE investigation_id = ?", (iid,)).fetchone()[0]
+    r = client.get(f"/api/recon/report/{run_id}", follow_redirects=False)
+    assert r.status_code == 307 and r.headers["location"] == f"/api/investigate/{iid}/report"

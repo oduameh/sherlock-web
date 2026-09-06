@@ -71,18 +71,9 @@ def _m2_indexes(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_investigation ON runs (investigation_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_kind_id ON runs (kind, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_investigations_status ON investigations (status)")
-    # watch_alerts is created by recon.monitor.init_tables; only index it when present.
-    if _table_exists(conn, "watch_alerts"):
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_watch_alerts_watch ON watch_alerts (watch_id)")
-
-
-def _table_exists(conn, name: str) -> bool:
-    if dbconn.IS_POSTGRES:
-        row = conn.execute("SELECT to_regclass(?)", (name,)).fetchone()
-        return bool(row and row[0])
-    row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                       (name,)).fetchone()
-    return row is not None
+    # watch_alerts belongs to recon.monitor.init_tables, which creates its own
+    # index on every boot; a versioned migration cannot, because a boot
+    # without the recon package would record the version and never retry.
 
 
 # (version, description, function). Append only.
@@ -94,7 +85,7 @@ SCHEMA_VERSION = MIGRATIONS[-1][0]
 
 
 def current_version(conn) -> int:
-    conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
+    conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
     row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
     return int(row[0]) if row and row[0] is not None else 0
 
@@ -104,15 +95,15 @@ def migrate(conn, *, extra_tables: Callable | None = None) -> int:
     monitor/router table creators) runs before the index migration so their
     tables can be indexed. Returns the resulting version."""
     have = current_version(conn)
-    if extra_tables is not None:
-        extra_tables(conn)
     for version, desc, fn in MIGRATIONS:
         if version <= have:
             continue
         fn(conn)
-        conn.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
+        conn.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))   # PK: no duplicates
         logger.info("schema migrated to v%d: %s", version, desc)
         have = version
+    if extra_tables is not None:      # monitor/router tables: idempotent, every boot
+        extra_tables(conn)
     if not dbconn.IS_POSTGRES:
         conn.execute(f"PRAGMA user_version = {int(have)}")
     return have
