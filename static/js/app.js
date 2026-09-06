@@ -1579,10 +1579,12 @@
     var head = document.createElement("div");
     head.className = "dim";
     head.style.padding = "2px 16px 8px";
-    head.innerHTML = (s.total || 0) + " brokers · " + (s.listed || 0) +
-      " listed · " + (s.blocked || 0) + " blocked · " +
-      '<a href="' + d.drop_portal + '" target="_blank" rel="noopener noreferrer">' +
-      "remove from 500+ via California DROP portal &#8599;</a>";
+    head.textContent = (s.total || 0) + " brokers \u00b7 " + (s.listed || 0) +
+      " listed \u00b7 " + (s.blocked || 0) + " blocked \u00b7 ";
+    // The portal URL is a backend constant, but it is persisted in the summary
+    // and replayed from history, so it goes through the same scheme gate.
+    head.appendChild(linkOrText(d.drop_portal,
+      "remove from 500+ via California DROP portal \u2197"));
     c.rows.appendChild(head);
     // strong signals first: listed, then blocked, then the rest
     var order = { listed: 0, blocked: 1, manual: 2, not_found: 3 };

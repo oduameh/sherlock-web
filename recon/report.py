@@ -79,9 +79,9 @@ def _verify_badge(row: dict) -> str:
 def _enrichment_cell(row: dict) -> str:
     enr = row.get("enrichment") or {}
     bits = []
-    img = enr.get("jsonld_image") or enr.get("og_image")
-    if img:
-        bits.append(f'<img class="avatar" src="{_e(img)}" alt="" loading="lazy">')
+    img = _href(enr.get("jsonld_image") or enr.get("og_image"))
+    if img:   # target-controlled: same scheme allow-list as links (F-6)
+        bits.append(f'<img class="avatar" src="{img}" alt="" loading="lazy">')
     name = enr.get("jsonld_name") or enr.get("og_title") or enr.get("title")
     if name:
         bits.append(f"<b>{_e(name)}</b>")
@@ -166,9 +166,9 @@ def render_report(run: dict) -> str:
         grav = email.get("gravatar")
         parts.append("<div class='card'>")
         if grav:
-            av = grav.get("avatar_url")
+            av = _href(grav.get("avatar_url"))
             if av:
-                parts.append(f"<img class='avatar' src='{_e(av)}' alt=''>")
+                parts.append(f"<img class='avatar' src='{av}' alt=''>")
             parts.append(
                 f"<b>{_e(grav.get('display_name') or grav.get('full_name') or 'Gravatar profile')}</b> "
                 f"<a href='{_href(grav.get('profile_url'))}'>{_e(grav.get('profile_url'))}</a>"

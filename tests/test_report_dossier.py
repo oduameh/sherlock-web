@@ -148,3 +148,52 @@ def test_dossier_keeps_https_links_and_escapes_name():
     assert "href='https://broker.example/optout'" in out
     assert "<script>alert" not in out
     assert EVIL_NAME_ESCAPED in out
+
+
+# --- brokers section, <img src>, and an allow-list over EVERY URL attribute ---------
+# (review of increment F: the report's two <img src> interpolations were not
+# scheme-gated, and the dossier fixture never rendered its brokers section.)
+
+ATTR_URL = re.compile(r"""(?:href|src)=(['"])(.*?)\1""", re.I | re.S)
+
+
+def _brokers_block():
+    return {
+        "name": "Alice Example", "city": "Austin", "state": "TX",
+        "drop_portal": EVIL,
+        "brokers": [
+            {"name": "Spokeo", "category": "people-search", "owner": "x",
+             "optout_url": "data:text/html,evil", "search_url": EVIL, "status": "listed"},
+            {"name": "Whitepages", "category": "people-search", "owner": "y",
+             "optout_url": "https://www.whitepages.com/suppression",
+             "search_url": GOOD_SITE, "status": "not_found"},
+        ],
+        "summary": {"total": 2, "auto_checked": 2, "listed": 1, "blocked": 0, "manual": 0},
+    }
+
+
+def _assert_only_http_urls(html):
+    bad = [u for _, u in ATTR_URL.findall(html)
+           if u and not u.lower().startswith(("http://", "https://"))]
+    assert bad == [], f"non-http(s) URL attributes rendered: {bad}"
+
+
+def test_report_gates_img_src_and_every_url_attribute():
+    run = _report_run()
+    run["results"]["accounts"].append({**_account(), "site": "Evil",
+        "enrichment": {"og_image": "javascript:alert(2)", "og_title": "Evil"}})
+    run["results"]["email"]["gravatar"]["avatar_url"] = "data:image/svg+xml,evil"
+    out = render_report(run)
+    _assert_only_http_urls(out)
+    assert "alert(2)" not in out                    # a hostile src is dropped, not escaped
+    assert f"href='{GOOD_SITE}'" in out
+
+
+def test_dossier_every_url_attribute_is_http_including_brokers():
+    inv = {"id": 7, "created_at": "2026-09-06 00:00:00"}
+    summary = _dossier_summary()
+    summary["brokers"] = _brokers_block()
+    out = render_dossier(inv, summary)
+    _assert_only_http_urls(out)
+    assert "whitepages.com/suppression" in out       # the brokers section did render
+    assert "Spokeo" in out
