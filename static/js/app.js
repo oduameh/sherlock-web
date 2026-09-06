@@ -1,11 +1,10 @@
 /* ==========================================================================
    Sherlock Web — frontend application
    Vanilla JS, no build step. Sections:
-     state · dom · utils · toasts & modal · tabs & sidebar · site picker
-     quick scan · investigation renderers · investigation run · graph
-     export · watchlist · alerts · history · init
-   The API contract (fetch URLs, SSE event names, payload shapes) is
-   unchanged from the original single-file app.
+     dom · state · utils · toasts & modal · tabs & sidebar · footprint map
+     God's Eye · source health · site picker · quick scan · investigation
+     renderers · investigation run · shared graph helpers · case graph
+     (sigma.js) · export · watchlist · alerts · history · init
    ========================================================================== */
 (function () {
   "use strict";
@@ -56,40 +55,6 @@
     invNsfw: document.getElementById("invNsfw"),
     invStartBtn: document.getElementById("invStartBtn"),
     invStopBtn: document.getElementById("invStopBtn"),
-    graphPanel: document.getElementById("graphPanel"),
-    graphPngBtn: document.getElementById("graphPngBtn"),
-    graphSearch: document.getElementById("graphSearch"),
-    graphLayout: document.getElementById("graphLayout"),
-    graphClusterBtn: document.getElementById("graphClusterBtn"),
-    graphChangesBtn: document.getElementById("graphChangesBtn"),
-    graphStats: document.getElementById("graphStats"),
-    graphCsvBtn: document.getElementById("graphCsvBtn"),
-    graphGraphmlBtn: document.getElementById("graphGraphmlBtn"),
-    graphFsBtn: document.getElementById("graphFsBtn"),
-    graphHelpBtn: document.getElementById("graphHelpBtn"),
-    graphHelp: document.getElementById("graphHelp"),
-    cyNav: document.getElementById("cyNav"),
-    graphWrap: document.getElementById("graphWrap"),
-    graphFocusChip: document.getElementById("graphFocusChip"),
-    graphFocusClose: document.getElementById("graphFocusClose"),
-    graphCtx: document.getElementById("graphCtx"),
-    graphFallback: document.getElementById("graphFallback"),
-    cy: document.getElementById("cy"),
-    confSlider: document.getElementById("confSlider"),
-    confSliderVal: document.getElementById("confSliderVal"),
-    nodeConfSlider: document.getElementById("nodeConfSlider"),
-    nodeConfSliderVal: document.getElementById("nodeConfSliderVal"),
-    graphFitBtn: document.getElementById("graphFitBtn"),
-    graphLabelsBtn: document.getElementById("graphLabelsBtn"),
-    graphZoomInBtn: document.getElementById("graphZoomInBtn"),
-    graphZoomOutBtn: document.getElementById("graphZoomOutBtn"),
-    nodePanel: document.getElementById("nodePanel"),
-    tlBar: document.getElementById("timelineBar"),
-    tlPlayBtn: document.getElementById("tlPlayBtn"),
-    tlScrub: document.getElementById("tlScrub"),
-    tlDate: document.getElementById("tlDate"),
-    nodePanelBody: document.getElementById("nodePanelBody"),
-    nodePanelClose: document.getElementById("nodePanelClose"),
     bellBtn: document.getElementById("bellBtn"),
     alertBadge: document.getElementById("alertBadge"),
     alertsDrop: document.getElementById("alertsDrop"),
@@ -152,6 +117,33 @@
 
   /* ============================ utils ============================ */
   function normSite(n) { return String(n).toLowerCase().replace(/[^a-z0-9]/g, ""); }
+
+  // HTML-escape for the few innerHTML text sinks. Escapes quotes too so the
+  // same helper is safe in attribute context.
+  function esc(s) {
+    return String(s === null || s === undefined ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  // Only http(s) URLs may become links, image sources or CSS url()s. Anything
+  // else that a remote source or the subject could supply (javascript:, data:,
+  // vbscript:, garbage) is rendered as plain text instead.
+  function safeHttp(u) {
+    if (u === null || u === undefined) return null;
+    var s = String(u);
+    return /^https?:\/\//i.test(s) ? s : null;
+  }
+
+  // An <a target=_blank rel=noopener noreferrer> when the URL is safe, else a
+  // <span> carrying the same text (so a hostile URL is visible, not clickable).
+  function linkOrText(url, text) {
+    var safe = safeHttp(url);
+    var el = document.createElement(safe ? "a" : "span");
+    if (safe) { el.href = safe; el.target = "_blank"; el.rel = "noopener noreferrer"; }
+    el.textContent = text === undefined ? String(url === null || url === undefined ? "" : url) : text;
+    return el;
+  }
 
   // "YYYY-MM-DD HH:MM:SS" (server-local) -> "5m ago" style relative time.
   // Falls back to the raw string when the timestamp can't be parsed.
@@ -409,11 +401,11 @@
         color: kind.color, weight: 2,
         fillColor: kind.color, fillOpacity: 0.35
       });
-      var site = p.site ? '<div class="fp-pop-kind">' + fpEsc(p.site) + "</div>" : "";
+      var site = p.site ? '<div class="fp-pop-kind">' + esc(p.site) + "</div>" : "";
       m.bindPopup(
-        '<div class="fp-pop-kind">' + fpEsc(kind.label) + "</div>" +
-        "<b>" + fpEsc(p.label || "") + "</b><br>" +
-        fpEsc(p.display || "") + (p.org ? "<br>" + fpEsc(p.org) : "") + site
+        '<div class="fp-pop-kind">' + esc(kind.label) + "</div>" +
+        "<b>" + esc(p.label || "") + "</b><br>" +
+        esc(p.display || "") + (p.org ? "<br>" + esc(p.org) : "") + site
       );
       m.addTo(fpLayer);
       fpMarkers[i] = m;
@@ -423,11 +415,6 @@
     fpRenderList(d);
     // Leaflet needs a size recalculation when its panel was hidden at init.
     setTimeout(function () { if (fpMap) fpMap.invalidateSize(); }, 60);
-  }
-
-  function fpEsc(s) {
-    return String(s === null || s === undefined ? "" : s)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
   function fpFit() {
@@ -659,11 +646,6 @@
   document.addEventListener("keydown", function (e) {
     if (e.key !== "Escape") return;
     if (!els.modalWrap.hidden) { closeModal(); return; }
-    if (els.nodePanel.classList.contains("open")) {
-      els.nodePanel.classList.remove("open");
-      if (cy) cy.elements().removeClass("hl dimmed");
-      return;
-    }
     if (els.alertsDrop.classList.contains("open")) {
       els.alertsDrop.classList.remove("open");
       els.bellBtn.setAttribute("aria-expanded", "false");
@@ -777,7 +759,6 @@
     els.dossierBtn.style.display = "none";
     els.graphBtn.style.display = "none";
     els.watchBtn.style.display = "none";
-    els.graphPanel.style.display = "none";
   }
 
   function resetInvestigationUI() {
@@ -826,11 +807,7 @@
     var siteSpan = document.createElement("span");
     siteSpan.className = "site";
     siteSpan.textContent = site;
-    var a = document.createElement("a");
-    a.href = url;
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-    a.textContent = url;
+    var a = linkOrText(url);
     row.appendChild(siteSpan);
     row.appendChild(a);
     if (queryTime != null) {
@@ -1087,9 +1064,7 @@
     }
     var main = document.createElement("div");
     main.className = "rmain";
-    var a = document.createElement("a");
-    a.href = d.url; a.target = "_blank"; a.rel = "noopener noreferrer";
-    a.textContent = d.url;
+    var a = linkOrText(d.url);
     var badges = document.createElement("span");
     badges.className = "badges";
     engineBadges(badges, d.engines);
@@ -1267,7 +1242,7 @@
       }
     }
     var enr = d.enrichment || {};
-    var img = enr.jsonld_image || enr.og_image;
+    var img = safeHttp(enr.jsonld_image || enr.og_image);
     var name = enr.jsonld_name || enr.og_title || enr.title;
     var bio = enr.jsonld_description || enr.og_description;
     if (img) r.data.avatar = img;
@@ -1333,9 +1308,10 @@
     } else {
       var div = document.createElement("div");
       div.className = "enrich";
-      if (profile.avatar_url) {
+      var avatarUrl = safeHttp(profile.avatar_url);
+      if (avatarUrl) {
         var im = document.createElement("img");
-        im.src = profile.avatar_url; im.alt = "";
+        im.src = avatarUrl; im.alt = "";
         im.onerror = function () { im.style.display = "none"; };
         div.appendChild(im);
       }
@@ -1350,17 +1326,12 @@
         txt.appendChild(b);
       }
       if (profile.profile_url) {
-        var a = document.createElement("a");
-        a.href = profile.profile_url; a.target = "_blank";
-        a.rel = "noopener noreferrer"; a.textContent = profile.profile_url;
-        txt.appendChild(a);
+        txt.appendChild(linkOrText(profile.profile_url));
       }
       (profile.accounts || []).forEach(function (acc) {
         if (!acc.url) return;
-        var la = document.createElement("a");
-        la.href = acc.url; la.target = "_blank"; la.rel = "noopener noreferrer";
+        var la = linkOrText(acc.url, acc.name || acc.domain);
         la.style.marginRight = "8px";
-        la.textContent = acc.name || acc.domain;
         txt.appendChild(la);
       });
       div.appendChild(txt);
@@ -1526,16 +1497,8 @@
         name.className = "site"; name.textContent = b.name;
         var links = document.createElement("span");
         links.className = "brow-links";
-        if (b.search_url) {
-          var sl = document.createElement("a");
-          sl.href = b.search_url; sl.target = "_blank"; sl.rel = "noopener noreferrer";
-          sl.textContent = "reverse lookup"; links.appendChild(sl);
-        }
-        if (b.optout_url) {
-          var ol = document.createElement("a");
-          ol.href = b.optout_url; ol.target = "_blank"; ol.rel = "noopener noreferrer";
-          ol.textContent = "opt out"; links.appendChild(ol);
-        }
+        if (b.search_url) links.appendChild(linkOrText(b.search_url, "reverse lookup"));
+        if (b.optout_url) links.appendChild(linkOrText(b.optout_url, "opt out"));
         row.appendChild(name); row.appendChild(links);
         rblock.appendChild(row);
       });
@@ -1551,10 +1514,8 @@
       var flist = document.createElement("div");
       flist.className = "phone-links";
       fp.forEach(function (f) {
-        var a = document.createElement("a");
+        var a = linkOrText(f.url, f.label);
         a.className = "phone-link phone-link-" + (f.kind || "search");
-        a.href = f.url; a.target = "_blank"; a.rel = "noopener noreferrer";
-        a.textContent = f.label;
         flist.appendChild(a);
       });
       fblock.appendChild(flist);
@@ -1618,10 +1579,12 @@
     var head = document.createElement("div");
     head.className = "dim";
     head.style.padding = "2px 16px 8px";
-    head.innerHTML = (s.total || 0) + " brokers · " + (s.listed || 0) +
-      " listed · " + (s.blocked || 0) + " blocked · " +
-      '<a href="' + d.drop_portal + '" target="_blank" rel="noopener noreferrer">' +
-      "remove from 500+ via California DROP portal &#8599;</a>";
+    head.textContent = (s.total || 0) + " brokers \u00b7 " + (s.listed || 0) +
+      " listed \u00b7 " + (s.blocked || 0) + " blocked \u00b7 ";
+    // The portal URL is a backend constant, but it is persisted in the summary
+    // and replayed from history, so it goes through the same scheme gate.
+    head.appendChild(linkOrText(d.drop_portal,
+      "remove from 500+ via California DROP portal \u2197"));
     c.rows.appendChild(head);
     // strong signals first: listed, then blocked, then the rest
     var order = { listed: 0, blocked: 1, manual: 2, not_found: 3 };
@@ -1640,14 +1603,8 @@
       badge.className = "badge " + meta.cls; badge.textContent = meta.label;
       var links = document.createElement("span");
       links.className = "brow-links";
-      if (b.search_url) {
-        var sl = document.createElement("a");
-        sl.href = b.search_url; sl.target = "_blank"; sl.rel = "noopener noreferrer";
-        sl.textContent = "search"; links.appendChild(sl);
-      }
-      var ol = document.createElement("a");
-      ol.href = b.optout_url; ol.target = "_blank"; ol.rel = "noopener noreferrer";
-      ol.textContent = "opt out"; links.appendChild(ol);
+      if (b.search_url) links.appendChild(linkOrText(b.search_url, "search"));
+      links.appendChild(linkOrText(b.optout_url, "opt out"));
       row.appendChild(name); row.appendChild(cat);
       row.appendChild(badge); row.appendChild(links);
       c.rows.appendChild(row);
@@ -1724,11 +1681,6 @@
     c.rows.appendChild(note);
   }
 
-  function esc(s) {
-    return String(s === null || s === undefined ? "" : s)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  }
-
   els.breachBtn.addEventListener("click", function () {
     if (!currentInvId) { toast("No investigation selected", "error"); return; }
     els.breachBtn.disabled = true;
@@ -1777,9 +1729,7 @@
       var ul = document.createElement("ul");
       (cl.members || []).forEach(function (m) {
         var li = document.createElement("li");
-        var a = document.createElement("a");
-        a.href = m.url; a.target = "_blank"; a.rel = "noopener noreferrer";
-        a.textContent = m.site + " — " + m.url;
+        var a = linkOrText(m.url, m.site + " — " + m.url);
         li.appendChild(a);
         ul.appendChild(li);
       });
@@ -2046,13 +1996,10 @@
     }).catch(function () { toast("Failed to create watch", "error"); });
   });
 
-  /* ============================ identity graph ============================ */
-  var cy = null;
-  var graphData = null;
-  var graphLabelsOn = true;
-  var fcoseRegistered = false;
-  var selNode = null;   // first of a possible two-click path trace
-
+  /* ======================= shared graph helpers ======================= */
+  // Colour/size discipline and investigator notes used by the case graph.
+  // The inline Cytoscape identity graph that used to live here was removed:
+  // its renderer had no caller once the Graph action opened the case graph.
   var NODE_COLORS = {
     person: "#e8eee6",
     handle: "#e0a63d",
@@ -2064,41 +2011,6 @@
     ip: "#f778ba",
     nameserver: "#6e7681"
   };
-
-  // Node-type → toolbar chip group. Chips hide whole groups at once.
-  function typeGroup(t) {
-    if (t === "account") return "account";
-    if (t === "handle") return "handle";
-    if (t === "email" || t === "phone" || t === "registration") return "contact";
-    return "infra"; // person, domain, ip, nameserver
-  }
-
-  // Age band from an ISO creation date. 0 = new (<6 mo), 1 = mid (<2 y),
-  // 2 = old, -1 = unknown (no ring). Rings are neutral greys on purpose:
-  // age is context, not a verdict.
-  function ageBand(iso) {
-    if (!iso) return -1;
-    var t = Date.parse(iso);
-    if (isNaN(t)) return -1;
-    var days = (Date.now() - t) / 86400000;
-    if (days < 183) return 0;
-    if (days < 730) return 1;
-    return 2;
-  }
-  var AGE_STYLE = [
-    { color: "#e0a63d", padding: 7 },   // new — amber ring (fresh accounts deserve attention)
-    { color: "#9aa79a", padding: 4 },   // mid
-    { color: "#3d463d", padding: 2 }    // old — barely there
-  ];
-
-  // Timeline state: sorted ISO dates of dated nodes; scrub position 0..1000.
-  var tlState = { dates: [], minT: 0, maxT: 1, playing: false, raf: null };
-
-  function confidenceBand(conf) {
-    if (conf >= 70) return { label: "High", cls: "conf-high" };
-    if (conf >= 40) return { label: "Medium", cls: "conf-med" };
-    return { label: "Low", cls: "conf-low" };
-  }
 
   function nodeColor(n) {
     if (n.type === "account") {
@@ -2121,572 +2033,6 @@
     return 16 + Math.round((n.confidence || 40) * 0.22);
   }
 
-  // Which toolbar chips are on. Keys: account / handle / contact / infra.
-  var typeVis = { account: true, handle: true, contact: true, infra: true };
-
-  function nodeVisible(n) {
-    // Confidence slider only gates accounts (inputs/facts are always shown).
-    if (n.data("type") === "account" &&
-        (n.data("confidence") || 0) < parseInt(els.nodeConfSlider.value, 10)) {
-      return false;
-    }
-    if (!typeVis[typeGroup(n.data("type"))]) return false;
-    if (tlState.playing || parseInt(els.tlScrub.value, 10) < 1000) {
-      // Timeline window: dated nodes appear once created; undated nodes are
-      // baseline and fade out while scrubbing (they return at the far end).
-      var d = n.data("created_at");
-      if (d) {
-        if (Date.parse(d) > tlCursor()) return false;
-      } else if (parseInt(els.tlScrub.value, 10) < 1000) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  function tlCursor() {
-    var v = parseInt(els.tlScrub.value, 10);
-    return tlState.minT + (tlState.maxT - tlState.minT) * (v / 1000);
-  }
-
-  function applyGraphFilters() {
-    if (!cy) return;
-    var edgeMin = parseInt(els.confSlider.value, 10);
-    els.confSliderVal.textContent = edgeMin + "%";
-    els.nodeConfSliderVal.textContent = parseInt(els.nodeConfSlider.value, 10) + "%";
-    var vis = {};
-    cy.batch(function () {
-      cy.nodes().forEach(function (n) {
-        var ok = nodeVisible(n);
-        vis[n.id()] = ok;
-        n.style("display", ok ? "element" : "none");
-      });
-      cy.edges().forEach(function (e) {
-        var show = (e.data("confidence") || 0) >= edgeMin &&
-          vis[e.data("source")] && vis[e.data("target")];
-        e.style("display", show ? "element" : "none");
-      });
-    });
-    updateTlReadout();
-  }
-
-  // Backwards-compatible alias (renderGraph calls applyEdgeFilter once built).
-  var applyEdgeFilter = applyGraphFilters;
-
-  // ---- timeline scrubber -------------------------------------------------
-  function setupTimeline(data) {
-    tlState.dates = data.nodes.map(function (n) { return n.created_at; })
-      .filter(function (d) { return d && !isNaN(Date.parse(d)); })
-      .map(function (d) { return Date.parse(d); })
-      .sort(function (a, b) { return a - b; });
-    // Fewer than three dated sources is not a story — hide the control
-    // rather than play a nearly empty film.
-    els.tlBar.hidden = tlState.dates.length < 3;
-    if (els.tlBar.hidden) return;
-    tlState.minT = tlState.dates[0];
-    tlState.maxT = Date.now();
-    els.tlScrub.value = "1000";
-    stopTimelinePlay();
-  }
-
-  function updateTlReadout() {
-    if (els.tlBar.hidden) return;
-    var t = tlCursor();
-    els.tlDate.textContent = new Date(t).toISOString().slice(0, 7);
-    els.tlPlayBtn.innerHTML = tlState.playing ? "&#10074;&#10074;" : "&#9654;";
-  }
-
-  function stopTimelinePlay() {
-    tlState.playing = false;
-    if (tlState.raf) cancelAnimationFrame(tlState.raf);
-    tlState.raf = null;
-    updateTlReadout();
-  }
-
-  els.tlScrub.addEventListener("input", function () {
-    stopTimelinePlay();
-    applyGraphFilters();
-  });
-
-  els.tlPlayBtn.addEventListener("click", function () {
-    if (tlState.playing) { stopTimelinePlay(); return; }
-    tlState.playing = true;
-    var start = null, dur = 12000, from = parseInt(els.tlScrub.value, 10);
-    if (from >= 1000) { from = 0; }
-    function step(ts) {
-      if (!tlState.playing) return;
-      if (!start) start = ts;
-      var k = Math.min(1, from + ((ts - start) / dur) * 1000);
-      els.tlScrub.value = String(Math.round(k));
-      applyGraphFilters();
-      if (k >= 1000) { stopTimelinePlay(); return; }
-      tlState.raf = requestAnimationFrame(step);
-    }
-    tlState.raf = requestAnimationFrame(step);
-  });
-
-  // ---- type chips ----------------------------------------------------------
-  Array.prototype.forEach.call(
-    document.querySelectorAll(".gchip[data-gtype]"), function (chip) {
-    chip.addEventListener("click", function () {
-      var g = chip.getAttribute("data-gtype");
-      typeVis[g] = !typeVis[g];
-      chip.classList.toggle("active", typeVis[g]);
-      chip.setAttribute("aria-pressed", String(typeVis[g]));
-      applyGraphFilters();
-    });
-  });
-
-  // ---- PNG export -----------------------------------------------------------
-  els.graphPngBtn.addEventListener("click", function () {
-    if (!cy) return;
-    var png = cy.png({ bg: "#0a0c0a", full: true, scale: 2 });
-    var a = document.createElement("a");
-    a.href = png;
-    a.download = "signals-ops-graph.png";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    toast("Graph exported as PNG", "success");
-  });
-
-  // ---- search ----------------------------------------------------------------
-  var searchTimer = null;
-  els.graphSearch.addEventListener("input", function () {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(applySearchDim, 120);
-  });
-  els.graphSearch.addEventListener("keydown", function (ev) {
-    if (ev.key === "Escape") {
-      els.graphSearch.value = "";
-      applySearchDim();
-    } else if (ev.key === "Enter") {
-      var q = els.graphSearch.value.trim().toLowerCase();
-      if (!q || !cy) return;
-      var hit = cy.nodes().filter(function (n) {
-        if (n.style("display") === "none") return false;
-        var d = n.data();
-        var hay = ((d.label || "") + " " + (d.sublabel || "") + " " +
-          ((d.data || {}).category || "")).toLowerCase();
-        return hay.indexOf(q) !== -1;
-      })[0];
-      if (hit) {
-        cy.animate({ center: { eles: hit }, zoom: Math.max(cy.zoom(), 1.1) },
-                   { duration: 250 });
-        hit.trigger("tap");
-      } else {
-        toast("No node matches “" + q + "”", "error");
-      }
-    }
-  });
-
-  function applySearchDim() {
-    if (!cy) return;
-    var q = els.graphSearch.value.trim().toLowerCase();
-    if (!q) {
-      cy.nodes().removeClass("srch-out");
-      return;
-    }
-    cy.batch(function () {
-      cy.nodes().forEach(function (n) {
-        if (n.style("display") === "none") return;
-        var d = n.data();
-        var hay = ((d.label || "") + " " + (d.sublabel || "") + " " +
-          ((d.data || {}).category || "")).toLowerCase();
-        n.removeClass("srch-out");
-        if (hay.indexOf(q) === -1) n.addClass("srch-out");
-      });
-    });
-  }
-
-  els.confSlider.addEventListener("input", applyGraphFilters);
-  els.nodeConfSlider.addEventListener("input", applyGraphFilters);
-
-  els.graphFitBtn.addEventListener("click", function () {
-    if (cy) cy.fit(null, 40);
-  });
-
-  // Zoom around the graph's visual center so the framing stays stable.
-  function zoomGraph(factor) {
-    if (!cy) return;
-    cy.zoom({
-      level: cy.zoom() * factor,
-      renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 }
-    });
-  }
-  els.graphZoomInBtn.addEventListener("click", function () { zoomGraph(1.3); });
-  els.graphZoomOutBtn.addEventListener("click", function () { zoomGraph(1 / 1.3); });
-
-  els.graphLabelsBtn.addEventListener("click", function () {
-    graphLabelsOn = !graphLabelsOn;
-    els.graphLabelsBtn.setAttribute("aria-pressed", String(graphLabelsOn));
-    if (cy) {
-      cy.style()
-        .selector("node")
-        .style("label", graphLabelsOn ? "data(labelText)" : "")
-        .update();
-    }
-  });
-
-  function showNodePanel(n, note) {
-    var d = n.data();
-    // Tint the drawer (top border, type dot, avatar ring) to match the node.
-    els.nodePanel.style.setProperty("--np-accent", d.color || "#5ea0ff");
-    var body = els.nodePanelBody;
-    body.innerHTML = "";
-    if (d.avatar) {
-      var img = document.createElement("img");
-      img.src = d.avatar; img.alt = "";
-      img.onerror = function () { img.style.display = "none"; };
-      body.appendChild(img);
-    }
-    var h = document.createElement("h3");
-    h.textContent = d.label || d.id;
-    body.appendChild(h);
-    var t = document.createElement("div");
-    t.className = "np-type";
-    t.textContent = d.type + (d.sublabel ? " · " + d.sublabel : "");
-    body.appendChild(t);
-    if (d.confidence != null) {
-      var band = confidenceBand(d.confidence);
-      var chip = document.createElement("span");
-      chip.className = "conf-band " + band.cls;
-      chip.textContent = band.label + " confidence · " + d.confidence + "%";
-      body.appendChild(chip);
-    }
-    if (note) {
-      var pnote = document.createElement("span");
-      pnote.className = "conf-band conf-med";
-      pnote.textContent = note;
-      body.appendChild(pnote);
-    }
-
-    function addField(k, v, isLink) {
-      if (v === null || v === undefined || v === "") return;
-      var row = document.createElement("div");
-      row.className = "np-row";
-      var key = document.createElement("div");
-      key.className = "k"; key.textContent = k;
-      var val = document.createElement("div");
-      if (isLink) {
-        var a = document.createElement("a");
-        a.href = v; a.target = "_blank"; a.rel = "noopener noreferrer";
-        a.textContent = v;
-        val.appendChild(a);
-      } else {
-        val.textContent = typeof v === "object" ? JSON.stringify(v) : String(v);
-      }
-      row.appendChild(key); row.appendChild(val);
-      body.appendChild(row);
-    }
-
-    addField("profile", d.url, true);
-    addField("engines", (d.engines || []).join(", "));
-    addField("created", d.created_at ? String(d.created_at).slice(0, 10) : null);
-    var data = d.data || {};
-    Object.keys(data).forEach(function (k) {
-      if (data[k] === null || data[k] === undefined || data[k] === "") return;
-      if (k === "gravatar" && typeof data[k] === "object") {
-        var g = data[k] || {};
-        addField("gravatar name", g.display_name || g.full_name);
-        addField("gravatar", g.profile_url, true);
-        addField("gravatar bio", g.about);
-        addField("location", g.location);
-        return;
-      }
-      addField(k.replace(/_/g, " "), data[k]);
-    });
-    // incident edges
-    var inc = n.connectedEdges().map(function (e) {
-      return (e.data("source") === n.id() ? "→ " : "← ") +
-        (e.data("source") === n.id() ? e.target().data("label") : e.source().data("label")) +
-        " (" + e.data("confidence") + "%: " + (e.data("rationale") || "") + ")";
-    });
-    if (inc.length) addField("links", inc.join("\n"));
-
-    // investigator note (persisted per investigation)
-    var notes = loadNotes();
-    var nwrap = document.createElement("div");
-    nwrap.className = "np-note";
-    var nlabel = document.createElement("div");
-    nlabel.className = "k";
-    nlabel.textContent = "note";
-    var nta = document.createElement("textarea");
-    nta.value = notes[n.id()] || "";
-    nta.placeholder = "Investigator note for this entity…";
-    nta.rows = 3;
-    var nsave = document.createElement("button");
-    nsave.type = "button";
-    nsave.className = "btn btn-ghost btn-sm";
-    nsave.textContent = "Save note";
-    nsave.addEventListener("click", function () {
-      saveNote(n.id(), nta.value);
-      toast(nta.value.trim() ? "Note saved" : "Note cleared", "success");
-    });
-    nwrap.appendChild(nlabel);
-    nwrap.appendChild(nta);
-    nwrap.appendChild(nsave);
-    body.appendChild(nwrap);
-
-    els.nodePanel.classList.add("open");
-  }
-
-  els.nodePanelClose.addEventListener("click", function () {
-    els.nodePanel.classList.remove("open");
-    if (cy) cy.elements().removeClass("hl dimmed");
-  });
-
-  function renderGraph(data) {
-    graphData = data;
-    els.graphPanel.style.display = "block";
-    if (typeof cytoscape === "undefined") {
-      els.graphFallback.style.display = "block";
-      return;
-    }
-    if (!fcoseRegistered && typeof window.cytoscapeFcose !== "undefined" &&
-        typeof window.coseBase !== "undefined" &&
-        typeof window.layoutBase !== "undefined") {
-      try { cytoscape.use(window.cytoscapeFcose); fcoseRegistered = true; }
-      catch (e) { /* fall back to cose below */ }
-    }
-    var elements = [];
-    var notes = loadNotes();
-    data.nodes.forEach(function (n) {
-      if (dismissedIds[n.id]) return;   // hidden via right-click this session
-      var nd = {
-        id: n.id, type: n.type, label: n.label, sublabel: n.sublabel || "",
-        url: n.url || "",
-        confidence: n.confidence, engines: n.engines || [],
-        created_at: n.created_at || null,
-        data: n.data || {},
-        color: nodeColor(n), size: nodeSize(n),
-        labelText: n.label + (n.sublabel ? "\n" + n.sublabel : "")
-      };
-      // Only set `avatar` when there is a real URL. An empty string still
-      // matches the `node[avatar]` style rule, and cytoscape then throws
-      // parsing "" as a background-image — which silently killed the graph.
-      if (n.avatar) nd.avatar = n.avatar;
-      var el = { data: nd, classes: "g-" + typeGroup(n.type) };
-      // Run-diff markers from the baseline scan.
-      if (nd.data.is_new) el.classes += " is-new";
-      if (nd.data.gone) { el.classes += " gone-node"; nd.labelText += "\n[GONE]"; }
-      if (notes[nd.id]) el.classes += " noted";
-      // Age ring (underlay): neutral encoding — amber = fresh account,
-      // greys = older. Undated nodes get no ring.
-      var band = ageBand(nd.created_at);
-      if (band >= 0) {
-        el.data.ageBand = band;
-        el.classes += " aged";
-      }
-      elements.push(el);
-    });
-    data.edges.forEach(function (e) {
-      elements.push({ data: {
-        id: e.id, source: e.source, target: e.target,
-        confidence: e.confidence, rationale: e.rationale
-      }});
-    });
-    if (cy) { cy.destroy(); cy = null; }
-    selNode = null;
-    hideGraphCtx();
-    els.graphFocusChip.hidden = true;
-    var lname = els.graphLayout.value;
-    if (lname === "fcose" && !fcoseRegistered) lname = "cose";
-    cy = cytoscape({
-      container: els.cy,
-      elements: elements,
-      wheelSensitivity: 0.3,
-      style: [
-        { selector: "node", style: {
-          "background-color": "data(color)",
-          "width": "data(size)", "height": "data(size)",
-          "label": "data(labelText)",
-          "color": "#e8eee6", "font-size": 9, "line-height": 1.3,
-          "font-family": "'JetBrains Mono', ui-monospace, monospace",
-          "min-zoomed-font-size": 7,
-          "text-wrap": "wrap", "text-max-width": "110px",
-          "text-valign": "bottom", "text-margin-y": 5,
-          "text-background-color": "#0a0c0a", "text-background-opacity": 0.82,
-          "text-background-padding": 3, "text-background-shape": "roundrectangle",
-          "border-width": 1.5, "border-color": "data(color)", "border-opacity": 0.55,
-          "background-opacity": 0.95,
-          "transition-property": "border-width, border-color, opacity",
-          "transition-duration": 120
-        }},
-        // Age rings: an underlay halo whose colour/size encodes account age.
-        { selector: "node.aged", style: {
-          "underlay-color": "mapData(ageBand, 0, 2, #e0a63d, #3d463d)",
-          "underlay-padding": "mapData(ageBand, 0, 2, 7px, 2px)",
-          "underlay-opacity": 0.5
-        }},
-        // Contact identifiers read as tags; domains as hexagons; IPs as diamonds.
-        { selector: 'node[type="email"]', style: { "shape": "round-rectangle" } },
-        { selector: 'node[type="phone"]', style: { "shape": "round-rectangle" } },
-        { selector: 'node[type="registration"]', style: { "shape": "round-rectangle" } },
-        { selector: 'node[type="nameserver"]', style: { "shape": "round-rectangle" } },
-        { selector: 'node[type="domain"]', style: { "shape": "hexagon" } },
-        { selector: 'node[type="ip"]', style: { "shape": "diamond" } },
-        // Handle pivots: square, amber outline — the reuse signal.
-        { selector: 'node[type="handle"]', style: {
-          "shape": "cut-rectangle", "border-width": 2,
-          "border-color": "#e0a63d", "border-opacity": 0.9
-        }},
-        { selector: 'node[type="person"]', style: {
-          "border-width": 3, "border-color": "#e8eee6", "border-opacity": 1,
-          "font-size": 12, "font-weight": "bold"
-        }},
-        { selector: "node[avatar]", style: {
-          "background-image": "data(avatar)",
-          "background-fit": "cover", "background-clip": "node",
-          "background-image-crossorigin": "anonymous"
-        }},
-        { selector: "edge", style: {
-          "width": "mapData(confidence, 0, 100, 1, 4.5)",
-          "line-color": "#26302a", "curve-style": "bezier",
-          "opacity": 0.85,
-          "label": "data(confidence)", "font-size": 8, "color": "#9aa79a",
-          "min-zoomed-font-size": 8,
-          "font-family": "'JetBrains Mono', ui-monospace, monospace",
-          "text-rotation": "autorotate",
-          "text-background-color": "#0a0c0a", "text-background-opacity": 0.75,
-          "text-background-padding": 1
-        }},
-        { selector: "edge[confidence >= 60]", style: { "line-color": "#57d96a" } },
-        { selector: "edge[confidence < 40]", style: { "line-style": "dashed", "opacity": 0.6 } },
-        { selector: "node:selected", style: { "border-color": "#ffffff", "border-width": 3, "border-opacity": 1 } },
-        { selector: "node.hl", style: { "border-color": "#e8eee6", "border-width": 3, "border-opacity": 1 } },
-        { selector: "edge.hl", style: { "line-color": "#e0a63d", "opacity": 1, "width": 3 } },
-        { selector: ".dimmed", style: { "opacity": 0.12 } },
-        { selector: ".srch-out", style: { "opacity": 0.15 } },
-        // run-diff markers
-        { selector: "node.is-new", style: {
-          "border-color": "#57d96a", "border-width": 3, "border-opacity": 1,
-          "color": "#57d96a"
-        }},
-        { selector: "node.gone-node", style: {
-          "border-style": "dashed", "border-color": "#e05a4e",
-          "background-color": "#e05a4e", "background-opacity": 0.35,
-          "color": "#e05a4e"
-        }},
-        // annotated nodes get an amber label tick via ✎ suffix (see saveNote)
-        { selector: 'node[type = "catparent"]', style: {
-          "shape": "round-rectangle",
-          "background-opacity": 0.04,
-          "border-width": 1, "border-color": "#2a352a", "border-opacity": 0.8,
-          "color": "#5f6b5f", "font-size": 10,
-          "text-valign": "top", "text-margin-y": -4,
-          "text-background-opacity": 0
-        }}
-      ],
-      layout: {
-        name: lname,
-        animate: true, animationDuration: 800,
-        nodeRepulsion: 12000, idealEdgeLength: 100, gravity: 0.35,
-        padding: 40,
-        // concentric options
-        concentric: function (n) { return n.data("confidence") || 40; },
-        levelWidth: function () { return 25; },
-        // breadthfirst options
-        roots: "#person", directed: false
-      }
-    });
-    initNavigator();
-    updateGraphStats();
-    var hasDiff = data.nodes.some(function (n) {
-      return (n.data || {}).is_new || (n.data || {}).gone;
-    });
-    els.graphChangesBtn.hidden = !hasDiff;
-    if (!hasDiff) { changesOnly = false; els.graphChangesBtn.setAttribute("aria-pressed", "false"); els.graphChangesBtn.classList.remove("active"); }
-    // Re-fit once painted and again when the animated layout settles — the
-    // panel may still be sizing when cytoscape initializes.
-    cy.on("layoutstop", function () { cy.fit(undefined, 40); });
-    requestAnimationFrame(function () {
-      if (cy) { cy.resize(); cy.fit(undefined, 40); }
-    });
-    setupTimeline(data);
-    applyEdgeFilter();
-    if (!graphLabelsOn) {
-      cy.style().selector("node").style("label", "").update();
-    }
-
-    // Selecting a node focuses its neighborhood; selecting a SECOND node while
-    // one is focused traces the strongest connection chain between them
-    // ("how does this registration tie back to the subject?"). Double-click
-    // isolates an ego view. Right-click opens the action menu.
-    var lastTap = { id: null, at: 0 };
-    cy.on("tap", "node", function (evt) {
-      var n = evt.target;
-      hideGraphCtx();
-      var now = Date.now();
-      if (lastTap.id === n.id() && now - lastTap.at < 350) {
-        focusEgo(n, evShifter() ? 2 : 1);
-        lastTap = { id: null, at: 0 };
-        return;
-      }
-      lastTap = { id: n.id(), at: now };
-      if (selNode && selNode !== n && selNode.inside()) {
-        highlightPath(selNode, n);
-        return;
-      }
-      selNode = n;
-      var hood = n.closedNeighborhood();
-      cy.elements().addClass("dimmed").removeClass("hl");
-      hood.removeClass("dimmed");
-      hood.nodes().addClass("hl");
-      hood.connectedEdges().removeClass("dimmed");
-      n.connectedEdges().addClass("hl");
-      showNodePanel(n);
-    });
-    cy.on("cxttap", "node", function (evt) {
-      showGraphCtx(evt.target, evt.renderedPosition || evt.cyRenderedPosition);
-    });
-    cy.on("cxttap", function (evt) {
-      if (evt.target === cy) hideGraphCtx();
-    });
-    cy.on("tap", function (evt) {
-      if (evt.target === cy) {
-        selNode = null;
-        exitEgo();
-        cy.elements().removeClass("hl dimmed");
-        els.nodePanel.classList.remove("open");
-      }
-    });
-    els.graphPanel.scrollIntoView({ behavior: "smooth" });
-  }
-
-  // Trace the shortest evidence chain between two nodes and light it up.
-  function highlightPath(a, b) {
-    var dij = cy.elements().dijkstra({ root: a, directed: false });
-    var path = dij.pathTo(b);
-    if (!path || path.length === 0) {
-      toast("No connection found between those nodes", "error");
-      return;
-    }
-    cy.elements().addClass("dimmed").removeClass("hl");
-    path.removeClass("dimmed");
-    path.nodes().addClass("hl");
-    path.edges().addClass("hl");
-    var weakest = null;
-    path.edges().forEach(function (e) {
-      var c = e.data("confidence") || 0;
-      if (weakest === null || c < weakest) weakest = c;
-    });
-    showNodePanel(b, weakest === null ? null :
-      "path via " + (path.nodes().length - 1) + " hops · weakest link " +
-      weakest + "%");
-    selNode = null;
-  }
-
-  /* ---------------- workbench: notes, dismiss, ego, cluster, exports ------ */
-
-  var dismissedIds = {};     // session-level: hidden via right-click
-  var changesOnly = false;
-  var clusterMode = false;
-
-  function evShifter() {
-    return window.event ? window.event.shiftKey : false;   // dblclick modifier
-  }
-
   // ---- investigator notes (per investigation, in localStorage) ------------
   function notesKey() { return "sop.notes." + (currentInvId || "none"); }
   function loadNotes() {
@@ -2698,348 +2044,19 @@
     if (text && text.trim()) notes[nodeId] = text.trim();
     else delete notes[nodeId];
     try { localStorage.setItem(notesKey(), JSON.stringify(notes)); } catch (e) {}
-    if (cy) {
-      var n = cy.getElementById(nodeId);
-      if (n.nonempty()) {
-        n.toggleClass("noted", !!notes[nodeId]);
-        n.data("labelText",
-          (n.data("label") || "") + (n.data("sublabel") ? "\n" + n.data("sublabel") : "") +
-          (notes[nodeId] ? " ✎" : ""));
-      }
-    }
   }
 
-  // ---- right-click action menu --------------------------------------------
-  function hideGraphCtx() {
-    els.graphCtx.hidden = true;
-  }
-  function showGraphCtx(node, rpos) {
-    if (!node.inside()) return;
-    var d = node.data();
-    var items = [];
-    if (d.url) items.push({ label: "Open profile ↗", act: function () {
-      window.open(d.url, "_blank", "noopener");
-    }});
-    if (d.url) items.push({ label: "Copy URL", act: function () {
-      (navigator.clipboard ? navigator.clipboard.writeText(d.url) :
-        Promise.reject()).then(function () { toast("URL copied", "success"); },
-          function () { toast("Clipboard unavailable", "error"); });
-    }});
-    var handle = d.type === "handle" ? d.label :
-      ((d.type === "account" && !d.gone && d.label) ? d.label : null);
-    if (handle) items.push({ label: "Investigate this handle", act: function () {
-      pivotToForm(handle);
-    }});
-    items.push({ label: "Trace path from here", act: function () {
-      selNode = node;
-      toast("Now click another node to trace the path between them", "info");
-    }});
-    items.push({ label: loadNotes()[node.id()] ? "Edit note" : "Add note",
-                 act: function () { showNodePanel(node); } });
-    if (!d.gone) items.push({ label: "Hide from graph", act: function () {
-      dismissedIds[node.id] = true;
-      node.remove();
-      updateGraphStats();
-      toast("Hidden for this session (returns on next render)", "info");
-    }});
-
-    var menu = els.graphCtx;
-    menu.innerHTML = "";
-    items.forEach(function (it) {
-      var b = document.createElement("button");
-      b.type = "button";
-      b.textContent = it.label;
-      b.addEventListener("click", function () {
-        hideGraphCtx();
-        it.act();
-      });
-      menu.appendChild(b);
-    });
-    menu.hidden = false;
-    var wrap = els.graphWrap.getBoundingClientRect();
-    var x = Math.min(rpos.x + wrap.left + 8, window.innerWidth - 190);
-    var y = Math.min(rpos.y + wrap.top + 8, window.innerHeight - 40 - items.length * 30);
-    menu.style.left = x + "px";
-    menu.style.top = y + "px";
-  }
-  document.addEventListener("click", function (ev) {
-    if (!els.graphCtx.hidden && !els.graphCtx.contains(ev.target)) hideGraphCtx();
-  });
-
-  function pivotToForm(handle) {
-    switchTab("investigate");
-    els.tabInv.click();                       // ensure Investigation mode
-    els.invUsernames.value = handle;
-    document.getElementById("controls").scrollIntoView({ behavior: "smooth" });
-    setTimeout(function () { els.invUsernames.focus(); }, 250);
-    toast("Handle loaded — review parameters, then Start investigation", "info");
-  }
-
-  // ---- ego view -------------------------------------------------------------
-  function focusEgo(n, depth) {
-    var hood = n.closedNeighborhood();
-    if (depth >= 2) hood = hood.union(hood.neighborhood().closedNeighborhood());
-    cy.elements().addClass("dimmed").removeClass("hl");
-    hood.removeClass("dimmed");
-    hood.nodes().addClass("hl");
-    els.graphFocusChip.hidden = false;
-    els.graphFocusChip.querySelector(".fc-label").textContent =
-      "ego ×" + depth + ": " + (n.data("label") || n.id());
-    cy.animate({ fit: { eles: hood, padding: 50 } }, { duration: 250 });
-    showNodePanel(n);
-  }
-  function exitEgo() {
-    if (els.graphFocusChip.hidden) return;
-    els.graphFocusChip.hidden = true;
-    cy.elements().removeClass("dimmed hl");
-    if (cy) cy.fit(undefined, 40);
-  }
-  els.graphFocusClose.addEventListener("click", exitEgo);
-
-  // ---- cluster by category (compound nodes) ---------------------------------
-  function setCluster(on) {
-    clusterMode = on;
-    els.graphClusterBtn.classList.toggle("active", on);
-    els.graphClusterBtn.setAttribute("aria-pressed", String(on));
-    if (!cy) return;
-    var parents = {};
-    cy.batch(function () {
-      cy.nodes('[type = "account"], [type = "registration"]').forEach(function (n) {
-        var cat = (n.data("data") || {}).category;
-        var pid = cat ? "cat:" + cat : null;
-        if (on && !pid) { n.move({ parent: null }); return; }
-        if (on && !parents[pid]) {
-          parents[pid] = true;
-          cy.add({ group: "nodes", data: { id: pid, type: "catparent",
-                   label: String(cat).toUpperCase(),
-                   labelText: String(cat).toUpperCase() },
-                   classes: "g-catparent" });
-        }
-        n.move({ parent: on ? pid : null });
-      });
-      if (!on) cy.nodes('[type = "catparent"]').remove();
-    });
-    runLayout();
-  }
-
-  // Re-run the current layout without refetching.
-  function runLayout() {
-    if (!cy) return;
-    var lname = els.graphLayout.value;
-    if (lname === "fcose" && !fcoseRegistered) lname = "cose";
-    var opts = {
-      name: lname, animate: true, animationDuration: 600,
-      nodeRepulsion: 12000, idealEdgeLength: 100, gravity: 0.35,
-      padding: 40,
-      concentric: function (n) { return n.data("confidence") || 40; },
-      levelWidth: function () { return 25; },
-      roots: "#person", directed: false
-    };
-    cy.layout(opts).one("layoutstop", function () { cy.fit(undefined, 40); }).run();
-  }
-
-  els.graphLayout.addEventListener("change", runLayout);
-  els.graphClusterBtn.addEventListener("click", function () {
-    setCluster(!clusterMode);
-  });
-
-  // ---- changes-only filter ----------------------------------------------------
-  els.graphChangesBtn.addEventListener("click", function () {
-    changesOnly = !changesOnly;
-    els.graphChangesBtn.classList.toggle("active", changesOnly);
-    els.graphChangesBtn.setAttribute("aria-pressed", String(changesOnly));
-    applyGraphFilters();
-    if (changesOnly) {
-      var interesting = cy.nodes(".is-new, .gone-node");
-      if (interesting.nonempty()) {
-        cy.animate({ fit: { eles: interesting.closedNeighborhood(), padding: 70 } },
-                   { duration: 250 });
-      }
-    }
-  });
-
-  // extend visibility with the changes-only gate
-  var _nodeVisibleBase = nodeVisible;
-  nodeVisible = function (n) {
-    if (changesOnly) {
-      var dd = n.data();
-      var isNew = (dd.data || {}).is_new, gone = (dd.data || {}).gone;
-      if (!(isNew || gone || dd.type === "person")) return false;
-    }
-    return _nodeVisibleBase(n);
-  };
-
-  // ---- stats strip --------------------------------------------------------------
-  function updateGraphStats() {
-    if (!cy) { els.graphStats.textContent = ""; return; }
-    var confirmed = 0, flagged = 0, fresh = 0, gone = 0;
-    cy.nodes().forEach(function (n) {
-      var v = (n.data("verification") || (n.data("data") || {}).verification);
-      if (v === "confirmed") confirmed++;
-      if (v === "likely_false_positive") flagged++;
-      if ((n.data("data") || {}).is_new) fresh++;
-      if ((n.data("data") || {}).gone) gone++;
-    });
-    var parts = [
-      cy.nodes().length + "N",
-      cy.edges().length + "E",
-      confirmed + "✓",
-      flagged ? flagged + "⚠" : null,
-      fresh ? "+" + fresh + " new" : null,
-      gone ? gone + " gone" : null
-    ].filter(Boolean);
-    els.graphStats.textContent = parts.join(" · ");
-  }
-
-  // ---- minimap --------------------------------------------------------------------
-  var navigatorReady = false;
-  function initNavigator() {
-    if (navigatorReady || typeof cy.navigator !== "function") return;
-    try {
-      cy.navigator({ container: els.cyNav, viewLiveFramerate: 0 });
-      navigatorReady = true;
-      els.cyNav.style.display = "block";
-    } catch (e) { /* never block the graph on a minimap */ }
-  }
-
-  // ---- exports: CSV + GraphML -------------------------------------------------------
-  function download(name, mime, content) {
-    var blob = new Blob([content], { type: mime });
-    var a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = name;
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 500);
-  }
-
-  function csvCell(v) {
-    if (v === null || v === undefined) return "";
-    v = String(v);
-    return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
-  }
-
-  els.graphCsvBtn.addEventListener("click", function () {
-    if (!graphData) return;
-    var rows = [["id", "type", "label", "site", "url", "confidence",
-                 "verification", "category", "created_at", "is_new", "gone"]];
-    graphData.nodes.forEach(function (n) {
-      var d = n.data || {};
-      rows.push([n.id, n.type, n.label, d.site || n.sublabel || "", n.url || "",
-        n.confidence, d.verification || n.verification || "",
-        d.category || "", n.created_at || "", d.is_new ? "yes" : "",
-        d.gone ? "yes" : ""]);
-    });
-    graphData.edges.forEach(function (e) {
-      rows.push([e.id, "edge", e.rationale || "", "", "",
-        e.confidence, "", "", "", "", ""]);
-    });
-    download("signals-ops-graph.csv", "text/csv",
-      rows.map(function (r) { return r.map(csvCell).join(","); }).join("\n"));
-    toast("Graph exported as CSV", "success");
-  });
-
-  els.graphGraphmlBtn.addEventListener("click", function () {
-    if (!graphData) return;
-    var esc = function (s) {
-      return String(s === null || s === undefined ? "" : s)
-        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;");
-    };
-    var keys = ["label", "type", "site", "url", "confidence",
-                "verification", "category", "created_at"];
-    var xml = '<?xml version="1.0" encoding="UTF-8"?>\n' +
-      '<graphml xmlns="http://graphml.graphdrawing.org/xmlns">\n';
-    keys.forEach(function (k) {
-      xml += '  <key id="d_' + k + '" for="node" attr.name="' + k +
-             '" attr.type="string"/>\n';
-    });
-    xml += '  <key id="d_conf" for="edge" attr.name="confidence" attr.type="double"/>\n' +
-           '  <key id="d_rat" for="edge" attr.name="rationale" attr.type="string"/>\n' +
-           '  <graph id="G" edgedefault="undirected">\n';
-    graphData.nodes.forEach(function (n) {
-      var d = n.data || {};
-      xml += '    <node id="' + esc(n.id) + '">\n';
-      var vals = { label: n.label, type: n.type, site: d.site || n.sublabel || "",
-                   url: n.url || "", confidence: n.confidence,
-                   verification: d.verification || n.verification || "",
-                   category: d.category || "", created_at: n.created_at || "" };
-      keys.forEach(function (k) {
-        if (vals[k] !== "" && vals[k] !== null && vals[k] !== undefined) {
-          xml += '      <data key="d_' + k + '">' + esc(vals[k]) + '</data>\n';
-        }
-      });
-      xml += '    </node>\n';
-    });
-    graphData.edges.forEach(function (e) {
-      xml += '    <edge source="' + esc(e.source) + '" target="' + esc(e.target) + '">\n' +
-             '      <data key="d_conf">' + esc(e.confidence) + '</data>\n' +
-             (e.rationale ? '      <data key="d_rat">' + esc(e.rationale) + '</data>\n' : "") +
-             '    </edge>\n';
-    });
-    xml += '  </graph>\n</graphml>\n';
-    download("signals-ops-graph.graphml", "application/xml", xml);
-    toast("GraphML exported — imports into Gephi/yEd", "success");
-  });
-
-  // ---- fullscreen ---------------------------------------------------------------------
-  els.graphFsBtn.addEventListener("click", function () {
-    els.graphPanel.classList.toggle("fs");
-    setTimeout(function () {
-      if (cy) { cy.resize(); cy.fit(undefined, 40); }
-    }, 80);
-  });
-
-  // ---- help ------------------------------------------------------------------------------
-  els.graphHelpBtn.addEventListener("click", function () {
-    els.graphHelp.hidden = !els.graphHelp.hidden;
-  });
-
-  // ---- keyboard shortcuts (ignored while typing) ------------------------------------------
-  document.addEventListener("keydown", function (ev) {
-    if (ev.key === "Escape") {
-      if (!els.graphCtx.hidden) { hideGraphCtx(); return; }
-      if (!els.graphHelp.hidden) { els.graphHelp.hidden = true; return; }
-      if (els.graphPanel.classList.contains("fs")) {
-        els.graphFsBtn.click();
-        return;
-      }
-      exitEgo();
-      return;
-    }
-    var tag = (ev.target.tagName || "").toLowerCase();
-    if (tag === "input" || tag === "textarea" || tag === "select") return;
-    if (els.graphPanel.style.display !== "block") return;
-    switch (ev.key.toLowerCase()) {
-      case "f": if (cy) cy.fit(undefined, 40); break;
-      case "l": els.graphLabelsBtn.click(); break;
-      case "e": els.graphPngBtn.click(); break;
-      case "s": ev.preventDefault(); els.graphSearch.focus(); break;
-      case "c": setCluster(!clusterMode); break;
-      case "1": case "2": case "3": case "4": {
-        var chips = document.querySelectorAll(".gchip");
-        var chip = chips[parseInt(ev.key, 10) - 1];
-        if (chip) chip.click();
-        break;
-      }
-    }
-  });
-
-  // The "Graph" action is now the promoted first-class Case graph workspace.
-  // (renderGraph / the inline Cytoscape panel remain for the fallback path but
-  // are no longer the primary surface.)
+  // The "Graph" action opens the first-class Case graph workspace.
   els.graphBtn.addEventListener("click", function () {
     if (!currentInvId) { toast("No investigation selected", "error"); return; }
     switchTab("casegraph");
   });
 
   /* ==================== case graph (WebGL workspace) ==================== */
-  // Increment 0 — substrate proof. Renders the EXISTING /graph payload with
-  // sigma.js (WebGL) on a deterministic radial layout (BFS hops from the
-  // person node). Reuses nodeColor()/nodeSize() so the SIGNALS OPS colour
-  // discipline (green = verified only) carries over unchanged. Tiers, on-canvas
-  // cards, correlation bonds and the full evidence trail arrive in later
-  // increments. Fully additive: the inline Cytoscape panel above is untouched.
+  // Renders the /graph payload with sigma.js (WebGL) on a deterministic radial
+  // layout (BFS hops from the person node). Reuses nodeColor()/nodeSize() so
+  // the SIGNALS OPS colour discipline (green = verified only) carries over.
+  // This is the only graph surface; the inline Cytoscape panel was removed.
   var cgSigma = null;
   var cgData = null;   // last-rendered payload (for filter re-application)
   var cgEls = {
@@ -3390,8 +2407,9 @@
 
     var av = document.createElement("div");
     av.className = "cg-card-av";
-    if (node.avatar) {
-      av.style.backgroundImage = 'url("' + node.avatar + '")';
+    var avatarUrl = safeHttp(node.avatar);
+    if (avatarUrl) {
+      av.style.backgroundImage = 'url("' + avatarUrl + '")';
     } else {
       av.textContent = (node.label || node.id || "?").slice(0, 1).toUpperCase();
       av.style.color = accent;
@@ -3648,10 +2666,8 @@
       kk.className = "k"; kk.textContent = k;
       var vv = document.createElement("div");
       vv.className = "v";
-      if (link) {
-        var a = document.createElement("a");
-        a.href = v; a.target = "_blank"; a.rel = "noopener noreferrer";
-        a.textContent = v; vv.appendChild(a);
+      if (link && safeHttp(v)) {
+        vv.appendChild(linkOrText(v));
       } else {
         vv.textContent = typeof v === "object" ? JSON.stringify(v) : String(v);
       }
@@ -3759,15 +2775,12 @@
 
     if (node.url) {
       var link = section("Profile");
-      var a = document.createElement("a");
+      var a = linkOrText(node.url);
       a.className = "cg-insp-link";
-      a.href = node.url; a.target = "_blank"; a.rel = "noopener noreferrer";
-      a.textContent = node.url;
       link.appendChild(a);
     }
 
-    // Investigator note (persisted per investigation, shared with the inline
-    // graph's notes via the same localStorage key).
+    // Investigator note (persisted per investigation in localStorage).
     var nsec = section("Note");
     var notes = loadNotes();
     var ta = document.createElement("textarea");

@@ -7,11 +7,26 @@ not embedded. All dynamic values are HTML-escaped.
 from __future__ import annotations
 
 import html
+import re
 from typing import Any
 
 
 def _e(v: Any) -> str:
     return html.escape("" if v is None else str(v))
+
+
+_HTTP_SCHEME = re.compile(r"^https?://", re.IGNORECASE)
+
+
+def _href(v: Any) -> str:
+    """Escaped URL for an ``href``; ``""`` unless the scheme is http(s).
+
+    ``html.escape`` neutralises quotes, not ``javascript:`` — a profile field a
+    subject controls (Gravatar, adapter metadata) must never become a
+    navigable link in the analyst's browser.
+    """
+    s = "" if v is None else str(v).strip()
+    return html.escape(s) if _HTTP_SCHEME.match(s) else ""
 
 
 _CSS = """
@@ -64,9 +79,9 @@ def _verify_badge(row: dict) -> str:
 def _enrichment_cell(row: dict) -> str:
     enr = row.get("enrichment") or {}
     bits = []
-    img = enr.get("jsonld_image") or enr.get("og_image")
-    if img:
-        bits.append(f'<img class="avatar" src="{_e(img)}" alt="" loading="lazy">')
+    img = _href(enr.get("jsonld_image") or enr.get("og_image"))
+    if img:   # target-controlled: same scheme allow-list as links (F-6)
+        bits.append(f'<img class="avatar" src="{img}" alt="" loading="lazy">')
     name = enr.get("jsonld_name") or enr.get("og_title") or enr.get("title")
     if name:
         bits.append(f"<b>{_e(name)}</b>")
@@ -118,7 +133,7 @@ def render_report(run: dict) -> str:
         for r in accounts:
             parts.append(
                 f"<tr><td><b>{_e(r.get('site'))}</b></td>"
-                f"<td><a href='{_e(r.get('url'))}'>{_e(r.get('url'))}</a>"
+                f"<td><a href='{_href(r.get('url'))}'>{_e(r.get('url'))}</a>"
                 f"<div class='dim'>username: {_e(r.get('username'))} "
                 f"{_verify_badge(r)}</div></td>"
                 f"<td>{_engine_badges(r.get('engines') or [])}</td>"
@@ -140,7 +155,7 @@ def render_report(run: dict) -> str:
                 f"<tr><td><span class='badge variant'>variant</span> {_e(r.get('username'))}"
                 f"<div class='dim'>of {_e(r.get('variant_of'))}</div></td>"
                 f"<td><b>{_e(r.get('site'))}</b></td>"
-                f"<td><a href='{_e(r.get('url'))}'>{_e(r.get('url'))}</a></td>"
+                f"<td><a href='{_href(r.get('url'))}'>{_e(r.get('url'))}</a></td>"
                 f"<td>{_engine_badges(r.get('engines') or [])}</td></tr>"
             )
         parts.append("</table></div>")
@@ -151,12 +166,12 @@ def render_report(run: dict) -> str:
         grav = email.get("gravatar")
         parts.append("<div class='card'>")
         if grav:
-            av = grav.get("avatar_url")
+            av = _href(grav.get("avatar_url"))
             if av:
-                parts.append(f"<img class='avatar' src='{_e(av)}' alt=''>")
+                parts.append(f"<img class='avatar' src='{av}' alt=''>")
             parts.append(
                 f"<b>{_e(grav.get('display_name') or grav.get('full_name') or 'Gravatar profile')}</b> "
-                f"<a href='{_e(grav.get('profile_url'))}'>{_e(grav.get('profile_url'))}</a>"
+                f"<a href='{_href(grav.get('profile_url'))}'>{_e(grav.get('profile_url'))}</a>"
             )
             if grav.get("about"):
                 parts.append(f"<div class='dim'>{_e(grav['about'][:300])}</div>")
@@ -164,7 +179,7 @@ def render_report(run: dict) -> str:
             if accts:
                 parts.append("<div class='dim' style='margin-top:6px'>Linked accounts: "
                              + ", ".join(
-                                 f"<a href='{_e(a.get('url'))}'>{_e(a.get('name') or a.get('domain'))}</a>"
+                                 f"<a href='{_href(a.get('url'))}'>{_e(a.get('name') or a.get('domain'))}</a>"
                                  for a in accts
                              ) + "</div>")
         else:
@@ -197,7 +212,7 @@ def render_report(run: dict) -> str:
             for m in c.get("members", []):
                 parts.append(
                     f"<li><b>{_e(m.get('site'))}</b> — "
-                    f"<a href='{_e(m.get('url'))}'>{_e(m.get('url'))}</a></li>"
+                    f"<a href='{_href(m.get('url'))}'>{_e(m.get('url'))}</a></li>"
                 )
             parts.append("</ul>")
             for l in c.get("links", []):

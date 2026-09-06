@@ -348,22 +348,16 @@ identity graph → professional dossier → continuous monitoring.**
   pivot, phone intel, enrichment, correlation. Name candidates are fanned out
   across 3 Sherlock threads / 3 concurrent Maigret scans to keep wall time
   sane.
-- **Identity graph** (`recon/graph.py` + vendored Cytoscape 3.30.4, the fcose
-  layout chain and cytoscape-navigator in `static/vendor/`) — a link-analysis
-  workbench: person node in the center; **handle pivot nodes** group accounts
-  reusing the same handle; account nodes sized by confidence, colored by
-  verification verdict, with **age rings** when an adapter reported a creation
-  date; email/phone/registration/infrastructure nodes; edges carry confidence
-  + rationale. Tools: right-click node actions (open/copy URL,
-  **investigate-this-handle pivot**, notes persisted per case, session hide),
-  **run-diffing against the previous scan of the same subject** (green `is-new`
-  rings, red dashed `[GONE]` ghosts, changes-only filter), node search with
-  fly-to, type-group toggles, two-click path tracing with weakest-link
-  readout, ego view on double-click, cluster-by-category compound layout,
-  five layout modes, minimap, PNG/CSV/GraphML export, fullscreen mode,
-  keyboard shortcuts (`?` popover), confidence sliders, and a **timeline
-  scrubber** that grows the graph as dated accounts were created (appears at
-  ≥3 dated nodes).
+- **Case graph** (`recon/graph.py` + vendored sigma.js 2.4.0 and graphology
+  0.25.4 in `static/vendor/`) — a WebGL link-analysis workspace: person node
+  in the centre; **handle pivot nodes** group accounts reusing the same handle;
+  account nodes sized by confidence and coloured by verification tier
+  (green is reserved for verified); email/phone/registration/infrastructure
+  nodes; edges carry confidence + rationale. Tools: an evidence inspector with
+  investigator notes persisted per case, **run-diffing against the previous
+  scan of the same subject** (changes-only filter), node search, tier
+  toggles, ego view on double-click, PNG/CSV/GraphML export, and a **timeline
+  scrubber** that grows the graph as dated accounts were created.
 - **Dossier report** (`recon/dossier.py`) — print-friendly
   (`@media print`, no external assets) professional report: CONFIDENTIAL cover
   block, auto-generated executive summary, digital-footprint score (0-100,
@@ -409,8 +403,8 @@ rows keep working. `/api/recon/stream` and the classic endpoints are
 unchanged.
 
 Graceful degradation: `phonenumbers` missing → phone pivot returns an
-"unavailable" result; `cytoscape.min.js` missing → the graph panel shows a
-fallback notice; everything else already degraded per-engine.
+"unavailable" result; `sigma.min.js`/`graphology.umd.min.js` missing → the
+case graph shows a fallback notice; everything else already degraded per-engine.
 
 ### Investigation intelligence: exposure, timeline, connections
 
