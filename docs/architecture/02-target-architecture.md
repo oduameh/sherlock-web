@@ -289,6 +289,8 @@ service worker; `noopener noreferrer` on every external link.
 * Golden tests for dossier/report rendering (escaping, empty summary, rate-limited holehe).
 * CI: `ruff`, `pytest`, `node --check`, `pip-audit`; dev requirements include the stealth
   extra (or the two scrapling-dependent tests `importorskip`).
+* **Merge gate**: `./scripts/gate.sh` runs the same checks locally and exits non-zero on the
+  first failure; a merge is never issued from a script that does not gate on it.
 
 ---
 
