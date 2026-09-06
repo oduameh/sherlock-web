@@ -1955,8 +1955,22 @@
       stopInvestigation();
       loadHistory();
     });
+    invEs.addEventListener("queued", function (e) {
+      var d = JSON.parse(e.data);
+      els.overallText.textContent = "Investigation #" + invId +
+        " queued — " + d.max_concurrent + " already running…";
+    });
     invEs.onerror = function () {
-      if (invEs && invEs.readyState === EventSource.CLOSED) setInvRunning(false);
+      // Never let EventSource auto-reconnect: the server refuses to restart a
+      // non-pending investigation (409), and a lost connection cancels the run
+      // server-side, so a reconnect could only ever fail or re-run the case.
+      if (!invEs) return;
+      var lost = invEs.readyState !== EventSource.CLOSED;
+      stopInvestigation();
+      els.overallText.textContent = lost
+        ? "Connection to the investigation stream was lost — the run was cancelled."
+        : "Investigation stream closed.";
+      toast(lost ? "Stream lost; investigation cancelled." : "Stream closed.", "error");
     };
   }
 

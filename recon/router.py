@@ -546,6 +546,7 @@ class RunRouter:
         # racing concurrent read-modify-write on the same row — observations are
         # buffered under this lock and flushed once in finish().
         self._lock = threading.Lock()
+        self._finished = False          # finish() is idempotent (see pipeline)
         self._buffer: dict[tuple[str, str], list[dict]] = {}
         self.proxy: Optional[str] = None
         pool = proxy_pool if proxy_pool is not None else ProxyPool()
@@ -645,6 +646,9 @@ class RunRouter:
         if self.disabled:
             return
         with self._lock:
+            if self._finished:
+                return
+            self._finished = True
             buffered, self._buffer = self._buffer, {}
         if buffered:
             self.store.record_batch(buffered)

@@ -527,6 +527,13 @@ async def run_pipeline(
     # open-circuit sites and records every observation the engines produce
     # (disabled / no-op when the DB is unavailable).
     router = RunRouter(db_path, emit=emit)
+    # Flush routing observations on EVERY exit — a cancelled or crashed run
+    # used to skip router.finish() and lose the whole run's site-health data.
+    # finish() is idempotent, so the normal call at the end stays as is.
+    _task = asyncio.current_task()
+    if _task is not None:
+        _task.add_done_callback(lambda _t, _r=router: _r.finish())
+
     # Thorough runs scan maigret's entire database (~3200 sites) for the base
     # username instead of the top ~1200 by rank — broader long-tail coverage at
     # the cost of runtime.

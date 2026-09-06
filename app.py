@@ -77,7 +77,9 @@ except Exception as _recon_exc:  # pragma: no cover
     RECON_AVAILABLE = False
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "history.db"
+# SHERLOCK_DB_PATH lets tests and multi-instance setups point at their own
+# SQLite file (ignored when DATABASE_URL selects Postgres).
+DB_PATH = Path(os.environ.get("SHERLOCK_DB_PATH") or (BASE_DIR / "history.db"))
 STATIC_DIR = BASE_DIR / "static"
 
 
@@ -85,6 +87,10 @@ STATIC_DIR = BASE_DIR / "static"
 async def lifespan(app: FastAPI):
     """Start (and cleanly stop) the background watchlist monitor."""
     monitor_task = None
+    try:
+        sweep_stuck_investigations()
+    except Exception:
+        logging.getLogger("app").exception("startup sweep failed")
     if RECON_AVAILABLE:
         sher_light = recon_engines.sherlock_variant_site_data(SITE_DATA_ALL)
         monitor_task = asyncio.create_task(
@@ -141,9 +147,26 @@ async def basic_auth_gate(request: Request, call_next):
 # Site data (loaded once at startup)
 # ---------------------------------------------------------------------------
 
-# SitesInformation() honors Sherlock's built-in exclusions (dead sites etc.).
-# SiteInformation.information is the raw per-site dict sherlock() expects.
-_ALL_SITES = list(SitesInformation())
+# Sherlock's site list. The library's default is to download data.json (and an
+# exclusions list) from GitHub at import time with no timeout, so the app could
+# not start offline and hung on a slow network. Default to the data.json bundled
+# with the installed sherlock-project (deterministic, offline); set
+# SHERLOCK_SITES_SOURCE=remote to opt back into the live list (network, and the
+# library's own untimed fetch).
+def _load_sherlock_sites():
+    source = (os.environ.get("SHERLOCK_SITES_SOURCE") or "bundled").strip().lower()
+    if source == "remote":
+        return list(SitesInformation()), "remote"
+    import sherlock_project
+    bundled = Path(sherlock_project.__file__).resolve().parent / "resources" / "data.json"
+    # honor_exclusions=False: the exclusions list is only available remotely.
+    return list(SitesInformation(data_file_path=str(bundled),
+                                 honor_exclusions=False)), "bundled"
+
+
+_ALL_SITES, SITES_SOURCE = _load_sherlock_sites()
+logging.getLogger("app").info("sherlock site list: %d sites from %s source",
+                               len(_ALL_SITES), SITES_SOURCE)
 SITE_DATA_ALL = {s.name: s.information for s in _ALL_SITES}
 NSFW_NAMES = {s.name for s in _ALL_SITES if s.is_nsfw}
 
@@ -151,6 +174,41 @@ NSFW_NAMES = {s.name for s in _ALL_SITES if s.is_nsfw}
 # ---------------------------------------------------------------------------
 # SQLite history
 # ---------------------------------------------------------------------------
+
+def _ensure_column(conn, table: str, column: str, decl: str) -> None:
+    """Add ``column`` to ``table`` if missing — on SQLite (PRAGMA) and Postgres
+    (ADD COLUMN IF NOT EXISTS). The bridge until the versioned migration list
+    lands; every call is idempotent."""
+    if dbconn.IS_POSTGRES:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {decl}")
+        return
+    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def sweep_stuck_investigations() -> int:
+    """Mark investigations left in ``running`` by a previous process as
+    ``interrupted``. Runs once at startup. Before this, a restart mid-run left
+    rows in ``running`` forever (7 of 53 rows in one database) and every
+    downstream endpoint answered 409 for them."""
+    with db_connect(DB_PATH) as conn:
+        cur = conn.execute(
+            "UPDATE investigations SET status = 'interrupted', finished_at = ?,"
+            " error = COALESCE(error, 'process restarted while the"
+            " investigation was running') WHERE status = 'running'",
+            (_now(),),
+        )
+        n = cur.rowcount if cur.rowcount is not None else 0
+    if n:
+        logging.getLogger("app").warning(
+            "marked %d investigation(s) interrupted by a previous restart", n)
+    return n
+
 
 def _init_db() -> None:
     with db_connect(DB_PATH) as conn:
@@ -190,10 +248,17 @@ def _init_db() -> None:
                 created_at TEXT NOT NULL,
                 inputs TEXT NOT NULL,
                 summary TEXT,
-                status TEXT NOT NULL DEFAULT 'pending'
+                status TEXT NOT NULL DEFAULT 'pending',
+                started_at TEXT,
+                finished_at TEXT,
+                error TEXT
             )
             """
         )
+        # Lifecycle columns for databases created before they existed. A
+        # failed or interrupted investigation must be able to say why.
+        for col in ("started_at", "finished_at", "error"):
+            _ensure_column(conn, "investigations", col, "TEXT")
         if RECON_AVAILABLE:
             recon_monitor.init_tables(conn)
         recon_router.init_tables(conn)
@@ -943,20 +1008,116 @@ if RECON_AVAILABLE:
             "status": row[4],
         }
 
+    # Investigation lifecycle: pending → running → done | failed | cancelled |
+    # interrupted. Terminal states carry finished_at and (except done) an error
+    # message, so a stored case can always say what happened to it.
+    TERMINAL_STATUSES = ("done", "failed", "cancelled", "interrupted")
+
     def _set_investigation(inv_id: int, status: str,
-                           summary: dict | None = None) -> None:
+                           summary: dict | None = None, *,
+                           error: str | None = None) -> None:
+        sets, params = ["status = ?"], [status]
+        if summary is not None:
+            sets.append("summary = ?")
+            params.append(json.dumps(summary))
+        if error is not None:
+            sets.append("error = ?")
+            params.append(error[:2000])
+        if status in TERMINAL_STATUSES:
+            sets.append("finished_at = ?")
+            params.append(_now())
+        params.append(inv_id)
         with db_connect(DB_PATH) as conn:
-            if summary is not None:
-                conn.execute(
-                    "UPDATE investigations SET status = ?, summary = ?"
-                    " WHERE id = ?",
-                    (status, json.dumps(summary), inv_id),
+            conn.execute(
+                f"UPDATE investigations SET {', '.join(sets)} WHERE id = ?",
+                tuple(params),
+            )
+
+    def _claim_investigation(inv_id: int) -> bool:
+        """Atomically move ``pending`` → ``running``. False when the row is in
+        any other state, so two streams (or a browser reconnect) can never start
+        the same investigation twice."""
+        with db_connect(DB_PATH) as conn:
+            cur = conn.execute(
+                "UPDATE investigations SET status = 'running', started_at = ?"
+                " WHERE id = ? AND status = 'pending'",
+                (_now(), inv_id),
+            )
+            return bool(cur.rowcount)
+
+    # At most this many investigations run concurrently; further streams wait
+    # and announce it. Two full runs already open ~600 outbound connections.
+    MAX_CONCURRENT_INVESTIGATIONS = int(
+        os.environ.get("RECON_MAX_CONCURRENT_INVESTIGATIONS") or "2")
+    _inv_semaphores: dict = {}
+
+    def _investigation_semaphore() -> asyncio.Semaphore:
+        # One semaphore per event loop (tests spin up several loops).
+        loop = asyncio.get_running_loop()
+        sem = _inv_semaphores.get(id(loop))
+        if sem is None:
+            sem = asyncio.Semaphore(MAX_CONCURRENT_INVESTIGATIONS)
+            _inv_semaphores[id(loop)] = sem
+        return sem
+
+    async def run_investigation(inv_id: int, inputs: dict, sher_data: dict,
+                                emit, loop) -> None:
+        """Run one claimed investigation to a terminal state.
+
+        Every exit path writes a terminal status: ``done`` with the summary;
+        ``failed`` with the exception, which is also logged (before this the
+        browser got the message and the server kept nothing); ``cancelled``
+        when the client disconnected (``CancelledError`` is a ``BaseException``
+        and used to slip past ``except Exception``, stranding the row in
+        ``running``).
+        """
+        log = logging.getLogger("app")
+        sem = _investigation_semaphore()
+        if sem.locked():
+            emit("queued", {"max_concurrent": MAX_CONCURRENT_INVESTIGATIONS})
+        started = time.monotonic()
+        try:
+            async with sem:
+                log.info("inv=%d start usernames=%s name=%r email=%s",
+                         inv_id, inputs.get("usernames"), inputs.get("name"),
+                         "yes" if inputs.get("email") else "no")
+                summary = await run_pipeline(
+                    name=inputs["name"], usernames=inputs["usernames"],
+                    email=inputs["email"], phone=inputs["phone"],
+                    domain=inputs.get("domain", ""),
+                    location=inputs.get("location", ""),
+                    variants=inputs["variants"],
+                    thorough=inputs.get("thorough", False),
+                    timeout=inputs["timeout"],
+                    sher_data=sher_data, emit=emit, loop=loop,
+                    db_path=DB_PATH,
                 )
-            else:
-                conn.execute(
-                    "UPDATE investigations SET status = ? WHERE id = ?",
-                    (status, inv_id),
-                )
+            _set_investigation(inv_id, "done", summary)
+            subject = _subject_label(inputs)
+            # Persist the honest headline: verification-confirmed accounts
+            # only, not the raw union of every speculative "handle exists"
+            # hit (which lumped base + variants + 24 name guesses together).
+            from recon.confidence import bucket_counts
+            all_rows = (summary["accounts"] + summary["variants"]
+                        + summary["name_accounts"])
+            n_found = bucket_counts(all_rows)["found"]
+            run_id = save_run(subject, n_found, len(all_rows), summary,
+                              kind="investigation", investigation_id=inv_id)
+            log.info("inv=%d done in %.1fs found=%d rows=%d", inv_id,
+                     time.monotonic() - started, n_found, len(all_rows))
+            emit("saved", {"history_id": run_id, "investigation_id": inv_id})
+        except asyncio.CancelledError:
+            _set_investigation(inv_id, "cancelled",
+                               error="client disconnected before the run finished")
+            log.info("inv=%d cancelled after %.1fs (client disconnected)",
+                     inv_id, time.monotonic() - started)
+            raise
+        except Exception as exc:
+            log.exception("inv=%d failed after %.1fs", inv_id,
+                          time.monotonic() - started)
+            _set_investigation(inv_id, "failed",
+                               error=f"{type(exc).__name__}: {exc}")
+            emit("fatal", {"message": f"{type(exc).__name__}: {exc}"})
 
     @app.post("/api/investigate")
     async def create_investigation(request: Request) -> JSONResponse:
@@ -1041,16 +1202,24 @@ if RECON_AVAILABLE:
 
     @app.get("/api/investigate/{inv_id}/stream")
     async def investigate_stream(request: Request, inv_id: int,
-                                 nsfw: bool = Query(False)
-                                 ) -> StreamingResponse:
+                                 nsfw: bool = Query(False)):
         inv = _get_investigation(inv_id)
         if inv is None:
-            return StreamingResponse(
-                iter(['event: fatal\ndata: {"message": "investigation not found"}\n\n']),
-                media_type="text/event-stream",
+            return JSONResponse({"error": "not found"}, status_code=404)
+        # A GET must never start a second run: only a pending investigation
+        # can be streamed. Before this, reopening a finished case's stream (or a
+        # browser auto-reconnect) re-ran the whole pipeline and a disconnect
+        # left it stuck in `running`.
+        if not _claim_investigation(inv_id):
+            current = _get_investigation(inv_id)
+            status = current["status"] if current else "unknown"
+            return JSONResponse(
+                {"error": f"investigation is {status}; only a pending"
+                          " investigation can be streamed",
+                 "status": status},
+                status_code=409,
             )
         inputs = inv["inputs"]
-        _set_investigation(inv_id, "running")
 
         queue: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
@@ -1065,34 +1234,7 @@ if RECON_AVAILABLE:
                 queue.put_nowait((event, payload))
 
             try:
-                summary = await run_pipeline(
-                    name=inputs["name"], usernames=inputs["usernames"],
-                    email=inputs["email"], phone=inputs["phone"],
-                    domain=inputs.get("domain", ""),
-                    location=inputs.get("location", ""),
-                    variants=inputs["variants"],
-                    thorough=inputs.get("thorough", False),
-                    timeout=inputs["timeout"],
-                    sher_data=sher_data, emit=emit, loop=loop,
-                    db_path=DB_PATH,
-                )
-                _set_investigation(inv_id, "done", summary)
-                subject = _subject_label(inputs)
-                # Persist the honest headline: verification-confirmed accounts
-                # only, not the raw union of every speculative "handle exists"
-                # hit (which lumped base + variants + 24 name guesses together).
-                from recon.confidence import bucket_counts
-                all_rows = (summary["accounts"] + summary["variants"]
-                            + summary["name_accounts"])
-                n_found = bucket_counts(all_rows)["found"]
-                run_id = save_run(subject, n_found, len(all_rows), summary,
-                                  kind="investigation",
-                                  investigation_id=inv_id)
-                emit("saved", {"history_id": run_id,
-                               "investigation_id": inv_id})
-            except Exception as exc:
-                _set_investigation(inv_id, "failed")
-                emit("fatal", {"message": f"{type(exc).__name__}: {exc}"})
+                await run_investigation(inv_id, inputs, sher_data, emit, loop)
             finally:
                 queue.put_nowait(None)  # sentinel
 
