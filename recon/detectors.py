@@ -111,12 +111,12 @@ class HtmlDetector:
             # render it. Without this a single-page profile returns an empty
             # shell and `classify` would call a live account ABSENT — a false
             # negative. Budget-capped: the browser costs seconds per page.
+            # Rendering only — the browser tier never solves a challenge; a
+            # challenge page that survives rendering stays BLOCKED.
             if (stealthweb.should_escalate(status, html)
                     and _browser_budget["left"] > 0):
                 _browser_budget["left"] -= 1
-                st3, html3 = await stealthweb.fetch_browser(
-                    url,
-                    solve_cloudflare=stealthweb.has_challenge_markers(html or ""))
+                st3, html3 = await stealthweb.fetch_browser(url)
                 if st3 is not None:
                     status, html = st3, html3
 
