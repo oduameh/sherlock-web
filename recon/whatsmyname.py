@@ -5,6 +5,8 @@ dataset (~700 categorized sites). Detection is the WhatsMyName scheme: an
 account is *claimed* when the response status equals the site's ``e_code`` and
 its ``e_string`` appears in the body; a known "missing" code/string marks it
 *available*; anything else is *unknown* (treated as an error by the router).
+A site on a robots-denied host is never requested and yields *policy* — not a
+vote, not an error (see :data:`POLICY`).
 
 The value of a third engine is less raw coverage (Maigret already spans ~3200
 sites) than an **independent vote** — a site confirmed by three engines is a
@@ -47,6 +49,13 @@ _STEALTH_RETRY_BUDGET = int(os.environ.get("RECON_WMN_STEALTH_BUDGET") or "10")
 CLAIMED = "claimed"
 AVAILABLE = "available"
 UNKNOWN = "unknown"
+# The site's host is robots-denied: never fetched, so this is neither a vote
+# nor an error. Until 2026-09-06 denied sites came back UNKNOWN with a
+# "policy:" context, which the pipeline emitted as an error row and the router
+# recorded as a failure in site_health — eight fake failures per run tripping
+# circuits for sites we never touched (audit defect 8). POLICY results must
+# not be observed or reported as errors.
+POLICY = "policy"
 
 _SITES_CACHE: Optional[list[dict]] = None
 
@@ -90,14 +99,33 @@ def all_sites(nsfw: bool = False) -> list[dict]:
     return sites if nsfw else [s for s in sites if not _is_nsfw(s)]
 
 
-def variant_sites() -> list[dict]:
-    """The curated high-value subset, for variant / name-candidate scans."""
+def url_templates(site: dict) -> list[str]:
+    """The URL a WhatsMyName check fetches: ``uri_check`` (``{account}``
+    template). ``uri_pretty`` is display-only and never requested."""
+    t = site.get("uri_check")
+    return [t] if isinstance(t, str) and t else []
+
+
+def variant_sites(policy_filtered: bool = True) -> list[dict]:
+    """The curated high-value subset, for variant / name-candidate scans.
+
+    Policy-filtered by default; ``policy_filtered=False`` is for
+    :func:`recon.plan.plan_site_sets`, which filters and reports itself.
+    """
     wanted = {normalize_site(n) for n in HIGH_VALUE_SITES}
-    return [s for s in all_sites() if normalize_site(s.get("name", "")) in wanted]
+    picked = [s for s in all_sites() if normalize_site(s.get("name", "")) in wanted]
+    if not policy_filtered:
+        return picked
+    return [s for s in picked
+            if policy.denied_site_reason(url_templates(s)) is None]
 
 
 def classify_response(site: dict, status_code: int, body: str) -> str:
-    """Map an HTTP response to CLAIMED / AVAILABLE / UNKNOWN (pure function)."""
+    """Map an HTTP response to CLAIMED / AVAILABLE / UNKNOWN (pure function).
+
+    POLICY is never produced here: a denied site has no response to classify,
+    because :func:`_check_site` refuses it before any request.
+    """
     e_code = site.get("e_code")
     e_string = site.get("e_string") or ""
     m_code = site.get("m_code")
@@ -138,10 +166,13 @@ async def _check_site(client, site: dict, username: str,
     name = site.get("name", "?")
     cat = site.get("cat")
     # Robots-disallowed host — never fetch it, and never let the stealth retry
-    # touch it. Reported as "not examined", never as available/absent.
+    # touch it. A distinct POLICY status (not UNKNOWN): the pipeline neither
+    # observes it nor emits it as an error. Plan-time filtering removes such
+    # sites before a scan, so this is the last line of defence for direct
+    # callers.
     reason = policy.denied_reason(url)
     if reason:
-        return WmnResult(UNKNOWN, name, url, cat, f"policy: {reason}")
+        return WmnResult(POLICY, name, url, cat, f"policy: {reason}")
     try:
         status_code, body = await _get_capped(client, url)
         status = classify_response(site, status_code, body)
@@ -175,8 +206,9 @@ async def whatsmyname_scan(username: str, sites: list[dict], timeout: int,
     """Scan ``username`` across ``sites``, calling ``on_result`` per site.
 
     Bounded concurrency, all through the SSRF-guarded client. Never raises;
-    a failed site check yields an UNKNOWN result. Robots-denied hosts are
-    skipped. With ``stealth_retry`` and the ladder enabled, an UNKNOWN on a
+    a failed site check yields an UNKNOWN result. A robots-denied host is never
+    requested and yields a POLICY result (callers must not count it as an
+    error). With ``stealth_retry`` and the ladder enabled, an UNKNOWN on a
     high-value site gets one budgeted tier-2 stealth retry.
     """
     if not sites:

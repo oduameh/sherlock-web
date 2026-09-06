@@ -25,20 +25,81 @@ def test_ignorant_scan_streams_and_shapes(monkeypatch):
         out.append({"name": "Amazon", "domain": "amazon.com",
                     "exists": True, "rateLimit": False, "method": "login"})
 
-    async def instagram(phone, country_code, client, out):
-        out.append({"name": "Instagram", "domain": "instagram.com",
+    # (Was a fake ``instagram`` module until 2026-09-06 — a denied host that
+    # the access policy now skips, so the shape test uses a permitted one.)
+    async def snapchat(phone, country_code, client, out):
+        out.append({"name": "Snapchat", "domain": "snapchat.com",
                     "exists": False, "rateLimit": False, "method": "register"})
 
     monkeypatch.setattr(phone_accounts, "_ignorant_functions",
-                        lambda: [amazon, instagram])
+                        lambda: [amazon, snapchat])
     res, got = _scan()
     assert len(res) == 2 and len(got) == 2  # streamed one per module
     amazon_entry = next(e for e in res if e["site"] == "Amazon")
     assert amazon_entry["exists"] is True
     assert amazon_entry["domain"] == "amazon.com"
     assert amazon_entry["method"] == "login"
-    insta = next(e for e in res if e["site"] == "Instagram")
-    assert insta["exists"] is False
+    snap = next(e for e in res if e["site"] == "Snapchat")
+    assert snap["exists"] is False
+
+
+def test_ignorant_scan_skips_modules_on_denied_hosts(monkeypatch, caplog):
+    """ignorant ships an ``instagram`` module that posts the number to a
+    robots-denied host; it ran on every phone pivot (security F-2). The
+    policy filter must skip it — emitting nothing, since it was not checked —
+    and run the permitted modules unchanged."""
+    ran = []
+
+    async def instagram(phone, country_code, client, out):     # denied by name
+        ran.append("instagram")
+        out.append({"name": "Instagram", "domain": "instagram.com", "exists": True})
+
+    async def lookup(phone, country_code, client, out):        # denied by constant
+        ran.append("lookup")
+        domain = "instagram.com"
+        out.append({"name": "Lookup", "domain": domain, "exists": True})
+
+    async def amazon(phone, country_code, client, out):
+        ran.append("amazon")
+        out.append({"name": "Amazon", "domain": "amazon.com", "exists": True})
+
+    monkeypatch.setattr(phone_accounts, "_ignorant_functions",
+                        lambda: [instagram, lookup, amazon])
+    import logging
+    caplog.set_level(logging.DEBUG, logger="recon.phone_accounts")
+    res, got = _scan()
+    assert ran == ["amazon"]                       # denied modules never called
+    assert [e["site"] for e in res] == ["Amazon"]  # nothing emitted for them
+    assert [e["site"] for e in got] == ["Amazon"]
+    assert not any("Instagram" in str(e) or "Lookup" in str(e) for e in got)
+    assert "skipped by access policy" in caplog.text
+    assert "instagram" in caplog.text and "lookup" in caplog.text
+
+
+def test_ignorant_only_subset_still_honours_policy(monkeypatch):
+    async def instagram(phone, country_code, client, out):
+        out.append({"name": "Instagram", "exists": True})
+
+    async def amazon(phone, country_code, client, out):
+        out.append({"name": "Amazon", "exists": True})
+
+    monkeypatch.setattr(phone_accounts, "_ignorant_functions",
+                        lambda: [instagram, amazon])
+    res, _ = _scan(only={"instagram", "amazon"})
+    assert [e["site"] for e in res] == ["Amazon"]
+
+
+def test_real_ignorant_modules_exclude_instagram():
+    """Against the installed ignorant (1.2): exactly its Instagram module is
+    denied; Amazon and Snapchat stay. Skipped if ignorant is missing."""
+    if not phone_accounts.ignorant_available():
+        import pytest
+        pytest.skip("ignorant not installed")
+    from recon import policy
+    fns = phone_accounts._ignorant_functions()
+    kept, skipped = policy.partition_check_functions(fns)
+    assert skipped == ["instagram"]
+    assert {fn.__name__ for fn in kept} >= {"amazon", "snapchat"}
 
 
 def test_ignorant_scan_unavailable(monkeypatch):
