@@ -42,7 +42,7 @@ import socket
 import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, NamedTuple, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
@@ -81,8 +81,14 @@ _CHUNK = 16384
 # handle such as ``login_master`` never triggers it.
 LOGIN_SEGMENTS = frozenset({
     "login", "log-in", "log_in", "signin", "sign-in", "sign_in",
-    "session", "sessions", "sso", "authenticate",
+    "session", "sessions", "sso", "authenticate", "auth", "oauth",
 })
+# Query keys a login page uses to remember where to send you back.
+LOGIN_QUERY_KEYS = frozenset({"next", "redirect", "redirect_uri", "return_to",
+                              "returnto", "continue", "goto", "back"})
+# Hosts that only ever serve sign-in flows.
+LOGIN_HOSTS = ("accounts.google.com", "login.microsoftonline.com", "login.live.com",
+               "auth0.com", "okta.com", "id.atlassian.com", "appleid.apple.com")
 
 _HTML_TYPES = ("text/html", "application/xhtml")
 _JSON_TYPES = ("application/json", "text/json", "+json")
@@ -122,10 +128,18 @@ def is_login_url(url: Optional[str]) -> bool:
     if not url:
         return False
     try:
-        path = urlparse(url).path or ""
+        parts = urlparse(url)
     except ValueError:
         return False
-    return any(seg.lower() in LOGIN_SEGMENTS for seg in path.split("/") if seg)
+    host = (parts.hostname or "").lower()
+    if any(host == h or host.endswith("." + h) for h in LOGIN_HOSTS):
+        return True
+    path = parts.path or ""
+    segs = [seg.lower().split(".", 1)[0] for seg in path.split("/") if seg]   # login.php → login
+    if any(seg in LOGIN_SEGMENTS for seg in segs):
+        return True
+    keys = {k.lower() for k in parse_qs(parts.query, keep_blank_values=True)}
+    return bool(keys & LOGIN_QUERY_KEYS) and (not segs or segs[-1] in LOGIN_SEGMENTS | {"index"})
 
 
 def is_rate_limit(status: Optional[int], headers: Optional[dict] = None) -> bool:
@@ -137,6 +151,9 @@ def is_rate_limit(status: Optional[int], headers: Optional[dict] = None) -> bool
     if status == 403 and headers:
         remaining = _header(headers, "x-ratelimit-remaining")
         if remaining is not None and remaining.strip() == "0":
+            return True
+        # GitHub's secondary rate limit: 403 with Retry-After and remaining > 0.
+        if _header(headers, "retry-after") is not None:
             return True
     return False
 
@@ -188,6 +205,12 @@ def _header(headers: Optional[Any], name: str) -> Optional[str]:
 class Classification(NamedTuple):
     outcome: str
     reason: str
+    # Could a stealthier fetch (TLS impersonation / a real browser) change
+    # this answer? True for 401/403 walls, challenge pages and transport
+    # failures other than DNS; False for 5xx, login redirects, consent walls,
+    # rate limits and non-JSON API bodies (review S1/S2: the ladder ran on
+    # every block and never on a TLS reset).
+    escalatable: bool = False
 
 
 def classify(status: Optional[int], html: Optional[str],
@@ -219,7 +242,9 @@ def classify(status: Optional[int], html: Optional[str],
     script tag on a legitimate page must not turn it into a block.
     """
     if status is None:
-        return Classification(TRANSPORT, f"no response ({error or 'unknown error'})")
+        err = error or "unknown error"
+        dns = "gaierror" in err or "DNS" in err or "getaddrinfo" in err.lower()
+        return Classification(TRANSPORT, f"no response ({err})", escalatable=not dns)
     if status in ABSENT_STATUSES:
         return Classification(ABSENT, f"HTTP {status}")
     cf = _header(headers, "cf-mitigated")
@@ -238,7 +263,10 @@ def classify(status: Optional[int], html: Optional[str],
         marker = challenge_marker(html, raw_tokens=False) if html else None
         if marker:
             reason += f', challenge page ("{marker}")'
-        return Classification(BLOCKED, reason)
+        # 401/403 and challenge walls may fall to a browser-like client; a 5xx
+        # or a plain 400 will not.
+        return Classification(BLOCKED, reason,
+                              escalatable=status in (401, 403) or bool(cf) or bool(marker))
     if status >= 300:
         return Classification(BLOCKED, f"unfollowed redirect (HTTP {status})")
     # 2xx
@@ -250,11 +278,11 @@ def classify(status: Optional[int], html: Optional[str],
             path = url
         return Classification(BLOCKED, f"login redirect ({path})")
     if cf and cf.strip().lower() == "challenge":
-        return Classification(BLOCKED, "challenge (cf-mitigated: challenge)")
+        return Classification(BLOCKED, "challenge (cf-mitigated: challenge)", escalatable=True)
     if html:
         marker = challenge_marker(html, raw_tokens=False)
         if marker:
-            return Classification(BLOCKED, f'challenge page ("{marker}")')
+            return Classification(BLOCKED, f'challenge page ("{marker}")', escalatable=True)
         wall = consent_wall_marker(html)
         if wall:
             return Classification(BLOCKED, f'consent wall ("{wall}")')
@@ -429,6 +457,7 @@ class FetchResult(NamedTuple):
     content: Optional[bytes] = None
     final_url: Optional[str] = None
     content_type: str = ""
+    escalatable: bool = False
     truncated: bool = False
     rate_limited: bool = False
 
@@ -438,6 +467,16 @@ class FetchResult(NamedTuple):
 
 
 Ladder = Callable[[str], Awaitable[tuple[Optional[int], Optional[str], str]]]
+
+
+def _client_is_guarded(client) -> bool:
+    """True when ``client`` runs :func:`recon.safeweb._guard` on every request."""
+    try:
+        hooks = client.event_hooks.get("request") or []
+    except Exception:
+        return False
+    return any(getattr(h, "__name__", "") == "_guard" and
+               getattr(h, "__module__", "") == safeweb.__name__ for h in hooks)
 
 
 def _wants(kind: str, ctype: str) -> bool:
@@ -524,7 +563,11 @@ async def fetch(url: str, *, client: httpx.AsyncClient, kind: str = "html",
                            final_url=url)
 
     try:
-        await safeweb.assert_public_url(url)
+        # A safeweb client re-validates every hop in its request hook; running
+        # the guard here as well cost a second (third, on redirects) DNS
+        # resolution per fetch (review S5).
+        if not _client_is_guarded(client):
+            await safeweb.assert_public_url(url)
     except safeweb.BlockedRequestError as exc:
         res = _blocked_exception_result(exc, url)
         if st:
@@ -554,7 +597,8 @@ async def fetch(url: str, *, client: httpx.AsyncClient, kind: str = "html",
         hs.backoff(host, result.retry_after or DEFAULT_BACKOFF_S,
                    status=result.status)
 
-    if ladder is not None and result.outcome == BLOCKED and not result.rate_limited:
+    if (ladder is not None and result.escalatable and not result.rate_limited
+            and result.outcome in (BLOCKED, TRANSPORT)):
         if st:
             st.ladder_runs += 1
         try:
@@ -597,7 +641,7 @@ def _classify_ladder(url: str, kind: str, status: int, html: Optional[str],
                  and (not html or looks_like_shell(html)))
     return FetchResult(cls.outcome, cls.reason, status, html, via=via,
                        is_shell=shell, data=data, final_url=url,
-                       rate_limited=is_rate_limit(status))
+                       rate_limited=is_rate_limit(status), escalatable=False)
 
 
 async def _get_once(url: str, *, client: httpx.AsyncClient, kind: str,
@@ -612,7 +656,9 @@ async def _get_once(url: str, *, client: httpx.AsyncClient, kind: str,
             rate_limited = is_rate_limit(status, hdrs)
             retry_after = parse_retry_after(hdrs.get("retry-after")) if rate_limited else None
 
-            wanted = _wants(kind, ctype)
+            wanted = _wants(kind, ctype) or (kind == "html" and ctype in ("", "text/plain"))
+            # (a profile served with no Content-Type or as text/plain is still
+            #  a page to verify — detectors and enrichment accepted those)
             body: bytes = b""
             truncated = False
             if kind == "bytes":
@@ -661,7 +707,7 @@ async def _get_once(url: str, *, client: httpx.AsyncClient, kind: str,
                                retry_after=retry_after, is_shell=shell, data=data,
                                content=content, final_url=final_url,
                                content_type=ctype, truncated=truncated,
-                               rate_limited=rate_limited)
+                               rate_limited=rate_limited, escalatable=cls.escalatable)
     except safeweb.BlockedRequestError as exc:
         return _blocked_exception_result(exc, url)
     except Exception as exc:
@@ -670,4 +716,5 @@ async def _get_once(url: str, *, client: httpx.AsyncClient, kind: str,
         if isinstance(cause, socket.gaierror) or "getaddrinfo" in str(exc).lower():
             name = f"{name}: DNS resolution failed"
         return FetchResult(TRANSPORT, f"no response ({name})", None, None,
-                           type(exc).__name__, final_url=url)
+                           type(exc).__name__, final_url=url,
+                           escalatable="DNS" not in name)

@@ -118,19 +118,29 @@ def _sherlock_light(usernames: list[str], site_data: dict,
                 router.observe("sherlock", result.site_name,
                                str(result.status.value),
                                result.context or "", result.query_time)
-            if result.status in (QueryStatus.CLAIMED, QueryStatus.AVAILABLE):
-                checked.add(account_key(result.site_name, result.username))
             if result.status == QueryStatus.CLAIMED:
                 found.append({"username": result.username,
                               "site": result.site_name,
                               "url": result.site_url_user})
 
+    from recon import retrieval
+
     for username in usernames:
         try:
-            sherlock(username, site_data, _N(), timeout=timeout,
-                     proxy=router.proxy if router else None)
+            ret = sherlock(username, site_data, _N(), timeout=timeout,
+                           proxy=router.proxy if router else None) or {}
         except Exception:
             logger.exception("monitor sherlock scan failed for %s", username)
+            continue
+        # Sherlock reports a 429/403/5xx on status-code sites as AVAILABLE, so
+        # "checked" must come from the HTTP status, not the engine's label:
+        # only a decisive answer (a real page or a real absence) counts.
+        for site_name, info in ret.items():
+            http_status = info.get("http_status") if isinstance(info, dict) else None
+            if not isinstance(http_status, int):
+                continue
+            if retrieval.classify(http_status, None).outcome in (retrieval.OK, retrieval.ABSENT):
+                checked.add(account_key(site_name, username))
     return found, checked
 
 

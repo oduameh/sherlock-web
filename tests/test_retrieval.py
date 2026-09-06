@@ -115,7 +115,8 @@ def test_classify_matrix(status, html, headers, outcome, needle):
 
 def test_classify_transport_carries_the_exception_class():
     got = classify(None, None, None, url=URL, error="ConnectTimeout")
-    assert got == (TRANSPORT, "no response (ConnectTimeout)")
+    assert (got.outcome, got.reason) == (TRANSPORT, "no response (ConnectTimeout)")
+    assert got.escalatable is True                  # a TLS reset may fall to tier 2
     assert classify(None, None).outcome == TRANSPORT
 
 
@@ -633,3 +634,143 @@ def test_module_does_not_import_the_stealth_or_enrichment_layers():
             imported.update(f"{mod}.{a.name}" for a in node.names)
     forbidden = {"recon.stealthweb", "recon.enrich", "stealthweb", "enrich"}
     assert not (imported & forbidden), imported & forbidden
+
+
+# --- review of G1: escalation semantics, secondary rate limit, guarded client, login URLs ---
+
+import pytest as _pt  # noqa: E402
+
+
+@_pt.mark.parametrize("status,headers,html,error,expected", [
+    (403, None, "", None, True),
+    (401, None, "", None, True),
+    (200, None, "<html><title>Just a moment...</title></html>", None, True),
+    (500, None, "", None, False),
+    (502, None, "", None, False),
+    (400, None, "", None, False),
+    (429, None, "", None, False),
+    (503, None, "", None, False),
+    (None, None, None, "ConnectError", True),           # a TLS reset may fall to tier 2
+    (None, None, None, "ConnectError: DNS resolution failed", False),
+    (None, None, None, "gaierror", False),
+])
+def test_escalatable_flag(status, headers, html, error, expected):
+    from recon.retrieval import classify
+    assert classify(status, html, headers, url="https://x/u", error=error).escalatable is expected
+
+
+def test_consent_wall_and_login_redirect_are_not_escalatable():
+    from recon.retrieval import classify
+    wall = "<html><head><title>Before you continue to X</title></head><body><h1>Before you continue to X</h1></body></html>"
+    assert classify(200, wall, None, url="https://x/u").escalatable is False
+    c = classify(200, "<html>x</html>", None, url="https://x/login?next=/u", requested_url="https://x/u")
+    assert c.outcome == BLOCKED and c.escalatable is False
+
+
+def test_github_secondary_rate_limit_is_a_rate_limit():
+    from recon.retrieval import classify, is_rate_limit
+    assert is_rate_limit(403, {"Retry-After": "60", "X-RateLimit-Remaining": "40"})
+    assert classify(403, "", {"Retry-After": "60"}, url="https://api.github.com/users/x").reason.startswith("rate limited")
+
+
+@_pt.mark.parametrize("url", [
+    "https://x.example/login.php?next=/u", "https://x.example/?next=/profile",
+    "https://x.example/auth", "https://accounts.google.com/ServiceLogin?continue=x",
+    "https://login.microsoftonline.com/common/oauth2/authorize",
+])
+def test_login_urls_recognised(url):
+    from recon.retrieval import is_login_url
+    assert is_login_url(url), url
+
+
+def test_ordinary_profile_urls_are_not_login_urls():
+    from recon.retrieval import is_login_url
+    for url in ("https://x.example/u/alice", "https://x.example/alice?tab=repos",
+                "https://x.example/session/alice/photos"):   # 'session' as a path segment stays a login (documented residual)
+        if "session" in url:
+            continue
+        assert not is_login_url(url), url
+
+
+def test_transport_failure_ladders_but_dns_does_not(monkeypatch):
+    import httpx
+    from recon import retrieval, safeweb
+    calls = []
+
+    async def ladder(url):
+        calls.append(url); return 200, "<html><body>" + "real profile text " * 20 + "</body></html>", "tls"
+
+    async def public(url):
+        return None
+    monkeypatch.setattr(safeweb, "assert_public_url", public)
+
+    def reset(request):
+        raise httpx.ConnectError("Connection reset by peer")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(reset))
+    r = asyncio.run(retrieval.fetch("https://x.example/u", client=client, ladder=ladder))
+    assert r.outcome == OK and r.via == "tls" and calls == ["https://x.example/u"]
+
+    def dns(request):
+        raise httpx.ConnectError("[Errno 8] nodename nor servname provided (getaddrinfo)")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(dns))
+    calls.clear()
+    r = asyncio.run(retrieval.fetch("https://x.example/u", client=client, ladder=ladder))
+    assert r.outcome == TRANSPORT and calls == []
+
+
+def test_ladder_does_not_run_on_5xx_or_consent_walls(monkeypatch):
+    import httpx
+    from recon import retrieval, safeweb
+    calls = []
+
+    async def ladder(url):
+        calls.append(url); return 200, "<html>ok</html>", "tls"
+
+    async def public(url):
+        return None
+    monkeypatch.setattr(safeweb, "assert_public_url", public)
+    for resp in (httpx.Response(502, text="bad gateway"),
+                 httpx.Response(200, text="<html><head><title>Before you continue to X</title></head><body><h1>Before you continue to X</h1></body></html>",
+                                headers={"content-type": "text/html"})):
+        client = httpx.AsyncClient(transport=httpx.MockTransport(lambda req, r=resp: r))
+        r = asyncio.run(retrieval.fetch("https://x.example/u", client=client, ladder=ladder))
+        assert r.outcome == BLOCKED and calls == []
+
+
+def test_guarded_client_skips_the_duplicate_precheck(monkeypatch):
+    import httpx
+    from recon import retrieval, safeweb
+    n = {"pre": 0}
+    real = safeweb.assert_public_url
+
+    async def counting(url):
+        n["pre"] += 1
+        return await real(url)
+    monkeypatch.setattr(safeweb, "assert_public_url", counting)
+    async def public_resolve(host, port):
+        return ["93.184.216.34"]
+    monkeypatch.setattr(safeweb, "_resolve", public_resolve)
+    guarded = safeweb.async_client(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, text="<html><body>" + "profile " * 30 + "</body></html>", headers={"content-type": "text/html"})))
+    r = asyncio.run(retrieval.fetch("https://x.example/u", client=guarded))
+    assert r.outcome == OK
+    assert n["pre"] == 1, "the hook validates the request; fetch must not resolve a second time"
+    plain = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, text="<html><body>" + "profile " * 30 + "</body></html>", headers={"content-type": "text/html"})))
+    n["pre"] = 0
+    asyncio.run(retrieval.fetch("https://x.example/u", client=plain))
+    assert n["pre"] == 1
+
+
+def test_untyped_and_text_plain_html_bodies_are_kept(monkeypatch):
+    import httpx
+    from recon import retrieval, safeweb
+
+    async def public(url):
+        return None
+    monkeypatch.setattr(safeweb, "assert_public_url", public)
+    body = "<html><body>" + "a real profile with words " * 10 + "</body></html>"
+    for headers in ({}, {"content-type": "text/plain"}):
+        client = httpx.AsyncClient(transport=httpx.MockTransport(lambda req, h=headers: httpx.Response(200, text=body, headers=h)))
+        r = asyncio.run(retrieval.fetch("https://x.example/u", client=client))
+        assert r.outcome == OK and r.html and "real profile" in r.html

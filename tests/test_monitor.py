@@ -153,8 +153,35 @@ def test_sherlock_light_marks_only_decisive_results_as_checked(monkeypatch):
         notify.update(_R("Walled", QueryStatus.WAF))
         notify.update(_R("Flaky", QueryStatus.UNKNOWN))
         notify.update(_R("Illegal", QueryStatus.ILLEGAL))
+        # "checked" comes from the HTTP status Sherlock saw, not its label:
+        # a real page (200) or a real absence (404) is decisive; a 403 wall,
+        # a transport failure ("?") or an illegal handle is not.
+        return {"GitHub": {"http_status": 200}, "Dribbble": {"http_status": 404},
+                "Walled": {"http_status": 403}, "Flaky": {"http_status": "?"}, "Illegal": {}}
 
     monkeypatch.setattr("sherlock_project.sherlock.sherlock", fake_sherlock)
     found, checked = monitor._sherlock_light(["alice"], {"x": {}}, 5, None)
     assert [f["site"] for f in found] == ["GitHub"]
     assert checked == {account_key("GitHub", "alice"), account_key("Dribbble", "alice")}
+
+
+def test_rate_limited_site_is_not_checked_and_never_reads_as_gone(monkeypatch):
+    """Sherlock labels a 429 on a status-code site AVAILABLE; that must not
+    count as 'checked' (defect 5's own scenario)."""
+    from recon import monitor
+    from sherlock_project.result import QueryStatus
+
+    class R:
+        def __init__(self, site, status):
+            self.site_name, self.username, self.status = site, "alice", status
+            self.context, self.query_time, self.site_url_user = "", 0.1, f"https://{site}/alice"
+
+    def fake_sherlock(username, site_data, notify, timeout=None, proxy=None):
+        notify.update(R("GitHub", QueryStatus.AVAILABLE))     # really a 429
+        notify.update(R("Dribbble", QueryStatus.AVAILABLE))   # a real 404
+        return {"GitHub": {"http_status": 429}, "Dribbble": {"http_status": 404}}
+    import sherlock_project.sherlock as SP
+    monkeypatch.setattr(SP, "sherlock", fake_sherlock)
+    found, checked = monitor._sherlock_light(["alice"], {"GitHub": {}, "Dribbble": {}}, timeout=1)
+    assert monitor.account_key("Dribbble", "alice") in checked
+    assert monitor.account_key("GitHub", "alice") not in checked
