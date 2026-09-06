@@ -44,7 +44,8 @@ class SitePlan:
     skipped_policy: list[dict] = field(default_factory=list)
 
     def skipped_event(self) -> dict:
-        return {"count": len(self.skipped_policy), "sites": self.skipped_policy}
+        return {"count": len(self.skipped_policy),
+                "sites": self.skipped_policy[:10]}
 
 
 def _policy_filter(mapping: dict, engine: str, url_of: Callable[[Any], Any],

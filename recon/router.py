@@ -620,7 +620,7 @@ class RunRouter:
             if self.emit:
                 self.emit("skipped_degraded", {
                     "count": len(self.degraded),
-                    "sites": self.degraded,
+                    "sites": self.degraded[:10],
                 })
 
     # -- during-scan: observation ---------------------------------------------
