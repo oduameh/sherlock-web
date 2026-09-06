@@ -3683,6 +3683,7 @@
       if (accent) l.style.borderLeftColor = accent;
       l.textContent = text;
       sec.appendChild(l);
+      return l;
     }
     function pct(x) { return Math.round(x * 100) + "%"; }
     function otherLabel(oid) {
@@ -3713,10 +3714,21 @@
           line(sec, "Bio shares " + pct(ev.bio_overlap) + " of words with " +
             otherLabel(oid), "#e0a63d"); said = true;
         }
+        if (ev.name_conflict != null) {
+          line(sec, "Display names differ from " + otherLabel(oid) +
+            " (" + pct(ev.name_conflict) + " similar) — weak negative evidence",
+            "var(--text-4)"); said = true;
+        }
         if (!said) {
           line(sec, (e.rationale || "correlated") + " — " + otherLabel(oid),
             "#e0a63d");
         }
+        // Signals the correlator saw but deliberately did not count (a shared
+        // placeholder avatar, a same-site template match). Shown recessed so
+        // the analyst can see the reasoning, not just its result.
+        (ev.ignored || []).forEach(function (why) {
+          line(sec, "Ignored: " + why, "var(--text-4)").classList.add("is-muted");
+        });
       });
       if (node.cluster) {
         var members = data.nodes.filter(function (n) {
