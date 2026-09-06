@@ -80,7 +80,9 @@ TAG_TEXT_CAP = 4000
 
 # Page-headline scan window: the title and first headings live in the first
 # few KB; scanning further only costs time on hostile input.
-HEADLINE_SCAN_LIMIT = 64 * 1024
+HEADLINE_SCAN_LIMIT = 512 * 1024   # == the fetch body cap: a heading behind 70 KB of
+                                   # inline script must still be seen (review blocker)
+VISIBLE_TEXT_RAW_LIMIT = 128 * 1024
 
 # JSON-LD extraction caps (per block / per page).
 JSONLD_BLOCK_CAP = 200_000
@@ -163,53 +165,64 @@ SOFT_404_RE = re.compile(
     re.I | re.S,
 )
 
+# Predicates a not-found page uses when it names the handle itself:
+# "Torvalds does not use Launchpad", "torvalds is not on Mastodon",
+# "torvalds hasn't joined Keybase yet". None of them appears in a real profile
+# title, so anchoring on the handle is safe (review should-fix 3).
+_SOFT_404_PREDICATES = (
+    r"not found|does ?not exist|doesn['’]t exist|could ?not be found|"
+    r"couldn['’]t be found|no longer exists|does ?not use|doesn['’]t use|"
+    r"is ?not on|isn['’]t on|has ?not joined|hasn['’]t joined"
+)
+
+
+def soft_404_pattern(handle: str) -> re.Pattern:
+    """A per-call soft-404 regex with the handle as an extra subject word."""
+    subject = r"profile|user|page|account|member"
+    if handle and len(handle) >= 3:
+        subject += "|" + re.escape(handle)
+    return re.compile(r"\b(?:" + subject + r")\b.{0,40}?\b(?:" + _SOFT_404_PREDICATES + r")\b",
+                      re.I | re.S)
+
+
+# Generic phrases that also occur on legitimate pages (an album called
+# "Access Denied"). They may decide a verdict only when nothing on the page
+# names the handle — a WAF block page never does (review should-fix 6).
+WEAK_CHALLENGE_PHRASES: tuple[str, ...] = (
+    "access denied", "reference #", "request blocked", "request unsuccessful",
+)
+
 
 # ---------------------------------------------------------------------------
 # HTML → text
 # ---------------------------------------------------------------------------
 
-def _find_script_or_style(low: str, start: int) -> tuple[int, str]:
-    """Position and closing tag of the next ``<script``/``<style`` element open
-    tag at or after ``start`` (``-1, ""`` when there is none). Checks the
-    character after the name so ``<scripts>``-style junk is not mistaken."""
-    best, close = -1, ""
-    for name in ("script", "style"):
-        pos = start
-        while True:
-            pos = low.find("<" + name, pos)
-            if pos < 0:
-                break
-            nxt = pos + 1 + len(name)
-            if nxt >= len(low) or low[nxt] in " \t\r\n>/":
-                break
-            pos = nxt
-        if pos >= 0 and (best < 0 or pos < best):
-            best, close = pos, "</" + name
-    return best, close
+_SCRIPT_STYLE_OPEN_RE = re.compile(r"<(script|style)(?=[\s>/])", re.I)
 
 
 def strip_script_style(html: str) -> str:
     """Remove ``<script>``/``<style>`` elements including their bodies.
 
-    ``str.find``-based so it is linear: the former
-    ``<(script|style)\\b[^>]*>.*?</\\1>`` regex re-scanned to the end of the
-    chunk for every unterminated open tag. An unterminated element swallows the
-    rest of the document — exactly what a browser does with it.
+    Linear: one regex finds the next real open tag (the lookahead rejects
+    ``<scripts>``-style junk without a Python loop over every look-alike), and
+    ``str.find`` jumps to its closing tag. The previous helper rescanned for
+    both names on every call, so M terminated elements followed by N
+    look-alikes cost M×N iterations (0.9 s per row in the event loop on
+    24 KB of hostile markup — review should-fix). An unterminated element
+    swallows the rest of the document, exactly as a browser does.
     """
     if not html:
         return ""
-    low = html.lower()
     out: list[str] = []
-    i = 0
-    n = len(html)
+    i, n, low = 0, len(html), html.lower()
     while i < n:
-        j, close = _find_script_or_style(low, i)
-        if j < 0:
+        m = _SCRIPT_STYLE_OPEN_RE.search(html, i)
+        if not m:
             out.append(html[i:])
             break
-        out.append(html[i:j])
+        out.append(html[i:m.start()])
         out.append(" ")
-        k = low.find(close, j)
+        k = low.find("</" + m.group(1).lower(), m.end())
         if k < 0:
             break
         end = low.find(">", k)
@@ -225,7 +238,7 @@ def visible_text(html: Optional[str], limit: int = 4000) -> str:
     """
     if not html:
         return ""
-    chunk = strip_script_style(html[: limit * 6])
+    chunk = strip_script_style(html[:VISIBLE_TEXT_RAW_LIMIT])
     return WS_RE.sub(" ", TAG_RE.sub(" ", chunk)).strip().lower()[:limit]
 
 

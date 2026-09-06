@@ -288,6 +288,9 @@ class FetchResult(NamedTuple):
     retry_after: Optional[float] = None
 
 
+MIN_BACKOFF_S = 5.0     # a Retry-After of 0 or a past date still means "back off"
+
+
 def _parse_retry_after(value: Optional[str]) -> Optional[float]:
     """``Retry-After`` → seconds (clamped to ``MAX_BACKOFF_S``), or None when
     absent/unparseable. Accepts delta-seconds and HTTP-dates."""
@@ -306,7 +309,7 @@ def _parse_retry_after(value: Optional[str]) -> Optional[float]:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         secs = (dt - datetime.now(timezone.utc)).total_seconds()
-    return min(max(secs, 0.0), MAX_BACKOFF_S)
+    return min(max(secs, MIN_BACKOFF_S), MAX_BACKOFF_S)
 
 
 async def _fetch_page_ex(client: httpx.AsyncClient, url: str) -> FetchResult:
@@ -351,7 +354,10 @@ def _control_url(url: Optional[str], username: Optional[str]) -> Optional[str]:
 
 
 def _host(url: Optional[str]) -> str:
-    return (urlparse(url or "").netloc or "").lower()
+    """Backoff/lock key: hostname without a leading ``www.`` or default port,
+    so ``www.x.com`` and ``x.com`` share one backoff (review nit)."""
+    host = (urlparse(url or "").hostname or "").lower()
+    return host[4:] if host.startswith("www.") else host
 
 
 def rate_limited_verdict(status: int, fetched: bool = True) -> dict:
@@ -362,7 +368,7 @@ def rate_limited_verdict(status: int, fetched: bool = True) -> dict:
     request to the same host was already rate-limited this run — the same
     status/score/reason, with an extra signal saying so.
     """
-    signals = [f"rate limited (HTTP {status}) — not retried this run"]
+    signals = [f"rate limited / unavailable (HTTP {status}) — not retried this run"]
     if not fetched:
         signals.append("not fetched: an earlier request to this host was rate "
                        "limited and the host is backing off")

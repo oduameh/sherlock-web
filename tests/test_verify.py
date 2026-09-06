@@ -36,6 +36,15 @@ def test_control_probe_flags_serve_all_sites():
     v = verify_username("whoever", "https://acme.com/whoever", page,
                         meta, status=200, control_html=page, control_extracted=meta)
     assert v["status"] == "likely_false_positive"
+    # The metadata-free variant (a forum index served for every member) was a
+    # correct refutation before this increment and must stay one: rule 6 only
+    # applies when nothing on the page names the handle either.
+    page2 = ("<html><head><title>Acme Forums - Index page</title></head>"
+             "<body>Welcome to the forums. Please log in. Latest topics.</body></html>")
+    meta2 = {"title": "Acme Forums - Index page"}
+    v = verify_username("whoever", "https://acme.com/whoever", page2,
+                        meta2, status=200, control_html=page2, control_extracted=meta2)
+    assert v["status"] == "likely_false_positive"
 
 
 def test_hard_404_flagged():
@@ -384,3 +393,76 @@ def test_non_html_response_is_named_in_the_signal():
     v = verify_username("alice", "https://x/alice", None, {}, status=200)
     assert v["status"] == "indeterminate"
     assert "non-HTML" in v["signals"][0]
+
+
+# --- review of increment B: re-opened V1, Launchpad, block-page rule, weak phrases ---
+
+def test_not_found_heading_behind_large_inline_script_is_still_a_refutation():
+    """Blocker: the heading scan window had been cut to 64 KB, so a not-found
+    page whose <h1> sits behind 70 KB of inline script and whose title echoes
+    the handle went back to `confirmed 72`."""
+    html = ("<html><head><title>jdoe77 | Example</title><script>var a=1;" + "x" * 70000
+            + "</script></head><body><h1>User not found</h1><p>Nothing here.</p></body></html>")
+    meta = {"title": "jdoe77 | Example"}
+    v = verify_username("jdoe77", "https://example.com/jdoe77", html, meta, status=200)
+    assert v["status"] == "likely_false_positive"
+    v = verify_username("jdoe77", "https://example.com/jdoe77", html, meta, status=200,
+                        control_html=html.replace("jdoe77", "qzx9no7such8user2wj"),
+                        control_extracted={"title": "qzx9no7such8user2wj | Example"})
+    assert v["status"] == "likely_false_positive"
+
+
+def test_handle_anchored_not_found_forms_are_refuted():
+    """'Torvalds does not use Launchpad' was confirmed by handle-in-title (live
+    run 55); Launchpad 404s the control handle, so only the headline can tell."""
+    for title in ("Torvalds does not use Launchpad", "torvalds is not on Mastodon",
+                  "torvalds hasn't joined Keybase yet"):
+        html = f"<html><head><title>{title}</title></head><body><h1>{title}</h1><p>This page was created when importing data.</p></body></html>"
+        v = verify_username("torvalds", "https://x/~torvalds", html, {"title": title}, status=200)
+        assert v["status"] == "likely_false_positive", title
+    # A real profile whose title merely contains the handle stays confirmed.
+    for title in ("torvalds (Hemant)", "ken (Torvalds) - Gitee.com"):
+        html = f"<html><head><title>{title}</title></head><body><p>Profile page. Repositories, followers, stars and more.</p></body></html>"
+        v = verify_username("torvalds", "https://x/torvalds", html, {"title": title}, status=200)
+        assert v["status"] == "confirmed", title
+
+
+def test_handle_only_evidence_with_a_different_display_name_is_a_lead():
+    """Owner decision: with a subject name, a page whose display name (handle
+    stripped) is clearly someone else is `unconfirmed 38`, not confirmed."""
+    html = "<html><head><title>torvalds (Hemant)</title></head><body><p>User profile of Hemant on Hugging Face with models and datasets.</p></body></html>"
+    meta = {"title": "torvalds (Hemant)", "og_title": "torvalds (Hemant)"}
+    v = verify_username("torvalds", "https://hf.co/torvalds", html, meta, status=200,
+                        subject_name="Linus Torvalds")
+    assert v["status"] == "unconfirmed" and v["score"] == 38 and v["identity_match"] is False
+    # Same page, no subject name: the handle exists — still confirmed.
+    assert verify_username("torvalds", "https://hf.co/torvalds", html, meta,
+                           status=200)["status"] == "confirmed"
+    # A display name that shares a token with the subject is not a conflict.
+    meta2 = {"title": "Linus Torvalds (torvalds)", "og_title": "Linus Torvalds (torvalds)"}
+    assert verify_username("torvalds", "https://hf.co/torvalds", html, meta2, status=200,
+                           subject_name="Linus Torvalds")["status"] == "confirmed"
+
+
+def test_weak_waf_phrase_does_not_override_a_handle_in_the_title():
+    html = ("<html><head><title>johnsmith77 | Bandcamp</title></head><body>"
+            "<h2>Access Denied</h2><p>New album by johnsmith77, out now. Stream and buy the record.</p></body></html>")
+    v = verify_username("johnsmith77", "https://bandcamp.com/johnsmith77", html,
+                        {"title": "johnsmith77 | Bandcamp"}, status=200)
+    assert v["status"] == "confirmed"
+    # Without the handle anywhere in the metadata the same phrase is a block page.
+    v = verify_username("johnsmith77", "https://x/johnsmith77",
+                        "<html><head><title>Access Denied</title></head><body><h1>Access Denied</h1><p>Reference #18.4f2c</p></body></html>",
+                        {"title": "Access Denied"}, status=200)
+    assert v["status"] == "indeterminate"
+
+
+def test_non_latin_titles_and_handle_echoes_are_not_block_pages():
+    """`_tokens` is ASCII-only, so an 8-word Japanese title counted as zero
+    words and every such profile became a 'block page' under rule 6."""
+    html = "<html><head><title>yamada_taro - プロフィール ページ です</title></head><body><p>山田太郎さんのプロフィールページです。投稿、フォロワー、写真。</p></body></html>"
+    meta = {"title": "yamada_taro - プロフィール ページ です"}
+    v = verify_username("yamada_taro", "https://x/yamada_taro", html, meta, status=200,
+                        control_html=html.replace("yamada_taro", "qzx9no7such8user2wj"),
+                        control_extracted={"title": "qzx9no7such8user2wj - プロフィール ページ です"})
+    assert v["status"] == "likely_false_positive"      # identical to control → refuted, not "blocked"

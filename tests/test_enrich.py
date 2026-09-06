@@ -10,7 +10,7 @@ import time
 import httpx
 
 from recon import adapters, enrich, stealthweb
-from recon.enrich import FetchResult, _extract, _extract_regex, _extract_scrapling
+from recon.enrich import MIN_BACKOFF_S, FetchResult, _extract, _extract_regex, _extract_scrapling
 
 _HTML = """
 <html><head>
@@ -237,7 +237,7 @@ def test_rate_limited_host_is_fetched_once_and_never_escalated(monkeypatch):
         v = r["verification"]
         assert v["status"] == "indeterminate" and v["score"] == 30
         assert v["reason"] == "rate_limited"
-        assert v["signals"][0] == "rate limited (HTTP 429) — not retried this run"
+        assert v["signals"][0] == "rate limited / unavailable (HTTP 429) — not retried this run"
     not_fetched = [r for r in limited if len(r["verification"]["signals"]) > 1]
     assert len(not_fetched) == 3
     assert other[0]["verification"]["status"] != "indeterminate"
@@ -465,7 +465,7 @@ def test_browser_seen_404_upgrades_a_blocked_plain_status(monkeypatch):
 def test_rate_limited_verdict_shape():
     v = enrich.rate_limited_verdict(429)
     assert v == {"status": "indeterminate", "score": 30,
-                 "signals": ["rate limited (HTTP 429) — not retried this run"],
+                 "signals": ["rate limited / unavailable (HTTP 429) — not retried this run"],
                  "reason": "rate_limited"}
     skipped = enrich.rate_limited_verdict(429, fetched=False)
     assert skipped["signals"][0] == v["signals"][0]
@@ -515,4 +515,17 @@ def test_parse_retry_after():
     soon = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=30), usegmt=True)
     assert 25.0 <= enrich._parse_retry_after(soon) <= 31.0
     past = format_datetime(datetime.now(timezone.utc) - timedelta(seconds=30), usegmt=True)
-    assert enrich._parse_retry_after(past) == 0.0
+    assert enrich._parse_retry_after(past) == MIN_BACKOFF_S
+
+
+def test_retry_after_zero_or_past_still_backs_off():
+    from recon.enrich import MIN_BACKOFF_S, _parse_retry_after
+    assert _parse_retry_after("0") == MIN_BACKOFF_S
+    assert _parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT") == MIN_BACKOFF_S
+    assert _parse_retry_after("120") == 120.0
+
+
+def test_backoff_host_key_ignores_www_and_default_port():
+    from recon.enrich import _host
+    assert _host("https://www.Example.com:443/a") == "example.com"
+    assert _host("https://example.com/b") == "example.com"

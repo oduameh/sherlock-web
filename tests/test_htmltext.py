@@ -215,3 +215,46 @@ def test_hostile_markup_is_processed_in_linear_time(label, fn):
     t0 = time.perf_counter()
     fn()
     assert time.perf_counter() - t0 < 0.5, label
+
+
+# --- review of increment B: the M×N stripper shape and the handle-anchored pattern ---
+
+import time as _time  # noqa: E402
+
+from recon.htmltext import soft_404_pattern, strip_script_style, visible_text  # noqa: E402
+from recon.verify import verify_username as _verify  # noqa: E402
+
+
+@pytest.mark.parametrize("html", [
+    "<style>x</style>" * 750 + "<scriptx" * 1500,
+    "<script></script><stylex" * 1000,
+    "<script src=a>" * 3000 + "</script>",
+], ids=["style-then-scriptx", "alternating", "nested-opens"])
+def test_stripper_is_linear_on_lookalike_heavy_markup(html):
+    t0 = _time.perf_counter()
+    visible_text(html)
+    _verify("someone", "https://x/someone", html, {}, status=200, control_html=html)
+    assert _time.perf_counter() - t0 < 0.5
+
+
+def test_stripper_output_is_unchanged_on_ordinary_markup():
+    cases = [
+        "<p>a</p><script>var x = '<p>';</script><b>b</b>",
+        "<style>p{}</style>text<STYLE>x</STYLE>more",
+        "<scripts>not a script</scripts><script>gone</script>tail",
+        "<script>unterminated",
+        "",
+    ]
+    expected = ["<p>a</p> <b>b</b>", " text more", "<scripts>not a script</scripts> tail", " ", ""]
+    assert [strip_script_style(c) for c in cases] == expected
+
+
+def test_soft_404_pattern_is_anchored_on_the_handle():
+    pat = soft_404_pattern("torvalds")
+    assert pat.search("Torvalds does not use Launchpad")
+    assert pat.search("torvalds is not on Mastodon")
+    assert pat.search("torvalds hasn't joined Keybase yet")
+    assert pat.search("Profile johnsmith77 not found")
+    assert not pat.search("torvalds (Hemant)")
+    assert not pat.search("ken (Torvalds) - Gitee.com")
+    assert not soft_404_pattern("ab").search("ab does not use it")   # too short to anchor

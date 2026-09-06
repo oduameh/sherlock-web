@@ -60,6 +60,8 @@ from typing import Optional
 from recon.htmltext import (
     SOFT_404_PHRASES,
     SOFT_404_RE,
+    WEAK_CHALLENGE_PHRASES,
+    soft_404_pattern,
     challenge_marker,
     consent_wall_marker,
     page_headline,
@@ -166,7 +168,9 @@ def _has_profile_metadata(extracted: dict) -> bool:
     if extracted.get("og_title") or extracted.get("og_image") \
             or extracted.get("jsonld_name"):
         return True
-    return len(_tokens(extracted.get("title"))) > _MAX_BLOCK_TITLE_WORDS
+    # str.split, not the ASCII tokenizer: a Japanese or Cyrillic title used to
+    # count as zero words and every non-Latin profile became a "block page".
+    return len(str(extracted.get("title") or "").split()) > _MAX_BLOCK_TITLE_WORDS
 
 
 def _handle_in_metadata(uname_raw: str, extracted: dict) -> bool:
@@ -189,6 +193,23 @@ def _handle_in_metadata(uname_raw: str, extracted: dict) -> bool:
         return False
     pat = re.compile(r"(?:^|[^a-z0-9])" + body + r"(?:$|[^a-z0-9])")
     return bool(pat.search(hay.lower()))
+
+
+def _display_name_conflicts(subject_name: str, extracted: dict, handle: str) -> bool:
+    """True when the page's structured/og display name, minus the handle and
+    the site's boilerplate, shares no name token (nor a nickname prefix) with
+    the subject. Both sides must have a real token left, else no opinion."""
+    raw = extracted.get("jsonld_name") or extracted.get("og_title") or ""
+    hn = _norm(handle)
+    name_toks = {t for t in _tokens(raw) if len(t) >= 2 and t != hn and hn not in t}
+    subj_toks = {t for t in _tokens(subject_name) if len(t) >= 2}
+    if not name_toks or not subj_toks:
+        return False
+    for x in name_toks:
+        for y in subj_toks:
+            if x == y or x.startswith(y) or y.startswith(x):
+                return False
+    return True
 
 
 def _identity_matches(subject_name: str, extracted: dict) -> Optional[bool]:
@@ -300,6 +321,8 @@ def verify_username(username: Optional[str], url: Optional[str],
     #      vendor tokens are deliberately NOT consulted here (rule: a DataDome
     #      script tag on a legitimate page is not a block page).
     marker = challenge_marker(html, extracted, raw_tokens=False)
+    if marker in WEAK_CHALLENGE_PHRASES and _handle_in_metadata(uname_raw, extracted):
+        marker = None      # "Access Denied" is an album here; the page names the handle
     if marker:
         return _verdict("indeterminate", 30,
                         [f'anti-bot challenge page ("{marker}") — '
@@ -339,7 +362,8 @@ def verify_username(username: Optional[str], url: Optional[str],
             return _verdict("likely_false_positive", 10,
                             [f'page heading reads as not-found ("{phrase}")'],
                             identity_match=identity_match, control_probe=probe)
-    m = SOFT_404_RE.search(headline)
+    m = SOFT_404_RE.search(headline) or (
+        soft_404_pattern(uname_raw).search(headline) if uname_raw else None)
     if m:
         return _verdict("likely_false_positive", 10,
                         [f'page heading reads as not-found ("{m.group(0)}")'],
@@ -357,7 +381,10 @@ def verify_username(username: Optional[str], url: Optional[str],
         t = _norm(_mask_handles(extracted.get("title"), handles))
         ct = _norm(_mask_handles((control_extracted or {}).get("title"), handles))
         if sim >= _CONTROL_SIM_THRESHOLD or (t and t == ct):
-            if not _has_profile_metadata(extracted):
+            # A WAF block page never names the handle; a soft-404 factory that
+            # echoes it is a refutation, whatever its metadata (review S4).
+            if (not _has_profile_metadata(extracted)
+                    and not _handle_in_metadata(uname_raw, extracted)):
                 return _verdict("indeterminate", 30,
                                 ["identical to the control page and carries no "
                                  "profile metadata — likely a block page"],
@@ -372,6 +399,16 @@ def verify_username(username: Optional[str], url: Optional[str],
     #    Checked BEFORE the weaker body-text scan below, so a genuine profile
     #    whose bio merely contains an unlucky phrase is not condemned by it.
     if _handle_in_metadata(uname_raw, extracted):
+        # Owner decision (2026-09-06): when the handle is the ONLY evidence and
+        # the page's display name — with the handle stripped — is clearly not
+        # the subject, this is a lead, not a confirmation (rule 3: a different
+        # name is weak negative evidence). "torvalds (Hemant)" with subject
+        # "Linus Torvalds" is Hemant's account, not Linus's.
+        if subject_name and _display_name_conflicts(subject_name, extracted, uname_raw):
+            return _verdict("unconfirmed", 38,
+                            ["handle appears in the page's title, but the display "
+                             "name is someone else — may be another person"],
+                            identity_match=False, control_probe=probe)
         return _verdict("confirmed", 72,
                         ["handle appears in the page's title/metadata"],
                         identity_match=identity_match, control_probe=probe)
