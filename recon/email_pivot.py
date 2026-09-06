@@ -3,6 +3,18 @@
 Public data only: Gravatar's public JSON profile API and holehe's checks
 against public register/password-reset endpoints. holehe is imported lazily;
 if it is missing the gravatar lookup still works.
+
+Honesty rules (G2):
+
+* :func:`gravatar_profile` distinguishes **"no profile"** (a 404, or an empty
+  entry list) from **"could not check"** (a 429, a 5xx, a transport failure).
+  Until G2 a rate limit rendered as "No public Gravatar profile" (retrieval
+  audit §2). The call goes through :func:`recon.retrieval.fetch` and is
+  recorded against ``gravatar_json`` in the source registry.
+* :func:`holehe_tally` counts what holehe actually **answered**: an entry is
+  checked only when ``exists`` is True/False and it is neither rate-limited
+  nor errored. "No exposure found" may only be said when the checks ran
+  (audit defect 6); the dossier and the exposure summary read this tally.
 """
 
 from __future__ import annotations
@@ -11,9 +23,10 @@ import asyncio
 import hashlib
 import logging
 import re
-from typing import Callable, Optional
+import time
+from typing import Callable, NamedTuple, Optional
 
-from recon import policy, safeweb
+from recon import policy, retrieval, safeweb, sources
 
 logger = logging.getLogger("recon.email_pivot")
 
@@ -53,41 +66,115 @@ def annotate_recovery(entry: dict, subject_e164: Optional[str]) -> dict:
     return entry
 
 
-async def gravatar_lookup(email: str) -> Optional[dict]:
-    """Fetch the public Gravatar profile for an email. None if no profile."""
+class GravatarResult(NamedTuple):
+    """``profile`` is the public profile (None when there is none);
+    ``error`` is set — and ``profile`` None — when the lookup could not be
+    made ("could not check: rate limited (HTTP 429)"). Both None means the
+    source answered and there is no profile."""
+    profile: Optional[dict]
+    error: Optional[str] = None
+
+
+def _profile_from_entry(digest: str, e: dict) -> dict:
+    accounts = [
+        {
+            "name": a.get("name"),
+            "domain": a.get("domain"),
+            "url": a.get("url"),
+            "username": a.get("username"),
+        }
+        for a in (e.get("accounts") or [])
+    ]
+    return {
+        "hash": digest,
+        "display_name": e.get("displayName"),
+        "full_name": (e.get("name") or {}).get("formatted"),
+        "profile_url": e.get("profileUrl"),
+        "avatar_url": e.get("thumbnailUrl"),
+        "about": e.get("aboutMe"),
+        "location": e.get("currentLocation"),
+        "accounts": accounts,
+    }
+
+
+async def gravatar_profile(email: str, *,
+                           retrieval_stats: Optional[retrieval.RetrievalStats] = None
+                           ) -> GravatarResult:
+    """Look up the public Gravatar profile for ``email``. Never raises.
+
+    ``absent`` (404) or an empty entry list → no profile; ``ok`` → the
+    profile; ``blocked``/``transport``/``policy``/``ssrf`` → ``error`` with
+    retrieval's reason — a "could not check", distinct from "no profile".
+    """
     digest = hashlib.md5(email.strip().lower().encode("utf-8")).hexdigest()
     url = f"https://www.gravatar.com/{digest}.json"
+    t0 = time.monotonic()
     try:
         async with safeweb.async_client(timeout=10) as client:
-            resp = await client.get(url)
-        if resp.status_code != 200:
-            return None
-        entries = resp.json().get("entry") or []
-        if not entries:
-            return None
-        e = entries[0]
-        accounts = [
-            {
-                "name": a.get("name"),
-                "domain": a.get("domain"),
-                "url": a.get("url"),
-                "username": a.get("username"),
-            }
-            for a in e.get("accounts", [])
-        ]
-        return {
-            "hash": digest,
-            "display_name": e.get("displayName"),
-            "full_name": (e.get("name") or {}).get("formatted"),
-            "profile_url": e.get("profileUrl"),
-            "avatar_url": e.get("thumbnailUrl"),
-            "about": e.get("aboutMe"),
-            "location": e.get("currentLocation"),
-            "accounts": accounts,
-        }
+            res = await retrieval.fetch(url, client=client, kind="json",
+                                        stats=retrieval_stats)
+    except Exception as exc:   # the client itself could not be opened
+        res = retrieval.FetchResult(retrieval.TRANSPORT,
+                                    f"no response ({type(exc).__name__})",
+                                    None, None, type(exc).__name__, final_url=url)
+    latency_ms = (time.monotonic() - t0) * 1000
+    if res.outcome == retrieval.ABSENT:
+        sources.record("gravatar_json", True, latency_ms)
+        return GravatarResult(None)
+    if res.outcome != retrieval.OK:
+        sources.record("gravatar_json", False, latency_ms, res.reason)
+        logger.info("gravatar could not be checked: %s", res.reason)
+        return GravatarResult(None, f"could not check: {res.reason}")
+    sources.record("gravatar_json", True, latency_ms)
+    data = res.data if isinstance(res.data, dict) else {}
+    entries = data.get("entry") or []
+    if not entries or not isinstance(entries[0], dict):
+        return GravatarResult(None)
+    try:
+        return GravatarResult(_profile_from_entry(digest, entries[0]))
     except Exception:
-        logger.exception("gravatar lookup failed")
-        return None
+        logger.exception("gravatar profile parse failed")
+        return GravatarResult(None, "could not check: unexpected profile shape")
+
+
+async def gravatar_lookup(email: str) -> Optional[dict]:
+    """Profile-or-None view of :func:`gravatar_profile` (kept for callers that
+    only want the profile; the pipeline uses the full result)."""
+    return (await gravatar_profile(email)).profile
+
+
+# --- holehe honesty ----------------------------------------------------------
+
+def holehe_entry_checked(entry: dict) -> bool:
+    """True when a holehe entry is a decisive answer (exists True/False) and
+    not a rate limit or an error — the only case that may later say "gone"
+    (watchlist, defect 5) or "no exposure" (dossier, defect 6)."""
+    if not isinstance(entry, dict):
+        return False
+    return (entry.get("exists") is not None and not entry.get("rate_limit")
+            and not entry.get("error"))
+
+
+def holehe_tally(entries: Optional[list]) -> dict:
+    """Counts over a holehe result list (pure): ``total`` modules that ran,
+    ``checked_ok`` decisive answers, ``hits`` positives, ``rate_limited`` and
+    ``errors``, and ``undetermined`` — True when nothing was found **and**
+    fewer than half the modules answered, i.e. "no exposure found" would be
+    a claim the checks cannot support (audit defect 6)."""
+    rows = [e for e in (entries or []) if isinstance(e, dict)]
+    total = len(rows)
+    checked_ok = sum(1 for e in rows if holehe_entry_checked(e))
+    hits = sum(1 for e in rows if e.get("exists"))
+    rate_limited = sum(1 for e in rows if e.get("rate_limit"))
+    errors = sum(1 for e in rows if e.get("error"))
+    return {
+        "total": total,
+        "checked_ok": checked_ok,
+        "hits": hits,
+        "rate_limited": rate_limited,
+        "errors": errors,
+        "undetermined": bool(total) and hits == 0 and checked_ok < 0.5 * total,
+    }
 
 
 def holehe_available() -> bool:

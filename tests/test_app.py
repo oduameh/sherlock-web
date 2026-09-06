@@ -682,3 +682,21 @@ def test_allowed_hosts_default_includes_the_platforms_hostnames():
     # An explicit list is exactly that list; a password without a list stays open.
     assert appmod._allowed_hosts({**railway, "APP_ALLOWED_HOSTS": "my.host.example"}) == {"my.host.example"}
     assert appmod._allowed_hosts({**railway, "APP_PASSWORD": "x"}) == {"*"}
+
+# --- G2: the direct-source registry is exposed additively ------------------------------
+
+def test_health_sources_carries_the_direct_source_registry(client):
+    from recon import sources
+    sources.reset()
+    sources.record("github", False, 120.0, "rate limited (HTTP 403, X-RateLimit-Remaining: 0)")
+    r = client.get("/api/health/sources")
+    assert r.status_code == 200
+    body = r.json()
+    direct = body["direct_sources"]
+    assert isinstance(direct, list) and {d["name"] for d in direct} >= {"github", "crtsh", "telegram"}
+    gh = next(d for d in direct if d["name"] == "github")
+    assert gh["host"] == "api.github.com" and gh["failures"] == 1
+    assert gh["dominant_reason"].startswith("rate limited")
+    # The router's per-site shape is untouched next to it.
+    assert set(body) - {"direct_sources"}
+    sources.reset()

@@ -30,6 +30,7 @@ import dbconn
 from dbconn import connect as db_connect
 from recon import engines
 from recon.email_pivot import holehe_available, holehe_scan
+from recon.email_pivot import holehe_entry_checked as _holehe_entry_checked
 from recon.names import generate_name_candidates
 from recon.router import RunRouter
 
@@ -144,13 +145,10 @@ def _sherlock_light(usernames: list[str], site_data: dict,
     return found, checked
 
 
-def holehe_entry_checked(entry: dict) -> bool:
-    """True when a holehe entry is a decisive answer (exists True/False) and
-    not a rate limit or an error — the only case that may later say "gone"."""
-    if not isinstance(entry, dict):
-        return False
-    return (entry.get("exists") is not None and not entry.get("rate_limit")
-            and not entry.get("error"))
+# ``holehe_entry_checked`` lives in recon.email_pivot since G2 (the dossier
+# and the exposure summary apply the same rule); re-exported here for the
+# watchlist's callers and tests.
+holehe_entry_checked = _holehe_entry_checked
 
 
 async def light_scan(inputs: dict, sher_site_data: dict,

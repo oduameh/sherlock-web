@@ -774,3 +774,76 @@ def test_untyped_and_text_plain_html_bodies_are_kept(monkeypatch):
         client = httpx.AsyncClient(transport=httpx.MockTransport(lambda req, h=headers: httpx.Response(200, text=body, headers=h)))
         r = asyncio.run(retrieval.fetch("https://x.example/u", client=client))
         assert r.outcome == OK and r.html and "real profile" in r.html
+
+
+# ---------------------------------------------------------------------------
+# escalate_shell — the caller-decided second use of the ladder (G2)
+# ---------------------------------------------------------------------------
+
+def _shell_result():
+    return retrieval.FetchResult(OK, "HTTP 200", 200, SHELL, is_shell=True, final_url=URL)
+
+
+def test_escalate_shell_adopts_a_rescued_page_and_counts_it():
+    async def ladder(url):
+        return 200, REAL, "scrapling_browser"
+
+    st = RetrievalStats()
+    hs = HostState()
+    out = asyncio.run(retrieval.escalate_shell(_shell_result(), URL, ladder=ladder,
+                                               host_state=hs, stats=st))
+    assert out.outcome == OK and out.html == REAL and out.via == "scrapling_browser"
+    assert out.is_shell is False
+    assert (st.ladder_runs, st.ladder_rescued) == (1, 1)
+    assert hs.last_outcome("example.test") == OK
+
+
+def test_escalate_shell_only_runs_for_an_ok_shell():
+    async def ladder(url):
+        raise AssertionError("must not run")
+
+    real = retrieval.FetchResult(OK, "HTTP 200", 200, REAL, final_url=URL)
+    assert asyncio.run(retrieval.escalate_shell(real, URL, ladder=ladder)) is real
+    blocked = retrieval.FetchResult(BLOCKED, "HTTP 403", 403, None, final_url=URL)
+    assert asyncio.run(retrieval.escalate_shell(blocked, URL, ladder=ladder)) is blocked
+    shell = _shell_result()
+    assert asyncio.run(retrieval.escalate_shell(shell, URL, ladder=None)) is shell
+    # A shell the ladder itself rendered is never rendered again.
+    rendered = shell._replace(via="scrapling_browser")
+    assert asyncio.run(retrieval.escalate_shell(rendered, URL, ladder=ladder)) is rendered
+
+
+def test_escalate_shell_keeps_the_plain_result_when_the_ladder_has_nothing():
+    async def nothing(url):
+        return None, None, "scrapling_browser"
+
+    async def boom(url):
+        raise RuntimeError("browser died")
+
+    st = RetrievalStats()
+    shell = _shell_result()
+    assert asyncio.run(retrieval.escalate_shell(shell, URL, ladder=nothing, stats=st)) is shell
+    assert asyncio.run(retrieval.escalate_shell(shell, URL, ladder=boom, stats=st)) is shell
+    assert (st.ladder_runs, st.ladder_rescued) == (2, 0)
+
+
+def test_escalate_shell_rate_limit_from_a_tier_backs_the_host_off():
+    async def limited(url):
+        return 429, None, "scrapling_tls"
+
+    hs = HostState()
+    out = asyncio.run(retrieval.escalate_shell(_shell_result(), URL, ladder=limited,
+                                               host_state=hs))
+    assert out.outcome == BLOCKED and out.rate_limited and out.status == 429
+    assert hs.active_backoff("example.test") is not None
+
+
+def test_escalate_shell_a_rendered_shell_is_not_a_rescue():
+    async def still_shell(url):
+        return 200, SHELL, "scrapling_browser"
+
+    st = RetrievalStats()
+    out = asyncio.run(retrieval.escalate_shell(_shell_result(), URL, ladder=still_shell,
+                                               stats=st))
+    assert out.outcome == OK and out.is_shell is True and out.via == "scrapling_browser"
+    assert st.ladder_rescued == 0

@@ -5,10 +5,20 @@ robots.txt **permits** the profile path.
 Where :mod:`recon.adapters` reads a JSON API, a detector fetches the public
 profile HTML and decides existence from **content markers** — a token that
 appears only on a real profile, or a "not found" marker — instead of the
-fragile status-only guess the third-party engines rely on. When an honest plain
-fetch is anti-bot-walled, it escalates through the same stealth ladder as
-enrichment (:mod:`recon.stealthweb`): TLS-impersonated, **never** a CAPTCHA
-bypass and **never** a robots-denied host.
+fragile status-only guess the third-party engines rely on. The page comes
+through :func:`recon.retrieval.fetch` (G2): the access policy, the SSRF guard,
+the per-host backoff, the outcome vocabulary and the stealth ladder
+(:class:`recon.ladder.StealthLadder`, TLS-impersonated then a rendering-only
+browser, **never** a CAPTCHA bypass and **never** a robots-denied host) are
+the shared ones, and every check is recorded against the source registry
+(:func:`recon.sources.record`).
+
+Outcome precedence (audit §2 item 7 — a challenge page without the
+``present`` marker used to be ABSENT): retrieval's verdict first —
+``blocked``/``transport``/``policy``/``ssrf`` is BLOCKED with the reason before
+any marker logic, ``absent`` is ABSENT — and only an ``ok`` page is read for
+markers. The browser budget is **per sweep** (an argument, no module global:
+concurrent runs used to reset each other's budget — audit §6 "also noted").
 
 Same rules as adapters, enforced by review:
   * Public + unauthenticated only; robots.txt must permit the path.
@@ -23,26 +33,30 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Optional
 
-from recon import htmltext, policy, safeweb, stealthweb
+from recon import policy, retrieval, safeweb, sources
 from recon.engines import normalize_site
+from recon.htmltext import has_challenge_markers, has_consent_wall
+from recon.ladder import StealthLadder
+from recon.retrieval import FetchResult
+from recon.rows import avatar as row_avatar, bio as row_bio, display_name as row_display_name
 
 logger = logging.getLogger("recon.detectors")
 
 TIMEOUT_S = 12
 MAX_BODY_BYTES = 512 * 1024
-USER_AGENT = ("sherlock-web/1.0 (OSINT account verification; "
-              "+https://github.com/oduameh/sherlock-web)")
 
 EXISTS = "exists"
 ABSENT = "absent"
 BLOCKED = "blocked"
 
 # Per-sweep cap on tier-3 (headless browser) escalations — each costs seconds.
-# Reset at the start of every :func:`discover` call.
+# One StealthLadder(BROWSER_BUDGET) per :func:`discover` call carries it.
 BROWSER_BUDGET = int(os.environ.get("RECON_DETECTOR_BROWSER_BUDGET") or "3")
-_browser_budget = {"left": BROWSER_BUDGET}
+
+_UNREADABLE = (retrieval.BLOCKED, retrieval.TRANSPORT, retrieval.POLICY, retrieval.SSRF)
 
 
 class HtmlDetector:
@@ -50,12 +64,15 @@ class HtmlDetector:
 
     ``present`` markers appear only on a real profile; ``absent`` markers appear
     on the not-found page. Existence is decided by markers first, status second.
+    ``source`` is the registry name in :mod:`recon.sources` the check is
+    recorded against.
     """
 
     def __init__(self, name: str, sites: tuple, url: str,
                  present: tuple = (), absent: tuple = (),
                  absent_status: tuple = (404, 410),
-                 stealth: bool = True, note: str = ""):
+                 stealth: bool = True, note: str = "",
+                 source: Optional[str] = None):
         self.name = name
         self.sites = {normalize_site(s) for s in sites}
         self.url = url
@@ -64,6 +81,7 @@ class HtmlDetector:
         self.absent_status = absent_status
         self.stealth = stealth
         self.note = note
+        self.source = source or normalize_site(name)
 
     def handles(self, site: str) -> bool:
         return normalize_site(site or "") in self.sites
@@ -86,7 +104,7 @@ class HtmlDetector:
         # not an answer: without this a walled detector reported ABSENT and
         # the circuit breaker recorded it as healthy. (Bare JS shells are left
         # to the escalation ladder in check(), which runs before classify.)
-        if html and (htmltext.has_challenge_markers(html) or htmltext.has_consent_wall(html)):
+        if html and (has_challenge_markers(html) or has_consent_wall(html)):
             return BLOCKED
         if any(m.lower() in low for m in self.absent):
             return ABSENT
@@ -96,8 +114,33 @@ class HtmlDetector:
             return ABSENT
         return BLOCKED
 
-    async def check(self, username: str) -> dict:
-        """Run the detector. Never raises; returns an adapter-shaped result."""
+    def outcome(self, res: FetchResult) -> tuple[str, Optional[str]]:
+        """``(verdict, reason)`` — retrieval's outcome first, markers second.
+
+        ``blocked``/``transport``/``policy``/``ssrf`` ⇒ BLOCKED with
+        :attr:`FetchResult.reason` (a rate limit, a challenge page, a consent
+        wall, a login redirect, an exception class); ``absent`` ⇒ ABSENT;
+        ``ok`` ⇒ :meth:`classify` on the page. Pure.
+        """
+        if res.outcome in _UNREADABLE:
+            return BLOCKED, res.reason
+        if res.outcome == retrieval.ABSENT:
+            return ABSENT, None
+        return self.classify(res.status, res.html), None
+
+    async def check(self, username: str, *,
+                    host_state: Optional[retrieval.HostState] = None,
+                    retrieval_stats: Optional[retrieval.RetrievalStats] = None,
+                    ladder: Optional[StealthLadder] = None) -> dict:
+        """Run the detector. Never raises; returns an adapter-shaped result.
+
+        ``host_state`` / ``retrieval_stats`` are the run's shared retrieval
+        state; ``ladder`` the sweep's budgeted stealth ladder (a private one
+        is created for a lone call). The check is recorded against
+        ``self.source`` in the registry — ``ok`` when the source answered
+        (EXISTS or ABSENT), a failure with the reason when it was BLOCKED; a
+        policy refusal is not recorded because nothing was fetched.
+        """
         url = self.profile_url(username)
         out: dict = {"detector": self.name, "source_url": url}
         reason = policy.denied_reason(url)
@@ -105,91 +148,62 @@ class HtmlDetector:
             out.update(status=BLOCKED, signal=f"policy: {reason}")
             return out
 
-        status, html = await _fetch(url)
-        fetch_error = _LAST_FETCH_ERROR.pop(url, None) if status is None else None
-        # Anti-bot wall on an honest fetch → escalate via the stealth ladder
-        # (still SSRF-guarded, still robots-permitted; never a denied host).
-        if (self.stealth and stealthweb.enabled()
-                and stealthweb.should_escalate(status, html)):
-            st2, html2 = await stealthweb.fetch_tls(url)
-            if st2 is not None:
-                status, html = st2, html2
-            # Still walled or still a JS shell? Only the real browser can
-            # render it. Without this a single-page profile returns an empty
-            # shell and `classify` would call a live account ABSENT — a false
-            # negative. Budget-capped: the browser costs seconds per page.
-            # Rendering only — the browser tier never solves a challenge; a
-            # challenge page that survives rendering stays BLOCKED.
-            if (stealthweb.should_escalate(status, html)
-                    and _browser_budget["left"] > 0):
-                _browser_budget["left"] -= 1
-                st3, html3 = await stealthweb.fetch_browser(url)
-                if st3 is not None:
-                    status, html = st3, html3
+        if self.stealth and ladder is None:
+            ladder = StealthLadder(BROWSER_BUDGET)
+        use = ladder.for_fetch() if (self.stealth and ladder is not None) else None
+        t0 = time.monotonic()
+        try:
+            async with safeweb.async_client(timeout=TIMEOUT_S) as client:
+                res = await retrieval.fetch(
+                    url, client=client, kind="html", host_state=host_state,
+                    stats=retrieval_stats, ladder=use,
+                    headers={"User-Agent": sources.USER_AGENT},
+                    max_bytes=MAX_BODY_BYTES)
+        except Exception as exc:   # the client itself could not be opened
+            logger.debug("detector fetch failed for %s: %s", url, exc)
+            res = FetchResult(retrieval.TRANSPORT, f"no response ({type(exc).__name__})",
+                              None, None, type(exc).__name__, final_url=url)
+        # A 2xx JS shell is ``ok`` to retrieval. A single-page profile renders
+        # one to a plain client and `classify` would call the live account
+        # ABSENT — a false negative — so it is rendered (budget-capped, never
+        # a challenge solver) before any verdict.
+        res = await retrieval.escalate_shell(res, url, ladder=use,
+                                             host_state=host_state,
+                                             stats=retrieval_stats)
+        latency_ms = (time.monotonic() - t0) * 1000
 
-        verdict = self.classify(status, html)
-        out["http_status"] = status
+        verdict, why = self.outcome(res)
+        out["http_status"] = res.status
         out["status"] = verdict
         if verdict == EXISTS:
             out["signal"] = f"{self.name} profile page confirms this account exists"
-            out["identity"] = _identity_from_html(html, url)
+            out["identity"] = _identity_from_html(res.html, url)
             out["temporal"] = {}
         elif verdict == ABSENT:
             out["signal"] = f"{self.name}: no such profile"
         else:
-            why = f" ({fetch_error})" if fetch_error else (f" (HTTP {status})" if status else "")
-            out["signal"] = f"{self.name}: blocked{why} — cannot determine"
+            why = why or res.reason
+            out["signal"] = f"{self.name}: blocked ({why}) — cannot determine"
+        sources.record(self.source, verdict != BLOCKED, latency_ms,
+                       why if verdict == BLOCKED else None)
         return out
 
 
-# Exception class of the last failed plain fetch per URL, so the router can
-# classify a transport failure (timeout/DNS/reset) instead of "unknown".
-_LAST_FETCH_ERROR: dict = {}
-
-
-async def _fetch(url: str) -> tuple:
-    """Plain capped HTML GET. Returns ``(status, html)`` or ``(None, None)``."""
-    try:
-        async with safeweb.async_client(timeout=TIMEOUT_S) as client:
-            async with client.stream(
-                    "GET", url, headers={"User-Agent": USER_AGENT}) as resp:
-                status = resp.status_code
-                ct = (resp.headers.get("content-type") or "").lower()
-                if "html" not in ct and "text" not in ct:
-                    return status, None
-                chunks: list = []
-                size = 0
-                async for chunk in resp.aiter_bytes(16384):
-                    chunks.append(chunk)
-                    size += len(chunk)
-                    if size >= MAX_BODY_BYTES:
-                        break
-                body = b"".join(chunks).decode(
-                    resp.encoding or "utf-8", errors="replace")
-                return status, body
-    except Exception as exc:
-        logger.debug("detector fetch failed for %s: %s", url, exc)
-        _LAST_FETCH_ERROR[url] = type(exc).__name__
-        return None, None
-
-
 def _identity_from_html(html: Optional[str], url: str) -> dict:
-    """Reuse the enrichment extractor for name/avatar/bio from the profile."""
+    """Reuse the enrichment extractor for name/avatar/bio from the profile,
+    read back through :mod:`recon.rows` so the precedence (JSON-LD before
+    Open Graph, never the raw title) is the one every consumer shares."""
     from recon.enrich import _extract
     try:
         data = _extract(html or "", url)
     except Exception:
         return {}
+    row = {"enrichment": data}
     ident: dict = {}
-    name = data.get("jsonld_name") or data.get("og_title")
-    if name:
-        ident["display_name"] = name
-    avatar = data.get("jsonld_image") or data.get("og_image")
-    if avatar:
-        ident["avatar"] = avatar
-    bio = data.get("jsonld_description") or data.get("og_description")
-    if bio:
-        ident["bio"] = bio
+    for key, value in (("display_name", row_display_name(row)),
+                       ("avatar", row_avatar(row)), ("bio", row_bio(row))):
+        if value:
+            ident[key] = value
     return ident
 
 
@@ -200,6 +214,7 @@ DETECTORS: list[HtmlDetector] = [
         "https://t.me/{username}",
         present=("tgme_page_title",),
         absent_status=(404,),
+        source="telegram",
         note="Real users render a tgme_page_title block; a nonexistent handle "
              "returns a bare 'Telegram: Contact @handle' page without it. t.me "
              "serves no robots.txt (allow-all). Verified 2026-08-24.",
@@ -209,6 +224,7 @@ DETECTORS: list[HtmlDetector] = [
         "https://steamcommunity.com/id/{username}",
         present=("g_rgProfileData",),
         absent=("specified profile could not be found", "error_ctn"),
+        source="steam_community",
         note="Vanity /id/ profile. Real profiles embed g_rgProfileData; the "
              "not-found page shows 'could not be found'. robots permits /id/ "
              "(/trade,/actions,/email,... are disallowed). Verified 2026-08-24.",
@@ -218,6 +234,7 @@ DETECTORS: list[HtmlDetector] = [
         "https://gravatar.com/{username}",
         present=("og:image",),
         absent_status=(404,),
+        source="gravatar_html",
         note="Username profile HTML (NOT the .json, which robots disallows); "
              "404 for a missing user. Verified 2026-08-24.",
     ),
@@ -235,7 +252,10 @@ def covered_sites() -> list:
     return sorted({s for d in DETECTORS for s in d.sites})
 
 
-async def discover(username: str, stats: Optional[dict] = None) -> list:
+async def discover(username: str, stats: Optional[dict] = None, *,
+                   host_state: Optional[retrieval.HostState] = None,
+                   retrieval_stats: Optional[retrieval.RetrievalStats] = None,
+                   ladder: Optional[StealthLadder] = None) -> list:
     """Run every content detector for ``username`` concurrently. Returns
     ``{site, url, identity, temporal, source_url}`` for EXISTS results only.
     Never raises. Bounded to a real handle — never fanned across candidates.
@@ -244,14 +264,20 @@ async def discover(username: str, stats: Optional[dict] = None) -> list:
     ``{name: {kind, status, signal, http_status}}`` — including ABSENT and
     BLOCKED, which the return value omits (they were discarded before anyone
     could observe them: audit ops-observability gap 8). Return shape unchanged.
+
+    ``ladder`` is the sweep's browser budget (``BROWSER_BUDGET`` tier-3
+    fetches); a fresh one is made per call when none is given, so no sweep
+    can spend or reset another's.
     """
     if not username:
         return []
-    _browser_budget["left"] = BROWSER_BUDGET   # fresh budget per sweep
+    if ladder is None:
+        ladder = StealthLadder(BROWSER_BUDGET)   # fresh budget per sweep
 
     async def _one(d: HtmlDetector) -> Optional[dict]:
         try:
-            res = await d.check(username)
+            res = await d.check(username, host_state=host_state,
+                                retrieval_stats=retrieval_stats, ladder=ladder)
         except Exception as exc:
             if stats is not None:
                 stats[d.name] = {

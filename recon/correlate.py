@@ -54,7 +54,8 @@ from collections import Counter, defaultdict
 from typing import Optional
 from urllib.parse import urlparse
 
-from recon import policy, safeweb
+from recon import policy, retrieval, safeweb
+from recon.rows import avatar as row_avatar, display_name as row_display_name
 from recon.confidence import (
     AVATAR_WEIGHT,
     BIO_WEIGHT,
@@ -287,7 +288,7 @@ def placeholder_hashes(rows: list[dict]) -> set[int]:
             continue
         if is_generic_hash(h):            # covers all-0 / all-1 too
             out.add(h)
-        if is_placeholder_avatar(_avatar_url(r)):
+        if is_placeholder_avatar(row_avatar(r)):
             out.add(h)
         counts[h] += 1
         per_site[(_site_key(r), h)].add(_norm_handle(r.get("username")))
@@ -379,12 +380,12 @@ def _strip_handle(text: str, handle: str) -> str:
 def clean_display_name(row: dict) -> str:
     """The person's display name with the site's template removed, or "".
 
-    Uses only structured fields (``jsonld_name``, ``og_title``) — never the raw
-    page ``<title>``. Returns "" when nothing person-specific is left or when
-    the "name" is merely the handle again.
+    Reads the raw value through :func:`recon.rows.display_name` (the platform's
+    own name, then JSON-LD, then Open Graph) — never the raw page ``<title>``.
+    Returns "" when nothing person-specific is left or when the "name" is
+    merely the handle again.
     """
-    enr = row.get("enrichment") or {}
-    raw = enr.get("jsonld_name") or enr.get("og_title") or ""
+    raw = row_display_name(row) or ""
     if not raw:
         return ""
     handle = row.get("username") or ""
@@ -462,23 +463,23 @@ def participates(row: dict) -> bool:
     return status not in _NON_PROFILE_STATUSES
 
 
-def _avatar_url(row: dict) -> Optional[str]:
-    enr = row.get("enrichment") or {}
-    return enr.get("jsonld_image") or enr.get("og_image")
-
-
-async def _download_avatars(rows: list[dict]) -> None:
+async def _download_avatars(rows: list[dict], *,
+                            host_state: Optional[retrieval.HostState] = None,
+                            stats: Optional[retrieval.RetrievalStats] = None) -> None:
     """Attach ``avatar_hash`` to rows that have an avatar URL (in place).
 
     Known placeholders are not fetched; rows sharing one URL share one fetch.
     Avatars hosted on a robots-denied host (``og:image`` on ``pbs.twimg.com``
     is common) are never requested (security F-2): the access policy applies
-    to every fetch path, not only profile pages.
+    to every fetch path, not only profile pages. The download itself is
+    :func:`recon.retrieval.fetch` with ``kind="bytes"`` (G2): the SSRF guard,
+    the per-host backoff and the size cap are the shared ones, and a body
+    over ``AVATAR_MAX_BYTES`` yields no content.
     """
     sem = asyncio.Semaphore(5)
     by_url: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
-        url = _avatar_url(r)
+        url = row_avatar(r)
         if not url or r.get("avatar_hash") is not None:
             continue
         if is_placeholder_avatar(url):
@@ -495,8 +496,11 @@ async def _download_avatars(rows: list[dict]) -> None:
         async def one(url: str, group: list[dict]) -> None:
             try:
                 async with sem:
-                    content = await safeweb.fetch_capped(
-                        client, url, AVATAR_MAX_BYTES)
+                    res = await retrieval.fetch(
+                        url, client=client, kind="bytes",
+                        max_bytes=AVATAR_MAX_BYTES, host_state=host_state,
+                        stats=stats)
+                content = res.content
                 if content:
                     h = average_hash(content)
                     h16 = average_hash16(content)
@@ -601,18 +605,25 @@ def score_pair(a: dict, b: dict, *, placeholders: set[int] = frozenset(),
             "signals": signals}
 
 
-async def correlate(rows: list[dict]) -> list[dict]:
+async def correlate(rows: list[dict], *,
+                    host_state: Optional[retrieval.HostState] = None,
+                    retrieval_stats: Optional[retrieval.RetrievalStats] = None
+                    ) -> list[dict]:
     """Cluster found-profile rows. Returns clusters with confidence 0-100.
 
     Only real, fetched profile rows with enrichment participate. Each cluster:
       {members: [{username, site, url}], confidence, links: [{a, b, score,
       rationale, signals}]}
+
+    ``host_state`` / ``retrieval_stats`` are the run's shared retrieval state
+    for the avatar downloads (optional; the rules are unchanged).
     """
     candidates = [r for r in rows if participates(r)]
     if len(candidates) < 2:
         return []
 
-    await _download_avatars(candidates)
+    await _download_avatars(candidates, host_state=host_state,
+                            stats=retrieval_stats)
     candidates = [r for r in candidates if r.get("enrichment")]
     if len(candidates) < 2:
         return []
