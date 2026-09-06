@@ -221,10 +221,16 @@ def covered_sites() -> list:
     return sorted({s for d in DETECTORS for s in d.sites})
 
 
-async def discover(username: str) -> list:
+async def discover(username: str, stats: Optional[dict] = None) -> list:
     """Run every content detector for ``username`` concurrently. Returns
     ``{site, url, identity, temporal, source_url}`` for EXISTS results only.
-    Never raises. Bounded to a real handle — never fanned across candidates."""
+    Never raises. Bounded to a real handle — never fanned across candidates.
+
+    ``stats``, when given, receives every detector's outcome —
+    ``{name: {kind, status, signal, http_status}}`` — including ABSENT and
+    BLOCKED, which the return value omits (they were discarded before anyone
+    could observe them: audit ops-observability gap 8). Return shape unchanged.
+    """
     if not username:
         return []
     _browser_budget["left"] = BROWSER_BUDGET   # fresh budget per sweep
@@ -232,8 +238,20 @@ async def discover(username: str) -> list:
     async def _one(d: HtmlDetector) -> Optional[dict]:
         try:
             res = await d.check(username)
-        except Exception:
+        except Exception as exc:
+            if stats is not None:
+                stats[d.name] = {
+                    "kind": "detector", "status": BLOCKED,
+                    "signal": f"discover failed ({type(exc).__name__})",
+                    "http_status": None,
+                }
             return None
+        if stats is not None:
+            stats[d.name] = {
+                "kind": "detector", "status": res.get("status"),
+                "signal": res.get("signal"),
+                "http_status": res.get("http_status"),
+            }
         if res.get("status") != EXISTS:
             return None
         return {

@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -173,8 +174,14 @@ async def _check_site(client, site: dict, username: str,
     reason = policy.denied_reason(url)
     if reason:
         return WmnResult(POLICY, name, url, cat, f"policy: {reason}")
+    # ``query_time`` is the plain request's wall time (success or failure),
+    # like Sherlock's. It feeds the router's EWMA latency per site — until
+    # 2026-09-06 it was never set, so 0 of 649 WhatsMyName site_health rows
+    # had a latency (audit ops-observability §5 / §10 gap 7).
+    t0 = time.monotonic()
     try:
         status_code, body = await _get_capped(client, url)
+        elapsed = time.monotonic() - t0
         status = classify_response(site, status_code, body)
         # A blocked/ambiguous response on a HIGH-VALUE site is often a WAF/JS
         # interstitial. Spend one budgeted tier-2 stealth fetch (TLS-impersonated,
@@ -192,11 +199,13 @@ async def _check_site(client, site: dict, username: str,
             if st2 is not None and body2:
                 status2 = classify_response(site, st2, body2)
                 if status2 != UNKNOWN:
-                    return WmnResult(status2, name, url, cat, "stealth-recovered")
+                    return WmnResult(status2, name, url, cat, "stealth-recovered",
+                                     query_time=elapsed)
         context = "" if status != UNKNOWN else f"HTTP {status_code}"
-        return WmnResult(status, name, url, cat, context)
+        return WmnResult(status, name, url, cat, context, query_time=elapsed)
     except Exception as exc:
-        return WmnResult(UNKNOWN, name, url, cat, f"{type(exc).__name__}: {exc}")
+        return WmnResult(UNKNOWN, name, url, cat, f"{type(exc).__name__}: {exc}",
+                         query_time=time.monotonic() - t0)
 
 
 async def whatsmyname_scan(username: str, sites: list[dict], timeout: int,
