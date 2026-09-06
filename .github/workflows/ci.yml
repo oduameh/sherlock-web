@@ -20,18 +20,29 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements-dev.txt
+          cache-dependency-path: requirements*.txt
 
       - name: Install dependencies
+        # The stealth extra is installed too: two tests exercise Scrapling's
+        # HTML parser (no browser needed, so no `patchright install`).
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          pip install -r requirements-dev.txt -r requirements-stealth.txt
 
       - name: Lint (ruff)
         run: ruff check .
 
+      - name: Frontend syntax (node --check)
+        run: node --check static/js/app.js
+
       - name: Tests (pytest)
         run: pytest -q
+
+      - name: Dependency audit (pip-audit)
+        # Advisory until a hash-pinned lockfile lands (target §8 decision 10):
+        # the report is visible in the job log; it does not block the merge yet.
+        continue-on-error: true
+        run: pip-audit --strict --progress-spinner off
 
       - name: Boot smoke test (/, /api/sites return 200)
         run: |
@@ -74,7 +85,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements-dev.txt
+          cache-dependency-path: requirements*.txt
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip

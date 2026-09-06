@@ -14,3 +14,7 @@ local.properties
 
 # God's Eye View app clone (run scripts/godseye.sh)
 godseye/
+
+# local design notes / tool caches
+.superdesign/
+.ruff_cache/
