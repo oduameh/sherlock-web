@@ -305,3 +305,85 @@ def test_iframe_sandbox_allows_modals_and_downloads():
     allow = re.search(r'allow="([^"]*)"', tag).group(1)
     assert {"allow-scripts", "allow-same-origin", "allow-modals", "allow-downloads"} <= set(sandbox)
     assert "microphone" not in allow and "camera" not in allow
+
+
+# --- saved reports embed server-made thumbnails (V11 for the file on disk) ----
+
+def _real_png(size=(120, 90)):
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", size, (30, 144, 255)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _seed_recon_run(avatar_url, gravatar_url=None):
+    import json
+    from dbconn import connect, insert_returning_id
+    results = {
+        "params": {"usernames": ["alice"]},
+        "accounts": [{"site": "GitHub", "username": "alice", "url": "https://github.com/alice",
+                      "engines": ["sherlock"], "enrichment": {"og_image": avatar_url}}],
+        "variants": [], "correlation": [],
+        "email": {"gravatar": {"avatar_url": gravatar_url, "profile_url": "https://gravatar.com/alice",
+                               "display_name": "Alice"}} if gravatar_url else {},
+    }
+    with connect(appmod.DB_PATH) as conn:
+        return insert_returning_id(
+            conn, "INSERT INTO runs (ts, username, found, total, results, kind, investigation_id)"
+                  " VALUES (?,?,?,?,?,?,?)",
+            ("2026-09-06 00:00:00", "alice", 1, 1, json.dumps(results), "recon", None))
+
+
+SRC_ATTR = re.compile(r"""src=(['"])(.*?)\1""", re.I | re.S)
+
+
+def test_report_embeds_proxied_thumbnails_and_never_the_remote_url(proxy):
+    proxy.respond(lambda r: httpx.Response(200, content=_real_png(),
+                                           headers={"content-type": "image/png"}))
+    run_id = _seed_recon_run(IMG, "https://0.gravatar.com/avatar/abc")
+    r = proxy.get(f"/api/recon/report/{run_id}")
+    assert r.status_code == 200
+    srcs = [u for _, u in SRC_ATTR.findall(r.text)]
+    assert len(srcs) == 2 and all(u.startswith("data:image/png;base64,") for u in srcs)
+    assert "cdn.example" not in r.text and "0.gravatar.com/avatar" not in r.text
+    assert sorted(str(c.url) for c in proxy.calls) == sorted([IMG, "https://0.gravatar.com/avatar/abc"])
+    # Rendering again serves from the avatar cache: no second fetch.
+    proxy.get(f"/api/recon/report/{run_id}")
+    assert len(proxy.calls) == 2
+
+
+def test_report_renders_without_a_picture_when_the_avatar_cannot_be_fetched(proxy):
+    proxy.respond(lambda r: httpx.Response(503))
+    run_id = _seed_recon_run(IMG)
+    r = proxy.get(f"/api/recon/report/{run_id}")
+    assert r.status_code == 200 and "<img" not in r.text and "cdn.example" not in r.text
+    assert "alice" in r.text
+    # An undecodable body is a missing picture too, not an error.
+    proxy.respond(lambda r: httpx.Response(200, content=PNG, headers={"content-type": "image/png"}))
+    appmod._avatar_cache.clear()
+    r = proxy.get(f"/api/recon/report/{run_id}")
+    assert r.status_code == 200 and "<img" not in r.text
+
+
+def test_report_applies_the_proxys_refusals_without_touching_the_network(proxy):
+    run_id = _seed_recon_run("https://www.instagram.com/x.jpg", "https://user:pw@cdn.example/a.png")
+    r = proxy.get(f"/api/recon/report/{run_id}")
+    assert r.status_code == 200 and "<img" not in r.text
+    assert proxy.calls == []
+
+
+def test_report_thumbnails_stop_at_the_budget(proxy, monkeypatch):
+    import asyncio
+
+    async def slow(request):
+        await asyncio.sleep(2)
+        return httpx.Response(200, content=_real_png(), headers={"content-type": "image/png"})
+
+    proxy.respond(slow)
+    monkeypatch.setattr(appmod, "AVATAR_REPORT_BUDGET_S", 0.2)
+    run_id = _seed_recon_run(IMG)
+    t0 = time.monotonic()
+    r = proxy.get(f"/api/recon/report/{run_id}")
+    assert time.monotonic() - t0 < 1.5
+    assert r.status_code == 200 and "<img" not in r.text

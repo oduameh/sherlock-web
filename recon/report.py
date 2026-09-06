@@ -1,7 +1,9 @@
 """Self-contained HTML report rendering for recon runs.
 
-Dark theme matching the app. No external assets; avatar URLs are linked,
-not embedded. All dynamic values are HTML-escaped.
+Dark theme matching the app. No external assets: avatars are embedded as
+small ``data:`` thumbnails the server produced from bytes fetched through the
+avatar proxy path (V11), never as a link to the subject's host — a saved file
+opened later must not contact it. All dynamic values are HTML-escaped.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ import re
 from typing import Any
 
 from recon.rows import avatar, bio, display_name
+from recon.thumbnail import is_thumbnail_uri
 
 
 def _e(v: Any) -> str:
@@ -78,13 +81,25 @@ def _verify_badge(row: dict) -> str:
     return ""
 
 
-def _enrichment_cell(row: dict) -> str:
+def _avatar_img(url: Any, avatars: dict[str, str] | None) -> str:
+    """An ``<img>`` for the server-made thumbnail of ``url`` (a subject-
+    controlled avatar URL), or ``""``. Only a data URI produced by
+    :mod:`recon.thumbnail` is ever placed in ``src``: the remote URL itself
+    would make the saved report fetch from the subject's host (V11), and a
+    hostile scheme is dropped, not escaped (F-6)."""
+    uri = (avatars or {}).get(url) if isinstance(url, str) else None
+    if not is_thumbnail_uri(uri):
+        return ""
+    return f'<img class="avatar" src="{uri}" alt="">'
+
+
+def _enrichment_cell(row: dict, avatars: dict[str, str] | None = None) -> str:
     """Avatar, name and bio through :mod:`recon.rows` — the raw page
     ``<title>`` is never shown as the person's name (D7)."""
     bits = []
-    img = _href(avatar(row))
-    if img:   # target-controlled: same scheme allow-list as links (F-6)
-        bits.append(f'<img class="avatar" src="{img}" alt="" loading="lazy">')
+    img = _avatar_img(avatar(row), avatars)
+    if img:
+        bits.append(img)
     name = display_name(row)
     if name:
         bits.append(f"<b>{_e(name)}</b>")
@@ -95,7 +110,7 @@ def _enrichment_cell(row: dict) -> str:
     return " ".join(bits) if bits else '<span class="dim">—</span>'
 
 
-def render_report(run: dict) -> str:
+def render_report(run: dict, *, avatars: dict[str, str] | None = None) -> str:
     """run: the stored recon run dict (subject, ts, params, results...)."""
     subject = _e(run.get("subject", ""))
     ts = _e(run.get("ts", ""))
@@ -140,7 +155,7 @@ def render_report(run: dict) -> str:
                 f"<div class='dim'>username: {_e(r.get('username'))} "
                 f"{_verify_badge(r)}</div></td>"
                 f"<td>{_engine_badges(r.get('engines') or [])}</td>"
-                f"<td>{_enrichment_cell(r)}</td></tr>"
+                f"<td>{_enrichment_cell(r, avatars)}</td></tr>"
             )
         parts.append("</table></div>")
     else:
@@ -169,9 +184,9 @@ def render_report(run: dict) -> str:
         grav = email.get("gravatar")
         parts.append("<div class='card'>")
         if grav:
-            av = _href(grav.get("avatar_url"))
+            av = _avatar_img(grav.get("avatar_url"), avatars)
             if av:
-                parts.append(f"<img class='avatar' src='{av}' alt=''>")
+                parts.append(av)
             parts.append(
                 f"<b>{_e(grav.get('display_name') or grav.get('full_name') or 'Gravatar profile')}</b> "
                 f"<a href='{_href(grav.get('profile_url'))}'>{_e(grav.get('profile_url'))}</a>"

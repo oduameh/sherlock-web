@@ -528,7 +528,7 @@ def test_fetch_policy_host_is_never_requested():
 def test_fetch_private_address_is_ssrf_without_a_request(url):
     st = RetrievalStats()
     res, calls = _run(lambda r: httpx.Response(200, html=REAL), url=url, stats=st)
-    assert res.outcome == SSRF and "non-public" in res.reason
+    assert res.outcome == SSRF and ("non-public" in res.reason or "non-standard port" in res.reason)
     assert calls == []
     assert st.snapshot()["skipped"]["ssrf"] == 1
 

@@ -39,6 +39,7 @@ BROWSER_UA = (
 )
 
 _ALLOWED_SCHEMES = {"http", "https"}
+_ALLOWED_PORTS = {None, 80, 443}
 
 
 class BlockedRequestError(httpx.RequestError):
@@ -91,9 +92,15 @@ async def assert_public_url(url: str) -> None:
     scheme = (parts.scheme or "").lower()
     if scheme not in _ALLOWED_SCHEMES:
         raise BlockedRequestError(f"blocked non-http(s) scheme: {scheme}")
+    if parts.username or parts.password:
+        raise BlockedRequestError("blocked URL with embedded credentials")
     host = parts.hostname
     if not host:
         raise BlockedRequestError("blocked request with no host")
+    if parts.port not in _ALLOWED_PORTS:
+        raise BlockedRequestError(
+            f"blocked non-standard port {parts.port}"
+        )
 
     # If the host is already an IP literal, check it directly; otherwise resolve.
     try:
