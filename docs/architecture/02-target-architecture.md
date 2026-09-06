@@ -263,7 +263,7 @@ Decisions (owner, 2026-09-06):
    console and reports carry a CSP and anti-framing headers (F-10); the God's Eye iframe
    loses `microphone` and gains `sandbox`.
 6. **Limits (F-8, F-13, F-14):** ≤ 20 usernames per request, ≤ 64 KiB bodies, ≤ 500 alert ids,
-   ≤ 2 concurrent investigations (429 when busy), Pydantic bodies (400 not 500),
+   ≤ 2 concurrent investigations (further streams wait and announce `queued`, §4), Pydantic bodies (400 not 500),
    percent-encoded handles in fixed-host API URLs, handle character/length validation.
 7. **PII (F-5):** `history.db` created with mode 0600; `DELETE /api/investigate/{id}` and
    `DELETE /api/history/{id}`; subject data out of INFO logs; README "data sent to third

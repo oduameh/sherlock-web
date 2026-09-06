@@ -158,6 +158,25 @@ def _shard(items: list, n: int) -> list[list]:
     return [items[i::n] for i in range(n)]
 
 
+class _Children:
+    """The engine/pivot tasks a run spawns. Cancelling the run's own task only
+    cancels the child it happens to be awaiting; the others kept scanning as
+    orphans (543 requests were logged after one cancelled run). The run
+    registers ``cancel_pending`` as a done-callback so every child stops when
+    the run does, whatever the reason."""
+
+    def __init__(self) -> None:
+        self.tasks: list = []
+
+    def spawn(self, coro):
+        task = asyncio.create_task(coro)
+        self.tasks.append(task)
+        return task
+
+    def cancel_pending(self) -> int:
+        return sum(1 for t in self.tasks if not t.done() and t.cancel())
+
+
 async def run_pipeline(
     *,
     name: str = "",
@@ -527,6 +546,20 @@ async def run_pipeline(
     # open-circuit sites and records every observation the engines produce
     # (disabled / no-op when the DB is unavailable).
     router = RunRouter(db_path, emit=emit)
+    # Flush routing observations on EVERY exit — a cancelled or crashed run
+    # used to skip router.finish() and lose the whole run's site-health data.
+    # finish() is idempotent, so the normal call at the end stays as is.
+    children = _Children()
+    spawn = children.spawn
+    _task = asyncio.current_task()
+    if _task is not None:
+        def _on_run_done(_t, _r=router, _c=children):
+            n = _c.cancel_pending()
+            if n:
+                logger.info("run ended early — cancelled %d engine/pivot task(s)", n)
+            _r.finish()
+        _task.add_done_callback(_on_run_done)
+
     # Thorough runs scan maigret's entire database (~3200 sites) for the base
     # username instead of the top ~1200 by rank — broader long-tail coverage at
     # the cost of runtime.
@@ -579,10 +612,10 @@ async def run_pipeline(
     base_items = [(u, {"kind": "base"}) for u in usernames]
     if base_items:
         base_events = start_sherlock(base_items, sher_data)
-        mai_base = asyncio.create_task(maigret_worker(base_items, mai_all))
-        wmn_base = asyncio.create_task(whatsmyname_worker(base_items, wmn_all))
+        mai_base = spawn(maigret_worker(base_items, mai_all))
+        wmn_base = spawn(whatsmyname_worker(base_items, wmn_all))
         # Our own discovery engine runs on the real handles, concurrently.
-        sig_base = asyncio.create_task(signals_worker(base_items))
+        sig_base = spawn(signals_worker(base_items))
     else:
         base_events = []
         mai_base = None
@@ -597,10 +630,10 @@ async def run_pipeline(
     if cand_items:
         cand_events = start_sherlock(cand_items, sher_reduced,
                                      shards=NAME_SHERLOCK_SHARDS)
-        mai_cand = asyncio.create_task(
+        mai_cand = spawn(
             maigret_worker(cand_items, mai_reduced,
                            concurrency=NAME_MAIGRET_CONCURRENCY))
-        wmn_cand = asyncio.create_task(
+        wmn_cand = spawn(
             whatsmyname_worker(cand_items, wmn_reduced,
                                concurrency=NAME_MAIGRET_CONCURRENCY))
     else:
@@ -608,15 +641,15 @@ async def run_pipeline(
         mai_cand = None
         wmn_cand = None
 
-    email_task = asyncio.create_task(email_worker(email)) if email else None
-    domain_task = (asyncio.create_task(domain_worker(pivot_domain))
+    email_task = spawn(email_worker(email)) if email else None
+    domain_task = (spawn(domain_worker(pivot_domain))
                    if pivot_domain else None)
     # Data-broker exposure keys on a real name (brokers index by name/address).
-    broker_task = (asyncio.create_task(broker_worker(name, location))
+    broker_task = (spawn(broker_worker(name, location))
                    if name else None)
     # Phone account-existence pivot: only worth running on a valid number.
     if phone and phone_state.get("valid") and phone_state.get("e164"):
-        phone_task = asyncio.create_task(
+        phone_task = spawn(
             phone_accounts_worker(phone_state["e164"]))
 
     # --- phases ------------------------------------------------------------

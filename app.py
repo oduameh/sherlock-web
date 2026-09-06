@@ -25,6 +25,7 @@ import re
 import secrets
 import threading
 import time
+import weakref
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -77,7 +78,9 @@ except Exception as _recon_exc:  # pragma: no cover
     RECON_AVAILABLE = False
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "history.db"
+# SHERLOCK_DB_PATH lets tests and multi-instance setups point at their own
+# SQLite file (ignored when DATABASE_URL selects Postgres).
+DB_PATH = Path(os.environ.get("SHERLOCK_DB_PATH") or (BASE_DIR / "history.db"))
 STATIC_DIR = BASE_DIR / "static"
 
 
@@ -85,6 +88,10 @@ STATIC_DIR = BASE_DIR / "static"
 async def lifespan(app: FastAPI):
     """Start (and cleanly stop) the background watchlist monitor."""
     monitor_task = None
+    try:
+        sweep_stuck_investigations()
+    except Exception:
+        logging.getLogger("app").exception("startup sweep failed")
     if RECON_AVAILABLE:
         sher_light = recon_engines.sherlock_variant_site_data(SITE_DATA_ALL)
         monitor_task = asyncio.create_task(
@@ -141,9 +148,161 @@ async def basic_auth_gate(request: Request, call_next):
 # Site data (loaded once at startup)
 # ---------------------------------------------------------------------------
 
-# SitesInformation() honors Sherlock's built-in exclusions (dead sites etc.).
-# SiteInformation.information is the raw per-site dict sherlock() expects.
-_ALL_SITES = list(SitesInformation())
+# Sherlock's site list. The library's default downloads data.json and an
+# exclusions list from GitHub at import time with no timeout, so the app could
+# not start offline and hung on a slow network. Loader modes
+# (SHERLOCK_SITES_SOURCE):
+#   auto (default)  a cached copy of the live list, refreshed at most every
+#                   SHERLOCK_SITES_MAX_AGE_H hours with a 5 s timeout; on any
+#                   failure the stale cache, then the data.json bundled with the
+#                   installed package. Never blocks boot for more than the timeout.
+#   bundled         the installed package's data.json only (deterministic; tests).
+#   remote          the library's own live download (untimed) — kept for parity.
+# Exclusions (dead / false-positive-prone sites) come from the live list when it
+# was fetched, else from the vendored snapshot recon/data/sherlock-exclusions.txt.
+_SITES_CACHE_DIR = BASE_DIR / "recon" / "data" / "cache"
+_VENDORED_EXCLUSIONS = BASE_DIR / "recon" / "data" / "sherlock-exclusions.txt"
+_SITES_FETCH_TIMEOUT_S = 5.0
+_SITES_MIN_COUNT = 200          # a real Sherlock list has ~400 entries
+
+
+def _sites_max_age_s() -> float:
+    try:
+        return float(os.environ.get("SHERLOCK_SITES_MAX_AGE_H") or "168") * 3600
+    except ValueError:
+        return 168 * 3600
+
+
+def _read_exclusions(path: Path) -> set:
+    try:
+        return {ln.strip().lower() for ln in path.read_text().splitlines()
+                if ln.strip() and not ln.startswith("#")}
+    except OSError:
+        return set()
+
+
+def _fetch_text_with_timeout(url: str) -> str:
+    import httpx
+    r = httpx.get(url, timeout=_SITES_FETCH_TIMEOUT_S, follow_redirects=True)
+    r.raise_for_status()
+    return r.text
+
+
+def _sites_from_json_text(text: str) -> list:
+    """Parse a Sherlock data.json payload into site objects, or raise.
+
+    Validates the *shape* before anything is cached: valid JSON of the wrong
+    shape (a list, a string, a dict of non-sites) used to pass a bare
+    ``json.loads`` guard, get cached with a fresh mtime, and then make every
+    boot for a week fail inside ``SitesInformation``.
+    """
+    import tempfile
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("site list is not a JSON object")
+    entries = {k: v for k, v in data.items() if k != "$schema"}
+    if len(entries) < _SITES_MIN_COUNT or not all(
+            isinstance(v, dict) and isinstance(v.get("url"), str) for v in entries.values()):
+        raise ValueError(f"site list has the wrong shape ({len(entries)} entries)")
+    # SitesInformation insists on a path ending in .json; load from a temp file
+    # so a bad payload can never poison the cache.
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        fh.write(text)
+        tmp = fh.name
+    try:
+        # honor_exclusions=False: the library would fetch the list remotely.
+        return list(SitesInformation(data_file_path=tmp, honor_exclusions=False))
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _load_sherlock_sites(source: str | None = None, cache_dir: Path | None = None,
+                         fetch=None, now: float | None = None):
+    """Return ``(sites, label)`` per the modes documented above.
+
+    ``auto``: a cached copy of the live list, refreshed with a timeout when
+    older than SHERLOCK_SITES_MAX_AGE_H; on any failure the stale cache, then
+    the bundled copy. Every payload is validated by actually loading it before
+    it is cached; the cache is written atomically; a cache that fails to load
+    is deleted and never blocks boot. A fetched list is used even when the
+    cache directory cannot be written. Parameters exist so tests can exercise
+    every path without the network.
+    """
+    source = (source or os.environ.get("SHERLOCK_SITES_SOURCE") or "auto").strip().lower()
+    log = logging.getLogger("app")
+    import sherlock_project
+    bundled = Path(sherlock_project.__file__).resolve().parent / "resources" / "data.json"
+    vendored_excl = _read_exclusions(_VENDORED_EXCLUSIONS)
+
+    def load_bundled():
+        return _sites_from_json_text(bundled.read_text()), vendored_excl, "bundled"
+
+    if source == "remote":
+        return list(SitesInformation()), "remote"
+    if source == "bundled":
+        sites, excl, label = load_bundled()
+    else:
+        from sherlock_project.sites import EXCLUSIONS_URL, MANIFEST_URL
+        cache_dir = cache_dir or _SITES_CACHE_DIR
+        data_file = cache_dir / "sherlock-data.json"
+        excl_file = cache_dir / "sherlock-exclusions.txt"
+        now = time.time() if now is None else now
+        sites = excl = None
+        label = "cache"
+        age = (now - data_file.stat().st_mtime) if data_file.exists() else None
+        fresh = age is not None and 0 <= age < _sites_max_age_s()
+        if not fresh:
+            fetch = fetch or _fetch_text_with_timeout
+            try:
+                text = fetch(MANIFEST_URL)
+                sites = _sites_from_json_text(text)          # validated before caching
+                label = "remote"
+                excl_text = None
+                try:
+                    excl_text = fetch(EXCLUSIONS_URL)
+                except Exception as exc:                     # exclusions are best-effort
+                    log.info("sherlock exclusions refresh failed (%s)", exc)
+                try:
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    tmp = data_file.with_suffix(".json.tmp")
+                    tmp.write_text(text)
+                    os.replace(tmp, data_file)                # atomic: never a torn file
+                    if excl_text is not None:
+                        excl_file.write_text(excl_text)
+                    label = "remote-cached"
+                except OSError as exc:
+                    log.warning("sherlock site list fetched but not cached (%s)", exc)
+                excl = ({ln.strip().lower() for ln in excl_text.splitlines()
+                         if ln.strip() and not ln.startswith("#")}
+                        if excl_text else vendored_excl)
+            except Exception as exc:
+                log.warning("sherlock site list refresh failed (%s); using %s", exc,
+                            "the stale cache" if data_file.exists() else "the bundled copy")
+        if sites is None and data_file.exists():
+            try:
+                sites = _sites_from_json_text(data_file.read_text())
+                excl = _read_exclusions(excl_file) or vendored_excl
+                label = "cache"
+            except Exception as exc:
+                log.warning("cached sherlock site list unreadable (%s); deleting it", exc)
+                try:
+                    data_file.unlink()
+                except OSError:
+                    pass
+                sites = None
+        if sites is None:
+            sites, excl, label = load_bundled()
+    before = len(sites)
+    sites = [st for st in sites if st.name.lower() not in excl]
+    log.info("sherlock site list: %d sites from %s source (%d excluded)",
+             len(sites), label, before - len(sites))
+    return sites, label
+
+
+_ALL_SITES, SITES_SOURCE = _load_sherlock_sites()
 SITE_DATA_ALL = {s.name: s.information for s in _ALL_SITES}
 NSFW_NAMES = {s.name for s in _ALL_SITES if s.is_nsfw}
 
@@ -151,6 +310,50 @@ NSFW_NAMES = {s.name for s in _ALL_SITES if s.is_nsfw}
 # ---------------------------------------------------------------------------
 # SQLite history
 # ---------------------------------------------------------------------------
+
+def _ensure_column(conn, table: str, column: str, decl: str) -> None:
+    """Add ``column`` to ``table`` if missing — on SQLite (PRAGMA) and Postgres
+    (ADD COLUMN IF NOT EXISTS). The bridge until the versioned migration list
+    lands; every call is idempotent."""
+    if dbconn.IS_POSTGRES:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {decl}")
+        return
+    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def sweep_stuck_investigations() -> int:
+    """Mark investigations left in ``running`` by a previous process as
+    ``interrupted``. Runs once at startup. Before this, a restart mid-run left
+    rows in ``running`` forever (7 of 53 rows in one database) and every
+    downstream endpoint answered 409 for them."""
+    stale = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 86400))
+    with db_connect(DB_PATH) as conn:
+        cur = conn.execute(
+            "UPDATE investigations SET status = 'interrupted', finished_at = ?,"
+            " error = COALESCE(error, 'process restarted while the"
+            " investigation was running') WHERE status = 'running'",
+            (_now(),),
+        )
+        n = cur.rowcount or 0
+        # A row created but never streamed within a day is not going to be.
+        cur = conn.execute(
+            "UPDATE investigations SET status = 'interrupted', finished_at = ?,"
+            " error = 'never streamed within 24 hours of creation'"
+            " WHERE status = 'pending' AND created_at < ?",
+            (_now(), stale),
+        )
+        n += cur.rowcount or 0
+    if n:
+        logging.getLogger("app").warning(
+            "marked %d investigation(s) interrupted (stale running/pending rows)", n)
+    return n
+
 
 def _init_db() -> None:
     with db_connect(DB_PATH) as conn:
@@ -190,10 +393,17 @@ def _init_db() -> None:
                 created_at TEXT NOT NULL,
                 inputs TEXT NOT NULL,
                 summary TEXT,
-                status TEXT NOT NULL DEFAULT 'pending'
+                status TEXT NOT NULL DEFAULT 'pending',
+                started_at TEXT,
+                finished_at TEXT,
+                error TEXT
             )
             """
         )
+        # Lifecycle columns for databases created before they existed. A
+        # failed or interrupted investigation must be able to say why.
+        for col in ("started_at", "finished_at", "error"):
+            _ensure_column(conn, "investigations", col, "TEXT")
         if RECON_AVAILABLE:
             recon_monitor.init_tables(conn)
         recon_router.init_tables(conn)
@@ -943,20 +1153,146 @@ if RECON_AVAILABLE:
             "status": row[4],
         }
 
+    # Investigation lifecycle: pending → running → done | failed | cancelled |
+    # interrupted. Terminal states carry finished_at and (except done) an error
+    # message, so a stored case can always say what happened to it.
+    TERMINAL_STATUSES = ("done", "failed", "cancelled", "interrupted")
+
     def _set_investigation(inv_id: int, status: str,
-                           summary: dict | None = None) -> None:
+                           summary: dict | None = None, *,
+                           error: str | None = None) -> None:
+        sets, params = ["status = ?"], [status]
+        if summary is not None:
+            sets.append("summary = ?")
+            params.append(json.dumps(summary))
+        if error is not None:
+            sets.append("error = ?")
+            params.append(error[:2000])
+        if status in TERMINAL_STATUSES:
+            sets.append("finished_at = ?")
+            params.append(_now())
+        params.append(inv_id)
         with db_connect(DB_PATH) as conn:
-            if summary is not None:
-                conn.execute(
-                    "UPDATE investigations SET status = ?, summary = ?"
-                    " WHERE id = ?",
-                    (status, json.dumps(summary), inv_id),
+            conn.execute(
+                f"UPDATE investigations SET {', '.join(sets)} WHERE id = ?",
+                tuple(params),
+            )
+
+    def _claim_investigation(inv_id: int) -> bool:
+        """Atomically move ``pending`` → ``running``. False when the row is in
+        any other state, so two streams (or a browser reconnect) can never start
+        the same investigation twice."""
+        with db_connect(DB_PATH) as conn:
+            cur = conn.execute(
+                "UPDATE investigations SET status = 'running', started_at = ?"
+                " WHERE id = ? AND status = 'pending'",
+                (_now(), inv_id),
+            )
+            return bool(cur.rowcount)
+
+    # At most this many investigations run concurrently; further streams wait
+    # and announce it. Two full runs already open ~600 outbound connections.
+    MAX_CONCURRENT_INVESTIGATIONS = max(1, int(
+        os.environ.get("RECON_MAX_CONCURRENT_INVESTIGATIONS") or "2"))
+    _inv_semaphores: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+    def _investigation_semaphore() -> asyncio.Semaphore:
+        # One semaphore per event loop, keyed by the loop object itself: an
+        # id(loop) key was reused by later loops in tests and raised
+        # "bound to a different event loop" on a contended acquire.
+        loop = asyncio.get_running_loop()
+        sem = _inv_semaphores.get(loop)
+        if sem is None:
+            sem = asyncio.Semaphore(MAX_CONCURRENT_INVESTIGATIONS)
+            _inv_semaphores[loop] = sem
+        return sem
+
+    def _set_status_safely(inv_id: int, status: str, **kw) -> bool:
+        """A terminal-status write must never turn into a different failure:
+        a DB error here used to replace the CancelledError (row left `running`)
+        or skip the `fatal` event. Logged, never raised."""
+        try:
+            _set_investigation(inv_id, status, **kw)
+            return True
+        except Exception:
+            logging.getLogger("app").exception(
+                "inv=%d could not record status %s", inv_id, status)
+            return False
+
+    async def run_investigation(inv_id: int, inputs: dict, sher_data: dict,
+                                emit, loop) -> None:
+        """Run one claimed investigation to a terminal state.
+
+        Every exit path writes a terminal status: ``done`` with the summary;
+        ``failed`` with the exception, which is also logged (before this the
+        browser got the message and the server kept nothing); ``cancelled``
+        when the client disconnected (``CancelledError`` is a ``BaseException``
+        and used to slip past ``except Exception``, stranding the row in
+        ``running``).
+        """
+        log = logging.getLogger("app")
+        sem = _investigation_semaphore()
+        if sem.locked():
+            emit("queued", {"max_concurrent": MAX_CONCURRENT_INVESTIGATIONS})
+        started = time.monotonic()
+        # The pipeline emits `done` itself and the browser closes the stream on
+        # it. Hold that event until the summary is safely on disk, so a failed
+        # write can still surface as `fatal` instead of a row left `running`.
+        held: dict = {}
+
+        def emit_gated(event: str, payload: dict) -> None:
+            if event == "done":
+                held["done"] = payload
+                return
+            emit(event, payload)
+
+        try:
+            async with sem:
+                log.info("inv=%d start usernames=%s name=%r email=%s",
+                         inv_id, inputs.get("usernames"), inputs.get("name"),
+                         "yes" if inputs.get("email") else "no")
+                summary = await run_pipeline(
+                    name=inputs["name"], usernames=inputs["usernames"],
+                    email=inputs["email"], phone=inputs["phone"],
+                    domain=inputs.get("domain", ""),
+                    location=inputs.get("location", ""),
+                    variants=inputs["variants"],
+                    thorough=inputs.get("thorough", False),
+                    timeout=inputs["timeout"],
+                    sher_data=sher_data, emit=emit_gated, loop=loop,
+                    db_path=DB_PATH,
                 )
-            else:
-                conn.execute(
-                    "UPDATE investigations SET status = ? WHERE id = ?",
-                    (status, inv_id),
-                )
+            _set_investigation(inv_id, "done", summary)     # may raise → failed
+            if "done" in held:
+                emit("done", held["done"])
+            from recon.confidence import bucket_counts
+            all_rows = (summary["accounts"] + summary["variants"]
+                        + summary["name_accounts"])
+            n_found = bucket_counts(all_rows)["found"]
+            log.info("inv=%d done in %.1fs found=%d rows=%d", inv_id,
+                     time.monotonic() - started, n_found, len(all_rows))
+            try:
+                # Persist the honest headline: verification-confirmed accounts
+                # only, not the raw union of every speculative "handle exists"
+                # hit. A failure here must not relabel a finished run.
+                run_id = save_run(_subject_label(inputs), n_found, len(all_rows),
+                                  summary, kind="investigation",
+                                  investigation_id=inv_id)
+                emit("saved", {"history_id": run_id, "investigation_id": inv_id})
+            except Exception:
+                log.exception("inv=%d finished but its history row failed", inv_id)
+        except asyncio.CancelledError:
+            _set_status_safely(inv_id, "cancelled",
+                               error="client disconnected before the run finished")
+            log.info("inv=%d cancelled after %.1fs (client disconnected)",
+                     inv_id, time.monotonic() - started)
+            raise
+        except Exception as exc:
+            log.exception("inv=%d failed after %.1fs", inv_id,
+                          time.monotonic() - started)
+            _set_status_safely(inv_id, "failed",
+                               error=f"{type(exc).__name__}: {exc}")
+            emit("fatal", {"message": f"{type(exc).__name__}: {exc}"})
 
     @app.post("/api/investigate")
     async def create_investigation(request: Request) -> JSONResponse:
@@ -1041,16 +1377,24 @@ if RECON_AVAILABLE:
 
     @app.get("/api/investigate/{inv_id}/stream")
     async def investigate_stream(request: Request, inv_id: int,
-                                 nsfw: bool = Query(False)
-                                 ) -> StreamingResponse:
+                                 nsfw: bool = Query(False)):
         inv = _get_investigation(inv_id)
         if inv is None:
-            return StreamingResponse(
-                iter(['event: fatal\ndata: {"message": "investigation not found"}\n\n']),
-                media_type="text/event-stream",
+            return JSONResponse({"error": "not found"}, status_code=404)
+        # A GET must never start a second run: only a pending investigation
+        # can be streamed. Before this, reopening a finished case's stream (or a
+        # browser auto-reconnect) re-ran the whole pipeline and a disconnect
+        # left it stuck in `running`.
+        if not _claim_investigation(inv_id):
+            current = _get_investigation(inv_id)
+            status = current["status"] if current else "unknown"
+            return JSONResponse(
+                {"error": f"investigation is {status}; only a pending"
+                          " investigation can be streamed",
+                 "status": status},
+                status_code=409,
             )
         inputs = inv["inputs"]
-        _set_investigation(inv_id, "running")
 
         queue: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
@@ -1065,42 +1409,17 @@ if RECON_AVAILABLE:
                 queue.put_nowait((event, payload))
 
             try:
-                summary = await run_pipeline(
-                    name=inputs["name"], usernames=inputs["usernames"],
-                    email=inputs["email"], phone=inputs["phone"],
-                    domain=inputs.get("domain", ""),
-                    location=inputs.get("location", ""),
-                    variants=inputs["variants"],
-                    thorough=inputs.get("thorough", False),
-                    timeout=inputs["timeout"],
-                    sher_data=sher_data, emit=emit, loop=loop,
-                    db_path=DB_PATH,
-                )
-                _set_investigation(inv_id, "done", summary)
-                subject = _subject_label(inputs)
-                # Persist the honest headline: verification-confirmed accounts
-                # only, not the raw union of every speculative "handle exists"
-                # hit (which lumped base + variants + 24 name guesses together).
-                from recon.confidence import bucket_counts
-                all_rows = (summary["accounts"] + summary["variants"]
-                            + summary["name_accounts"])
-                n_found = bucket_counts(all_rows)["found"]
-                run_id = save_run(subject, n_found, len(all_rows), summary,
-                                  kind="investigation",
-                                  investigation_id=inv_id)
-                emit("saved", {"history_id": run_id,
-                               "investigation_id": inv_id})
-            except Exception as exc:
-                _set_investigation(inv_id, "failed")
-                emit("fatal", {"message": f"{type(exc).__name__}: {exc}"})
+                await run_investigation(inv_id, inputs, sher_data, emit, loop)
             finally:
                 queue.put_nowait(None)  # sentinel
 
-        coord_task = asyncio.create_task(coordinator())
-
         async def event_gen():
-            yield f"event: meta_run\ndata: {json.dumps({'investigation_id': inv_id})}\n\n"
+            # Created here, not before the response starts: a generator the
+            # server never begins runs no `finally`, and a coordinator created
+            # outside it would have run unattended.
+            coord_task = asyncio.create_task(coordinator())
             try:
+                yield f"event: meta_run\ndata: {json.dumps({'investigation_id': inv_id})}\n\n"
                 while True:
                     try:
                         item = await asyncio.wait_for(queue.get(), timeout=15)
@@ -1113,9 +1432,11 @@ if RECON_AVAILABLE:
                         break
                     event, payload = item
                     yield f"event: {event}\ndata: {json.dumps(payload)}\n\n"
-            except asyncio.CancelledError:
+            finally:
+                # Every way out of the generator — disconnect detected on the
+                # keepalive path, CancelledError, GeneratorExit from the server
+                # — stops the run. A no-op once the coordinator has finished.
                 coord_task.cancel()
-                raise
 
         return StreamingResponse(
             event_gen(),

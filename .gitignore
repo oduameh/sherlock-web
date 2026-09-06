@@ -18,3 +18,5 @@ godseye/
 # local design notes / tool caches
 .superdesign/
 .ruff_cache/
+# cached live Sherlock site list (refreshed at boot with a timeout)
+recon/data/cache/
