@@ -8,6 +8,7 @@ sections, methodology, limitations, and a responsible-use footer.
 from __future__ import annotations
 
 import html
+import re
 import time
 from typing import Any
 
@@ -17,6 +18,20 @@ from recon.exposure import exposure_summary, footprint_score
 
 def _e(v: Any) -> str:
     return html.escape("" if v is None else str(v))
+
+
+_HTTP_SCHEME = re.compile(r"^https?://", re.IGNORECASE)
+
+
+def _href(v: Any) -> str:
+    """Escaped URL for an ``href``; ``""`` unless the scheme is http(s).
+
+    ``html.escape`` neutralises quotes, not ``javascript:`` — a profile field a
+    subject controls (Gravatar, adapter metadata) must never become a
+    navigable link in the analyst's browser.
+    """
+    s = "" if v is None else str(v).strip()
+    return html.escape(s) if _HTTP_SCHEME.match(s) else ""
 
 
 _ACCT_HEADER = ("<tr><th>Platform</th><th>Profile</th><th>Engines</th>"
@@ -168,7 +183,7 @@ def _account_rows(rows: list[dict]) -> str:
                     f" from {_e(r.get('from_name'))}</span>")
         out.append(
             f"<tr><td><b>{_e(r.get('site'))}</b></td>"
-            f"<td><a href='{_e(r.get('url'))}'>{_e(r.get('url'))}</a>"
+            f"<td><a href='{_href(r.get('url'))}'>{_e(r.get('url'))}</a>"
             f"<div class='dim'>{_e(r.get('username'))} {vchip}{tags}</div></td>"
             f"<td>{_e(engines)}</td><td><b>{conf}%</b></td>"
             f"<td>{_e(name) or '—'}</td></tr>"
@@ -283,12 +298,12 @@ def _broker_section(brokers: dict) -> str:
     for b in rows:
         status = _BROKER_STATUS_LABEL.get(b.get("status"), b.get("status") or "")
         search = b.get("search_url")
-        search_link = (f" · <a href='{_e(search)}'>search</a>" if search else "")
+        search_link = (f" · <a href='{_href(search)}'>search</a>" if search else "")
         out.append(
             f"<tr><td><b>{_e(b.get('name'))}</b></td>"
             f"<td>{_e((b.get('category') or '').capitalize())}</td>"
             f"<td>{_e(status)}</td>"
-            f"<td><a href='{_e(b.get('optout_url'))}'>opt out</a>{search_link}</td>"
+            f"<td><a href='{_href(b.get('optout_url'))}'>opt out</a>{search_link}</td>"
             f"</tr>"
         )
     out.append("</table>")
@@ -299,7 +314,7 @@ def _broker_section(brokers: dict) -> str:
     out.append(
         f"California residents can remove data from 500+ registered brokers with "
         f"one free request via the state DROP portal: "
-        f"<a href='{_e(brokers.get('drop_portal'))}'>"
+        f"<a href='{_href(brokers.get('drop_portal'))}'>"
         f"{_e(brokers.get('drop_portal'))}</a>.</p>"
     )
     return "".join(out)
@@ -455,12 +470,12 @@ def render_dossier(inv: dict, summary: dict, *,
         if grav:
             p.append("<ul class='tight'>")
             p.append(f"<li>Gravatar: <b>{_e(grav.get('display_name') or grav.get('full_name') or 'profile found')}</b>"
-                     f" — <a href='{_e(grav.get('profile_url'))}'>{_e(grav.get('profile_url'))}</a></li>")
+                     f" — <a href='{_href(grav.get('profile_url'))}'>{_e(grav.get('profile_url'))}</a></li>")
             if grav.get("about"):
                 p.append(f"<li class='dim'>{_e(grav['about'][:300])}</li>")
             for a in grav.get("accounts") or []:
                 if a.get("url"):
-                    p.append(f"<li>linked: <a href='{_e(a['url'])}'>{_e(a.get('name') or a.get('domain'))}</a></li>")
+                    p.append(f"<li>linked: <a href='{_href(a['url'])}'>{_e(a.get('name') or a.get('domain'))}</a></li>")
             p.append("</ul>")
         else:
             p.append("<p class='dim'>No public Gravatar profile.</p>")
@@ -521,8 +536,8 @@ def render_dossier(inv: dict, summary: dict, *,
             for b in rev:
                 p.append(
                     f"<tr><td><b>{_e(b.get('name'))}</b></td>"
-                    f"<td><a href='{_e(b.get('search_url'))}'>reverse lookup</a></td>"
-                    f"<td><a href='{_e(b.get('optout_url'))}'>opt out</a></td></tr>")
+                    f"<td><a href='{_href(b.get('search_url'))}'>reverse lookup</a></td>"
+                    f"<td><a href='{_href(b.get('optout_url'))}'>opt out</a></td></tr>")
             p.append("</table>")
 
         # Footprint leads (search dorks, spam DBs, messaging presence).
@@ -531,7 +546,7 @@ def render_dossier(inv: dict, summary: dict, *,
             p.append("<h3>Footprint leads</h3>")
             p.append("<ul class='tight'>")
             for f in fp:
-                p.append(f"<li><a href='{_e(f.get('url'))}'>{_e(f.get('label'))}</a>"
+                p.append(f"<li><a href='{_href(f.get('url'))}'>{_e(f.get('label'))}</a>"
                          f" <span class='dim'>({_e(f.get('kind'))})</span></li>")
             p.append("</ul>")
 
