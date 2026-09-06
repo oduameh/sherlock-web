@@ -1751,6 +1751,8 @@ if RECON_AVAILABLE:
     AVATAR_CACHE_MAX_BYTES = 16 * 1024 * 1024
     AVATAR_CACHE_TTL_S = 24 * 3600
     AVATAR_MAX_CONCURRENT = 8
+    AVATAR_TOTAL_DEADLINE_S = 10.0     # wall-clock cap: per-op timeouts let a drip run for minutes
+    AVATAR_MAX_REDIRECTS = 3
     # A media type we will relay: image/<subtype>, never SVG — an SVG served
     # from this origin could carry script if navigated to directly.
     _AVATAR_MEDIA_RE = re.compile(r"^image/[a-z0-9][a-z0-9.+-]*$")
@@ -1804,14 +1806,21 @@ if RECON_AVAILABLE:
                                  AVATAR_CACHE_TTL_S)
     _avatar_gate = asyncio.Semaphore(AVATAR_MAX_CONCURRENT)
 
+    def _avatar_client_kwargs() -> dict:
+        """Client settings for avatar fetches (shared with the test fixture so
+        a mock transport runs under the same rules). Identity encoding: httpx
+        would inflate a gzip bomb chunk by chunk before our byte cap saw it
+        (71 KB → 257 MiB peak in review); at most 3 redirects."""
+        from recon.adapters import USER_AGENT
+        return {"timeout": AVATAR_TIMEOUT_S, "max_redirects": AVATAR_MAX_REDIRECTS,
+                "headers": {"User-Agent": USER_AGENT, "Accept": "image/*",
+                            "Accept-Encoding": "identity"}}
+
     def _avatar_client():
         """The SSRF-guarded client avatar fetches go through. A factory (not a
         shared client) so tests can substitute an ``httpx.MockTransport``."""
         from recon import safeweb
-        from recon.adapters import USER_AGENT
-        return safeweb.async_client(timeout=AVATAR_TIMEOUT_S,
-                                    headers={"User-Agent": USER_AGENT,
-                                             "Accept": "image/*"})
+        return safeweb.async_client(**_avatar_client_kwargs())
 
     def _avatar_media_type(raw: str) -> str | None:
         """The relayable media type of an upstream Content-Type, or None."""
@@ -1827,24 +1836,31 @@ if RECON_AVAILABLE:
         from recon.safeweb import BlockedRequestError
         too_big = (413, f"image larger than {AVATAR_MAX_BYTES // (1024 * 1024)} MiB", b"")
         try:
-            async with _avatar_client() as client:
-                async with client.stream("GET", url) as resp:
-                    if resp.status_code >= 400:
-                        return 502, f"upstream returned {resp.status_code}", b""
-                    ctype = _avatar_media_type(resp.headers.get("content-type", ""))
-                    if ctype is None:
-                        return 415, "upstream did not return a raster image", b""
-                    declared = resp.headers.get("content-length", "")
-                    if declared.isdigit() and int(declared) > AVATAR_MAX_BYTES:
-                        return too_big
-                    chunks: list[bytes] = []
-                    size = 0
-                    async for chunk in resp.aiter_bytes(16384):
-                        size += len(chunk)
-                        if size > AVATAR_MAX_BYTES:
+            async with asyncio.timeout(AVATAR_TOTAL_DEADLINE_S):
+                async with _avatar_client() as client:
+                    async with client.stream("GET", url) as resp:
+                        if resp.status_code >= 400:
+                            return 502, f"upstream returned {resp.status_code}", b""
+                        if resp.headers.get("content-encoding", "").strip() not in ("", "identity"):
+                            return 415, "upstream sent a compressed body", b""
+                        ctype = _avatar_media_type(resp.headers.get("content-type", ""))
+                        if ctype is None:
+                            return 415, "upstream did not return a raster image", b""
+                        declared = resp.headers.get("content-length", "")
+                        if declared.isdigit() and int(declared) > AVATAR_MAX_BYTES:
                             return too_big
-                        chunks.append(chunk)
-                    return 200, ctype, b"".join(chunks)
+                        chunks: list[bytes] = []
+                        size = 0
+                        # No transparent inflate can happen here: we asked for
+                        # identity and refused any Content-Encoding above.
+                        async for chunk in resp.aiter_bytes(16384):
+                            size += len(chunk)
+                            if size > AVATAR_MAX_BYTES:
+                                return too_big
+                            chunks.append(chunk)
+                        return 200, ctype, b"".join(chunks)
+        except TimeoutError:
+            return 502, f"upstream fetch exceeded {int(AVATAR_TOTAL_DEADLINE_S)} s", b""
         except BlockedRequestError as exc:
             # Policy denial or non-public address on the request or a redirect
             # hop, or an unresolvable host — the guard refused to go there.
@@ -1870,6 +1886,15 @@ if RECON_AVAILABLE:
         if parts is None or parts.scheme.lower() not in ("http", "https") \
                 or not parts.netloc:
             return JSONResponse({"error": "only http(s) URLs can be proxied"},
+                                status_code=400)
+        # No credentials (they would be sent upstream as Basic auth) and only
+        # the web ports (a port scan through differing 502 texts otherwise).
+        try:
+            port = parts.port
+        except ValueError:
+            port = -1
+        if parts.username is not None or port not in (None, 80, 443):
+            return JSONResponse({"error": "only plain http(s) URLs on ports 80/443 can be proxied"},
                                 status_code=400)
         reason = _policy.denied_reason(url)
         if reason:

@@ -10,6 +10,8 @@ middleware runs as in production.
 import time
 
 import httpx
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -53,10 +55,9 @@ def proxy(monkeypatch):
         return state["handler"](request)
 
     def factory():
-        from recon.adapters import USER_AGENT
-        return safeweb.async_client(timeout=1.0,
-                                    headers={"User-Agent": USER_AGENT, "Accept": "image/*"},
-                                    transport=httpx.MockTransport(handler))
+        kw = appmod._avatar_client_kwargs()
+        kw["timeout"] = 1.0
+        return safeweb.async_client(transport=httpx.MockTransport(handler), **kw)
 
     async def resolve(host, port):
         return ["93.184.216.34"]
@@ -242,3 +243,65 @@ def test_cache_is_bounded_by_entries_bytes_and_age(monkeypatch):
     monkeypatch.setattr(time, "monotonic", lambda: now + 11)
     assert c.get("big") is None              # expired
     assert len(c) == 0
+
+
+# --- review of H2: bombs, deadlines, redirect loops, ports, userinfo, trailing dot -------
+
+SAME = {"Sec-Fetch-Site": "same-origin"}
+
+
+def test_compressed_upstream_bodies_are_refused(proxy):
+    """httpx inflates a gzip bomb chunk by chunk before a byte cap sees it."""
+    # A streamed body (not pre-read by the mock) so the encoding check runs
+    # before any byte is decoded.
+    proxy.respond(lambda r: httpx.Response(200, stream=_Chunks(100),
+                                           headers={"content-type": "image/png",
+                                                    "content-encoding": "gzip"}))
+    assert proxy.get(_u(IMG), headers=SAME).status_code == 415
+
+
+def test_request_advertises_identity_encoding(proxy):
+    assert proxy.get(_u(IMG), headers=SAME).status_code == 200
+    assert proxy.calls[-1].headers.get("accept-encoding") == "identity"
+
+
+def test_total_deadline_caps_a_dripping_upstream(proxy, monkeypatch):
+    import asyncio as _a
+    monkeypatch.setattr(appmod, "AVATAR_TOTAL_DEADLINE_S", 0.3)
+
+    async def slow(r):
+        await _a.sleep(1.5)
+        return httpx.Response(200, content=PNG, headers={"content-type": "image/png"})
+    proxy.respond(slow)
+    r = proxy.get(_u("https://cdn.example/slow.png"), headers=SAME)
+    assert r.status_code == 502 and "exceeded" in r.json()["error"]
+
+
+def test_redirect_loops_are_capped(proxy):
+    proxy.respond(lambda r: httpx.Response(302, headers={"location": "https://cdn.example/loop"}))
+    r = proxy.get(_u("https://cdn.example/loop"), headers=SAME)
+    assert r.status_code == 502
+    assert len(proxy.calls) <= appmod.AVATAR_MAX_REDIRECTS + 1
+
+
+@pytest.mark.parametrize("url", ["https://cdn.example:22/a.png", "https://user:pw@cdn.example/a.png",
+                                 "https://cdn.example:8443/a.png"])
+def test_ports_and_userinfo_are_refused(proxy, url):
+    assert proxy.get(_u(url), headers=SAME).status_code == 400
+    assert proxy.calls == []
+
+
+def test_trailing_dot_does_not_bypass_the_policy(proxy):
+    from recon import policy
+    assert policy.denied_reason("https://www.instagram.com./x.jpg")
+    assert proxy.get(_u("https://www.instagram.com./x.jpg"), headers=SAME).status_code == 403
+    assert proxy.calls == []
+
+
+def test_iframe_sandbox_allows_modals_and_downloads():
+    html = (appmod.STATIC_DIR / "index.html").read_text()
+    tag = re.search(r"<iframe id=\"gevFrame\"[^>]*>", html).group(0)
+    sandbox = re.search(r'sandbox="([^"]*)"', tag).group(1).split()
+    allow = re.search(r'allow="([^"]*)"', tag).group(1)
+    assert {"allow-scripts", "allow-same-origin", "allow-modals", "allow-downloads"} <= set(sandbox)
+    assert "microphone" not in allow and "camera" not in allow

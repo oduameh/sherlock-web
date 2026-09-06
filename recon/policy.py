@@ -62,8 +62,11 @@ _ALLOWED_QUERY_HOSTS = ("archive.org", "web.archive.org")
 
 
 def _host(url: str) -> str:
+    """Request host, lower-cased, without a trailing dot: ``instagram.com.``
+    is the same zone as ``instagram.com`` and used to slip past the suffix
+    match (security review of the avatar proxy)."""
     try:
-        return (urlparse(url).hostname or "").lower()
+        return (urlparse(url).hostname or "").lower().rstrip(".")
     except Exception:
         return ""
 

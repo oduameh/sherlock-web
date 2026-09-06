@@ -600,7 +600,7 @@ def test_console_makes_no_third_party_font_requests_and_sandboxes_the_globe(clie
     assert "fonts.googleapis.com" not in html and "fonts.gstatic.com" not in html
     iframe = html[html.index("<iframe id=\"gevFrame\""):]
     iframe = iframe[:iframe.index("</iframe>")]
-    assert 'sandbox="allow-scripts allow-same-origin allow-forms allow-popups"' in iframe
+    assert 'sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"' in iframe
     assert "microphone" not in iframe
     assert 'referrerpolicy="no-referrer"' in iframe
     # The self-hosted faces are declared by the stylesheet, not a remote one.
