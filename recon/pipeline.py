@@ -117,6 +117,14 @@ def tally_signal(counts: dict, name: str, res: dict) -> None:
         entry["blocked"] += 1
 
 
+# Retrieval facts the diagnostics do NOT yet record (they live in modules
+# other increments own); listed in the blob so a reader never assumes a
+# missing key means "nothing happened".
+NOT_RECORDED = ("stealth_ladder_attempts", "wmn_stealth_retries",
+                "detector_browser_escalations", "budget_consumption",
+                "fetch_status_histogram")
+
+
 def build_run_diagnostics(*, router: RunRouter, planned: dict,
                           skipped_policy: list, engine_errors: list,
                           signals: dict, verification_counts: dict,
@@ -146,6 +154,7 @@ def build_run_diagnostics(*, router: RunRouter, planned: dict,
     failed = list(router.failed_checks)
     run = {
         "schema": RUN_SCHEMA,
+        "not_recorded": list(NOT_RECORDED),
         "planned": planned,
         "skipped_policy": list(skipped_policy)[:SKIPPED_LIST_CAP],
         "skipped_policy_count": len(skipped_policy),
@@ -328,8 +337,7 @@ async def run_pipeline(
     this run's log lines with ``inv=<id>``; the summary always carries
     ``summary["run"]`` (:func:`build_run_diagnostics`).
     """
-    if investigation_id is not None:
-        INV_ID.set(investigation_id)
+    INV_ID.set(investigation_id)   # unconditionally: a stale id must not leak across runs
     t_run0 = time.monotonic()
     usernames = [u for u in (usernames or []) if u]
     name = (name or "").strip()

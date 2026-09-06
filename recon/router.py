@@ -107,7 +107,7 @@ _SUCCESS_STATUSES = {"claimed", "available", "exists", "absent"}
 POLICY_STATUS = "policy"
 
 # Per-run record of failed checks kept for summary["run"] (bounded).
-FAILED_CHECKS_CAP = 300
+FAILED_CHECKS_CAP = 120   # ~40 KB worst case in summary["run"] (300 gave 130 KB)
 FAILED_CHECK_CONTEXT_CHARS = 80
 
 

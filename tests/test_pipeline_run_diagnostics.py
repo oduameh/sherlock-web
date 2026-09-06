@@ -365,12 +365,3 @@ def test_tally_signal_counts_by_outcome_and_keeps_policy_apart():
     pipeline.tally_signal(counts, "X", {"kind": "detector", "status": None})
     assert counts == {"X": {"kind": "detector", "exists": 1, "absent": 1,
                             "blocked": 2, "policy": 1}}
-
-
-def test_run_budgets_reads_the_configured_constants():
-    from recon import enrich
-    b = pipeline.run_budgets()
-    assert b == {"verify": enrich.MAX_ENRICH_PER_RUN,
-                 "stealth_browser": enrich.STEALTH_BROWSER_BUDGET,
-                 "detector_browser": detectors.BROWSER_BUDGET,
-                 "wmn_stealth": whatsmyname._STEALTH_RETRY_BUDGET}

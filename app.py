@@ -38,6 +38,27 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("scrapling").propagate = False
+
+
+class _InvestigationIdFilter(logging.Filter):
+    """Prefix every line logged while a pipeline runs with `inv=<id>`, so
+    router/enrichment/detector lines can be tied to a case. The pipeline's
+    own lines carry the prefix already."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            from recon.pipeline import INV_ID
+            inv = INV_ID.get(None)
+        except Exception:
+            inv = None
+        if inv is not None and record.name != "recon.pipeline" \
+                and not str(record.msg).startswith("inv="):
+            record.msg = f"inv={inv} {record.msg}"
+        return True
+
+
+for _h in logging.getLogger().handlers:
+    _h.addFilter(_InvestigationIdFilter())
 # Files this process creates (the SQLite database and its WAL, caches, logs)
 # hold subject data; keep them private to this user.
 os.umask(0o077)
@@ -1200,7 +1221,7 @@ if RECON_AVAILABLE:
                     thorough=inputs.get("thorough", False),
                     timeout=inputs["timeout"],
                     sher_data=sher_data, emit=emit_gated, loop=loop,
-                    db_path=DB_PATH,
+                    db_path=DB_PATH, investigation_id=inv_id,
                 )
             _set_investigation(inv_id, "done", summary)     # may raise → failed
             if "done" in held:

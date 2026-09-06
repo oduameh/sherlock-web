@@ -25,7 +25,7 @@ import logging
 import os
 from typing import Optional
 
-from recon import policy, safeweb, stealthweb
+from recon import htmltext, policy, safeweb, stealthweb
 from recon.engines import normalize_site
 
 logger = logging.getLogger("recon.detectors")
@@ -82,6 +82,12 @@ class HtmlDetector:
         low = (html or "").lower()
         if any(m.lower() in low for m in self.present):
             return EXISTS
+        # A 200 that is an anti-bot interstitial or a consent wall is a wall,
+        # not an answer: without this a walled detector reported ABSENT and
+        # the circuit breaker recorded it as healthy. (Bare JS shells are left
+        # to the escalation ladder in check(), which runs before classify.)
+        if html and (htmltext.has_challenge_markers(html) or htmltext.has_consent_wall(html)):
+            return BLOCKED
         if any(m.lower() in low for m in self.absent):
             return ABSENT
         # A real profile always carries a present-marker, so a 200 without one
@@ -100,6 +106,7 @@ class HtmlDetector:
             return out
 
         status, html = await _fetch(url)
+        fetch_error = _LAST_FETCH_ERROR.pop(url, None) if status is None else None
         # Anti-bot wall on an honest fetch → escalate via the stealth ladder
         # (still SSRF-guarded, still robots-permitted; never a denied host).
         if (self.stealth and stealthweb.enabled()
@@ -130,8 +137,14 @@ class HtmlDetector:
         elif verdict == ABSENT:
             out["signal"] = f"{self.name}: no such profile"
         else:
-            out["signal"] = f"{self.name}: blocked — cannot determine"
+            why = f" ({fetch_error})" if fetch_error else (f" (HTTP {status})" if status else "")
+            out["signal"] = f"{self.name}: blocked{why} — cannot determine"
         return out
+
+
+# Exception class of the last failed plain fetch per URL, so the router can
+# classify a transport failure (timeout/DNS/reset) instead of "unknown".
+_LAST_FETCH_ERROR: dict = {}
 
 
 async def _fetch(url: str) -> tuple:
@@ -156,6 +169,7 @@ async def _fetch(url: str) -> tuple:
                 return status, body
     except Exception as exc:
         logger.debug("detector fetch failed for %s: %s", url, exc)
+        _LAST_FETCH_ERROR[url] = type(exc).__name__
         return None, None
 
 
