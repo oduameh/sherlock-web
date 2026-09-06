@@ -82,12 +82,73 @@
     modalCancel: document.getElementById("modalCancel")
   };
 
+  /* ============================ fetch-based SSE ============================ */
+  function FetchSSE(url) {
+    var self = this;
+    self.readyState = 0;
+    self._listeners = {};
+    self._ac = new AbortController();
+    self.onerror = null;
+    fetch(url, { signal: self._ac.signal }).then(function (r) {
+      if (!r.ok || !r.body) {
+        self.readyState = 2;
+        if (self.onerror) self.onerror();
+        return;
+      }
+      self.readyState = 1;
+      var reader = r.body.getReader();
+      var dec = new TextDecoder();
+      var buf = "";
+      (function pump() {
+        reader.read().then(function (res) {
+          if (res.done || self.readyState === 2) return;
+          buf += dec.decode(res.value, { stream: true });
+          var parts = buf.split("\n\n");
+          buf = parts.pop();
+          for (var i = 0; i < parts.length; i++) {
+            var raw = parts[i];
+            if (!raw.trim()) continue;
+            var ev = "message", data = [];
+            var lines = raw.split("\n");
+            for (var j = 0; j < lines.length; j++) {
+              var l = lines[j];
+              if (l.indexOf("event: ") === 0) ev = l.substring(7);
+              else if (l.indexOf("data: ") === 0) data.push(l.substring(6));
+              else if (l === "data:") data.push("");
+            }
+            var me = { type: ev, data: data.join("\n") };
+            var hs = self._listeners[ev];
+            if (hs) for (var k = 0; k < hs.length; k++) hs[k](me);
+          }
+          pump();
+        }).catch(function (e) {
+          if (e.name === "AbortError" || self.readyState === 2) return;
+          self.readyState = 0;
+          if (self.onerror) self.onerror();
+        });
+      })();
+    }).catch(function (e) {
+      if (e.name === "AbortError") return;
+      self.readyState = 0;
+      if (self.onerror) self.onerror();
+    });
+  }
+  FetchSSE.prototype.addEventListener = function (t, h) {
+    if (!this._listeners[t]) this._listeners[t] = [];
+    this._listeners[t].push(h);
+  };
+  FetchSSE.prototype.close = function () {
+    this.readyState = 2;
+    try { this._ac.abort(); } catch (e) {}
+  };
+  FetchSSE.CLOSED = 2;
+
   /* ============================ state ============================ */
   var allSites = [];          // [{name, nsfw}]
   var selectedSites = {};     // name -> true
   var currentRun = [];        // collected results of the live/loaded run (for export)
-  var es = null;              // active quick-scan EventSource
-  var invEs = null;           // active investigation EventSource
+  var es = null;              // active quick-scan FetchSSE
+  var invEs = null;           // active investigation FetchSSE
   var cards = {};             // username -> DOM refs (quick scan)
   var invRows = {};           // "username|normsite" -> {el, badgesEl, data}
   var invCards = {};          // section key -> card refs
@@ -916,7 +977,7 @@
     var sel = Object.keys(selectedSites);
     if (sel.length) params.set("sites", sel.join(","));
 
-    es = new EventSource("/api/search/stream?" + params.toString());
+    es = new FetchSSE("/api/search/stream?" + params.toString());
     setRunning(true);
 
     es.addEventListener("meta", function (e) {
@@ -996,7 +1057,7 @@
     });
 
     es.onerror = function () {
-      if (es && es.readyState === EventSource.CLOSED) {
+      if (es && es.readyState === 2) {
         setRunning(false);
       }
     };
@@ -1880,7 +1941,7 @@
   function openInvestigationStream(invId, payload) {
     var params = new URLSearchParams();
     params.set("nsfw", els.invNsfw.checked ? "true" : "false");
-    invEs = new EventSource("/api/investigate/" + invId + "/stream?" + params.toString());
+    invEs = new FetchSSE("/api/investigate/" + invId + "/stream?" + params.toString());
     setInvRunning(true);
     els.overallText.textContent = "Investigation #" + invId + " running…";
 
@@ -1997,7 +2058,7 @@
     });
     invEs.onerror = function () {
       if (!invEs) return;
-      var lost = invEs.readyState !== EventSource.CLOSED;
+      var lost = invEs.readyState !== 2;
       var lostInvId = invId;
       stopInvestigation();
       if (!lost) {
