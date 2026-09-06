@@ -5,26 +5,34 @@ Combines dated events from several sources into one sorted list:
 * the investigation being opened,
 * each scan run recorded against it (history rows),
 * watchlist alert events (new/gone accounts, new registrations),
-* account **creation dates** where a platform exposes them publicly — GitHub's
-  public user API (``api.github.com/users/{login}``) returns ``created_at`` with
-  no key, so a confirmed GitHub account contributes a real "account created"
-  milestone.
+* account **creation dates** where a platform exposes them publicly. The
+  adapters already store ``temporal.created_at`` on a row during enrichment
+  (GitHub, Bluesky, dev.to, Docker Hub, Keybase, Vimeo, mastodon.social), and
+  that is read first. Only a GitHub row *without* it is looked up on the
+  public user API (``api.github.com/users/{login}``, no key) — through a
+  process-wide TTL cache, so a login is fetched once per six hours instead of
+  on every ``/timeline`` and ``/report`` open (tech-debt D8, defect 10: each
+  dossier open used to spend up to 15 of GitHub's 60 hourly calls).
 
 The assembly, parsing, and account-event helpers are pure and unit-tested; the
-GitHub enrichment is a best-effort async fetch through :mod:`recon.safeweb`
-(SSRF-guarded, no key) that never raises.
+GitHub lookup goes through :func:`recon.retrieval.fetch` (policy- and
+SSRF-guarded, capped, never raises). A rate limit or transport failure is
+never cached; a 404 is cached as a definitive absence.
 """
 
 from __future__ import annotations
 
-import json
 import logging
+import time
 from datetime import datetime
 from typing import Callable, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
+from recon import retrieval, sources
+from recon.cache import TTLCache
 from recon.engines import normalize_site
-from recon.safeweb import async_client, fetch_capped
+from recon.rows import created_at as row_created_at
+from recon.safeweb import async_client
 
 logger = logging.getLogger("recon.timeline")
 
@@ -42,6 +50,17 @@ _TS_FORMATS = (
 )
 
 _MAX_GITHUB_LOOKUPS = 15
+
+# Positive answers and definitive absences, six hours; failures never (D8).
+GITHUB_TTL_S = 6 * 3600
+_github_cache = TTLCache(maxsize=512, ttl_s=GITHUB_TTL_S)
+_GITHUB_HEADERS = {"Accept": "application/vnd.github+json",
+                   "User-Agent": sources.USER_AGENT}
+
+
+def clear_cache() -> None:
+    """Forget every cached GitHub answer (tests)."""
+    _github_cache.clear()
 
 
 def github_login_from_url(url: Optional[str]) -> Optional[str]:
@@ -152,44 +171,80 @@ async def account_creation_dates(
     rows: list[dict], *,
     client_factory: Callable[..., object] = async_client,
     max_lookups: int = _MAX_GITHUB_LOOKUPS,
+    cache: Optional[TTLCache] = None,
 ) -> dict[str, str]:
-    """Best-effort ``{profile_url: created_at}`` from public platform APIs.
+    """Best-effort ``{profile_url: created_at}`` for account rows.
 
-    Currently GitHub (public, no key). Never raises; on any error a lookup is
-    simply skipped. ``client_factory`` is injectable for testing.
+    Rule (D8 / defect 10): a row's own ``temporal.created_at`` — stored by the
+    adapter during enrichment — is used as-is and costs nothing. Only a GitHub
+    row without it is looked up, through the module cache (positive 6 h,
+    404 cached as absent, blocked/transport never cached), at most
+    ``max_lookups`` *fetches* per call. Never raises. ``client_factory`` and
+    ``cache`` are injectable for tests.
     """
-    targets: list[tuple[str, str]] = []  # (url, github_login)
+    cache = _github_cache if cache is None else cache
+    dates: dict[str, str] = {}
+    targets: list[tuple[str, str]] = []  # (url, github_login) still to fetch
     for row in rows or []:
         url = row.get("url")
-        if not url or normalize_site(row.get("site") or "") != "github":
+        if not url:
+            continue
+        stored = row_created_at(row)
+        if stored:
+            dates[url] = stored
+            continue
+        if normalize_site(row.get("site") or "") != "github":
             continue
         login = github_login_from_url(url)
-        if login:
-            targets.append((url, login))
-        if len(targets) >= max_lookups:
-            break
+        if not login:
+            continue
+        hit, cached = cache.get(login.lower())
+        if hit:
+            if cached:
+                dates[url] = cached
+            continue
+        targets.append((url, login))
 
     if not targets:
-        return {}
+        return dates
 
-    dates: dict[str, str] = {}
+    fetched = 0
     try:
         async with client_factory(timeout=8.0) as client:
             for url, login in targets:
-                try:
-                    body = await fetch_capped(
-                        client, f"https://api.github.com/users/{login}",
-                        256 * 1024,
-                    )
-                    if not body:
-                        continue
-                    data = json.loads(body)
-                    created = data.get("created_at")
+                if fetched >= max_lookups:
+                    break
+                key = login.lower()
+                hit, cached = cache.get(key)     # filled by an earlier target?
+                if hit:
+                    if cached:
+                        dates[url] = cached
+                    continue
+                fetched += 1
+                t0 = time.monotonic()
+                res = await retrieval.fetch(
+                    f"https://api.github.com/users/{quote(login, safe='')}",
+                    client=client, kind="json", headers=_GITHUB_HEADERS,
+                    max_bytes=256 * 1024)
+                latency_ms = (time.monotonic() - t0) * 1000
+                if res.outcome == retrieval.OK and isinstance(res.data, dict):
+                    created = res.data.get("created_at")
                     if created:
-                        dates[url] = created
-                except Exception:
-                    logger.debug("github lookup failed for %s", login,
-                                 exc_info=True)
+                        cache.set(key, str(created))
+                        dates[url] = str(created)
+                    else:
+                        cache.set_absent(key)   # the user exists; no date exposed
+                    sources.record("github", True, latency_ms)
+                elif res.outcome == retrieval.ABSENT:
+                    cache.set_absent(key)       # no such user: definitive
+                    sources.record("github", True, latency_ms)
+                else:
+                    # blocked (incl. rate limit) / transport / policy / ssrf:
+                    # not an answer, so nothing is cached and the next call
+                    # asks again.
+                    sources.record("github", False, latency_ms, res.reason)
+                    logger.debug("github lookup for %s: %s (%s)", login,
+                                 res.outcome, res.reason)
     except Exception:
         logger.debug("github enrichment client failed", exc_info=True)
     return dates

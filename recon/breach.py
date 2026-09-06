@@ -25,15 +25,23 @@ harvested secrets are neither needed nor ours to redistribute.
 Best-effort and never raises: an unreachable service yields ``checked: False``
 rather than a false "clean" verdict, because "we could not check" and "nothing
 found" are different answers.
+
+Caching rule (retrieval audit defect 10): only an answer from Cavalier — a
+200 with a JSON body, whether it lists infections or none — is cached, with a
+TTL. A 429, a 5xx or a transport failure used to be stored as ``None`` for the
+process lifetime, so one rate limit made "not compromised" permanent; now it
+is not cached at all and the next call asks again.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Optional
 
-from recon import safeweb
+from recon import safeweb, sources
+from recon.cache import TTLCache
 
 logger = logging.getLogger("recon.breach")
 
@@ -45,7 +53,9 @@ TIMEOUT_S = 20
 # this is a free community service.
 MAX_USERNAMES = 5
 
-_cache: dict[tuple, Optional[dict]] = {}
+CACHE_TTL_S = 6 * 3600
+_cache = TTLCache(maxsize=1024, ttl_s=CACHE_TTL_S)
+_SOURCE = "hudson_rock_cavalier"
 
 
 def _summarize_stealer(entry: Any) -> Optional[dict]:
@@ -92,10 +102,13 @@ def summarize_response(data: Any) -> dict:
 
 
 async def _lookup(kind: str, value: str) -> Optional[dict]:
-    """One Cavalier lookup. None when the service could not be reached."""
+    """One Cavalier lookup. None when the service could not be reached or
+    refused (≥ 400) — and that None is **not** cached, so the next call asks
+    again (defect 10). Only a 200 with JSON is an answer worth remembering."""
     key = (kind, value.strip().lower())
-    if key in _cache:
-        return _cache[key]
+    hit, cached = _cache.get(key)
+    if hit:
+        return cached
     endpoint = {"email": "search-by-email?email={}",
                 "username": "search-by-username?username={}",
                 "domain": "search-by-domain?domain={}"}.get(kind)
@@ -103,21 +116,31 @@ async def _lookup(kind: str, value: str) -> Optional[dict]:
         return None
     from urllib.parse import quote
     url = f"{BASE_URL}/{endpoint.format(quote(value, safe=''))}"
+    t0 = time.monotonic()
     try:
         async with safeweb.async_client(timeout=TIMEOUT_S) as client:
             resp = await client.get(url, headers={"User-Agent": USER_AGENT})
-        if resp.status_code >= 400:
-            _cache[key] = None
-            return None
-        data = resp.json()
     except Exception as exc:
         logger.debug("cavalier lookup failed for %s %r: %s", kind, value, exc)
-        _cache[key] = None
+        sources.record(_SOURCE, False, (time.monotonic() - t0) * 1000,
+                       type(exc).__name__)
         return None
+    latency_ms = (time.monotonic() - t0) * 1000
+    if resp.status_code >= 400:
+        logger.debug("cavalier answered HTTP %s for %s %r",
+                     resp.status_code, kind, value)
+        sources.record(_SOURCE, False, latency_ms, f"HTTP {resp.status_code}")
+        return None
+    try:
+        data = resp.json()
+    except Exception:
+        sources.record(_SOURCE, False, latency_ms, "non-JSON response")
+        return None
+    sources.record(_SOURCE, True, latency_ms)
     out = summarize_response(data)
     out["identifier"] = value
     out["kind"] = kind
-    _cache[key] = out
+    _cache.set(key, out)
     return out
 
 

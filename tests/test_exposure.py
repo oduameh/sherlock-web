@@ -100,3 +100,21 @@ def test_exposure_empty_summary_is_wellformed():
 def test_exposure_handles_none():
     # Never raises on a missing summary.
     assert exposure_summary(None)["score"] == 0
+
+
+# --- names come from recon.rows (D7) -----------------------------------------------
+
+def test_real_name_signal_never_comes_from_the_raw_title():
+    s = _summary()
+    s["accounts"][0]["enrichment"] = {"title": "alice - Overview · SomeTracker"}
+    sig = exposure_summary(s)["identity_signals"]
+    assert sig["has_real_name"] is False and sig["display_names"] == []
+    assert sig["has_avatar"] is False
+
+
+def test_real_name_signal_prefers_platform_identity():
+    s = _summary()
+    s["accounts"][0]["platform_identity"] = {"display_name": "Alice Real",
+                                             "avatar": "https://p/a.png"}
+    sig = exposure_summary(s)["identity_signals"]
+    assert sig["display_names"] == ["Alice Real"] and sig["has_avatar"] is True

@@ -7,6 +7,14 @@ enrichment — and diffs the found-set against the stored signature. Changes
 become alert rows ("new account: X on GitHub", "account gone: Y",
 "new holehe hit: Z"). The first run of a watch establishes the baseline
 signature silently.
+
+Coverage rule (retrieval audit defect 5): a light scan also reports which
+signature keys it actually *checked* with a decisive answer (Sherlock
+``Claimed``/``Available``; holehe ``exists`` True/False without a rate limit
+or error). An "account gone" / "holehe hit gone" alert is emitted only for a
+key in that set. A site whose circuit was open, that was policy-denied or
+that errored was not looked at — its absence from the new signature is "not
+checked", never "gone".
 """
 
 from __future__ import annotations
@@ -16,6 +24,7 @@ import json
 import logging
 import sqlite3
 import time
+from typing import Collection, Optional
 
 import dbconn
 from dbconn import connect as db_connect
@@ -76,18 +85,32 @@ def init_tables(conn: sqlite3.Connection) -> None:
 # Light scan
 # ---------------------------------------------------------------------------
 
+def account_key(site: str, username: str) -> str:
+    """The signature key for one account: ``acct:<normalized site>:<handle>``."""
+    return f"acct:{engines.normalize_site(site or '')}:{(username or '').lower()}"
+
+
+def holehe_key(site: Optional[str]) -> str:
+    """The signature key for one holehe registration hit."""
+    return f"holehe:{engines.normalize_site(site or '')}"
+
+
 def _sherlock_light(usernames: list[str], site_data: dict,
                     timeout: int, router: "RunRouter | None" = None,
-                    ) -> list[dict]:
+                    ) -> tuple[list[dict], set[str]]:
     """Synchronous sherlock scan of usernames over the high-value subset.
 
-    Runs in a worker thread (via asyncio.to_thread). Returns found rows.
+    Runs in a worker thread (via asyncio.to_thread). Returns ``(found rows,
+    checked keys)`` — a key is *checked* only when Sherlock reached a decisive
+    ``Claimed``/``Available`` answer; ``Unknown``/``WAF``/``Illegal`` mean the
+    site was not examined for that handle (defect 5).
     """
     from sherlock_project.notify import QueryNotify
     from sherlock_project.result import QueryStatus
     from sherlock_project.sherlock import sherlock
 
     found: list[dict] = []
+    checked: set[str] = set()
 
     class _N(QueryNotify):
         def update(self, result) -> None:
@@ -100,19 +123,41 @@ def _sherlock_light(usernames: list[str], site_data: dict,
                               "site": result.site_name,
                               "url": result.site_url_user})
 
+    from recon import retrieval
+
     for username in usernames:
         try:
-            sherlock(username, site_data, _N(), timeout=timeout,
-                     proxy=router.proxy if router else None)
+            ret = sherlock(username, site_data, _N(), timeout=timeout,
+                           proxy=router.proxy if router else None) or {}
         except Exception:
             logger.exception("monitor sherlock scan failed for %s", username)
-    return found
+            continue
+        # Sherlock reports a 429/403/5xx on status-code sites as AVAILABLE, so
+        # "checked" must come from the HTTP status, not the engine's label:
+        # only a decisive answer (a real page or a real absence) counts.
+        for site_name, info in ret.items():
+            http_status = info.get("http_status") if isinstance(info, dict) else None
+            if not isinstance(http_status, int):
+                continue
+            if retrieval.classify(http_status, None).outcome in (retrieval.OK, retrieval.ABSENT):
+                checked.add(account_key(site_name, username))
+    return found, checked
+
+
+def holehe_entry_checked(entry: dict) -> bool:
+    """True when a holehe entry is a decisive answer (exists True/False) and
+    not a rate limit or an error — the only case that may later say "gone"."""
+    if not isinstance(entry, dict):
+        return False
+    return (entry.get("exists") is not None and not entry.get("rate_limit")
+            and not entry.get("error"))
 
 
 async def light_scan(inputs: dict, sher_site_data: dict,
                      timeout: int = LIGHT_TIMEOUT_S, db_path=None) -> dict:
-    """Run the light scan for a watch's inputs. Returns found accounts +
-    holehe hits. Never raises."""
+    """Run the light scan for a watch's inputs. Returns found accounts,
+    holehe hits and ``checked`` — the sorted signature keys that were examined
+    with a decisive answer (defect 5). Never raises."""
     usernames = [u.strip() for u in (inputs.get("usernames") or []) if u.strip()]
     if not usernames and inputs.get("name"):
         usernames = generate_name_candidates(inputs["name"])
@@ -128,14 +173,17 @@ async def light_scan(inputs: dict, sher_site_data: dict,
                     ", ".join(d["site"] for d in router.degraded))
 
     accounts: list[dict] = []
+    checked: set[str] = set()
     if usernames and sher_site_data:
-        accounts = await asyncio.to_thread(
+        accounts, checked = await asyncio.to_thread(
             _sherlock_light, usernames, sher_site_data, timeout, router
         )
 
     holehe_hits: list[dict] = []
     if email and holehe_available():
         def on_result(entry):
+            if holehe_entry_checked(entry):
+                checked.add(holehe_key(entry.get("site")))
             if entry.get("exists"):
                 holehe_hits.append({"site": entry.get("site"),
                                     "domain": entry.get("domain")})
@@ -147,7 +195,8 @@ async def light_scan(inputs: dict, sher_site_data: dict,
             logger.exception("monitor holehe scan failed")
 
     router.finish()
-    return {"accounts": accounts, "holehe": holehe_hits}
+    return {"accounts": accounts, "holehe": holehe_hits,
+            "checked": sorted(checked)}
 
 
 # ---------------------------------------------------------------------------
@@ -158,18 +207,28 @@ def compute_signature(scan: dict) -> dict[str, dict]:
     """Deterministic key -> display info map persisted as JSON."""
     sig: dict[str, dict] = {}
     for a in scan.get("accounts") or []:
-        key = f"acct:{engines.normalize_site(a['site'])}:{a['username'].lower()}"
-        sig[key] = {"username": a["username"], "site": a["site"],
-                    "url": a.get("url")}
+        sig[account_key(a["site"], a["username"])] = {
+            "username": a["username"], "site": a["site"], "url": a.get("url")}
     for h in scan.get("holehe") or []:
-        key = f"holehe:{engines.normalize_site(h['site'] or '')}"
-        sig[key] = {"site": h.get("site"), "domain": h.get("domain")}
+        sig[holehe_key(h["site"])] = {"site": h.get("site"),
+                                      "domain": h.get("domain")}
     return sig
 
 
-def diff_signatures(old: dict[str, dict],
-                    new: dict[str, dict]) -> list[dict]:
-    """Return alert dicts {kind, message, data} for the old->new change."""
+def diff_signatures(old: dict[str, dict], new: dict[str, dict],
+                    checked: Optional[Collection[str]] = None) -> list[dict]:
+    """Return alert dicts {kind, message, data} for the old->new change.
+
+    ``checked`` is the set of signature keys the new scan examined with a
+    decisive answer (``light_scan()["checked"]``). A key present in ``old``
+    and missing from ``new`` becomes an ``account_gone`` / ``holehe_hit_gone``
+    alert **only if it is in ``checked``**: a site the scan skipped (open
+    circuit, access policy) or that errored was not looked at, and "not
+    checked" must never read as "gone" (defect 5). Without coverage
+    information (``checked=None``) no "gone" alert is emitted at all — the
+    safe default. New keys alert as before.
+    """
+    checked_keys = set(checked) if checked is not None else set()
     alerts: list[dict] = []
     for key in sorted(new.keys() - old.keys()):
         info = new[key]
@@ -186,6 +245,8 @@ def diff_signatures(old: dict[str, dict],
                 "data": info,
             })
     for key in sorted(old.keys() - new.keys()):
+        if key not in checked_keys:
+            continue            # not examined this scan: absence is not "gone"
         info = old[key]
         if key.startswith("acct:"):
             alerts.append({
@@ -249,7 +310,8 @@ async def run_watch(db_path, watch: dict, sher_site_data: dict) -> int:
     old_sig = watch.get("last_signature") or {}
     baseline = not watch.get("last_run_at") and not old_sig
 
-    alerts = [] if baseline else diff_signatures(old_sig, new_sig)
+    alerts = [] if baseline else diff_signatures(
+        old_sig, new_sig, checked=scan.get("checked") or ())
     with db_connect(db_path) as conn:
         for a in alerts:
             conn.execute(

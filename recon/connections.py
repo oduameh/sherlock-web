@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from recon.engines import normalize_site
+from recon.rows import all_account_rows
 
 # Per-signal contribution to a connection's strength (0-100, capped).
 _WEIGHTS = {
@@ -79,10 +80,7 @@ def subject_identifiers(inputs: dict, summary: dict) -> dict[str, set[str]]:
         if handle:
             ident["handles"].add(_clean(handle))
 
-    all_rows = ((summary.get("accounts") or [])
-                + (summary.get("variants") or [])
-                + (summary.get("name_accounts") or []))
-    for row in all_rows:
+    for row in all_account_rows(summary):
         site = normalize_site(row.get("site") or "")
         handle = _clean(row.get("username"))
         if handle:

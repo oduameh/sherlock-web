@@ -34,6 +34,7 @@ from typing import Optional
 
 from recon.confidence import account_confidence, account_tier
 from recon.engines import normalize_site
+from recon.rows import all_account_rows, avatar, bio, created_at, display_name
 
 _WMN_DATA = Path(__file__).resolve().parent / "data" / "wmn-data.json"
 _category_cache: Optional[dict[str, str]] = None
@@ -62,25 +63,9 @@ def category_for(site: Optional[str]) -> Optional[str]:
     return _site_categories().get(str(site).strip().lower())
 
 
-def _avatar(row: dict) -> Optional[str]:
-    enr = row.get("enrichment") or {}
-    return enr.get("jsonld_image") or enr.get("og_image")
-
-
-def _display_name(row: dict) -> Optional[str]:
-    enr = row.get("enrichment") or {}
-    return enr.get("jsonld_name") or enr.get("og_title") or enr.get("title")
-
-
-def _created_at(row: dict) -> Optional[str]:
-    """ISO creation date when an adapter reported one."""
-    return (row.get("temporal") or {}).get("created_at") or None
-
-
-def _all_account_rows(summary: dict) -> list[dict]:
-    return ((summary.get("accounts") or [])
-            + (summary.get("variants") or [])
-            + (summary.get("name_accounts") or []))
+# Row fields come from recon.rows — the one accessor that never reads the raw
+# page <title> as a name (D7 / V10: a node used to be labelled "carmen_pop -
+# Streamer Overview & Stats · TwitchTracker").
 
 
 def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
@@ -129,23 +114,22 @@ def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
     # person individually.
     url_to_id: dict[str, str] = {}
     acct_by_site: dict[str, str] = {}   # normalized site -> account node id
-    all_rows = _all_account_rows(summary)
+    all_rows = all_account_rows(summary)
     baseline_urls: Optional[set] = None
     if baseline is not None:
         baseline_urls = {
-            r.get("url") for r in _all_account_rows(baseline) if r.get("url")
+            r.get("url") for r in all_account_rows(baseline) if r.get("url")
         }
     for row in all_rows:
         nid = f"acct:{row.get('site')}:{row.get('username')}"
         conf = account_confidence(row)
         verification = (row.get("verification") or {}).get("status")
-        enr = row.get("enrichment") or {}
-        created = _created_at(row)
+        created = created_at(row)
         category = row.get("category") or category_for(row.get("site"))
         add_node({
             "id": nid, "type": "account",
             "label": row.get("username"), "sublabel": row.get("site"),
-            "url": row.get("url"), "avatar": _avatar(row),
+            "url": row.get("url"), "avatar": avatar(row),
             "confidence": conf, "engines": row.get("engines") or [],
             "verification": verification,
             "tier": account_tier(row),
@@ -156,11 +140,10 @@ def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
                 "variant_of": row.get("variant_of"),
                 "from_name": row.get("from_name"),
                 "candidate": row.get("candidate"),
-                "display_name": _display_name(row),
+                "display_name": display_name(row),
                 "verification": verification,
                 "category": category,
-                "bio": enr.get("jsonld_description")
-                       or enr.get("og_description"),
+                "bio": bio(row),
             },
         })
         if row.get("url"):
@@ -212,7 +195,7 @@ def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
             n = by_id.get(f"acct:{row.get('site')}:{row.get('username')}")
             if n is not None:
                 n["data"]["is_new"] = True
-        for r in _all_account_rows(baseline):
+        for r in all_account_rows(baseline):
             u = r.get("url")
             if not u or u in current_urls:
                 continue
@@ -220,16 +203,16 @@ def build_graph(summary: dict, baseline: Optional[dict] = None) -> dict:
             add_node({
                 "id": nid, "type": "account",
                 "label": r.get("username"), "sublabel": r.get("site"),
-                "url": u, "avatar": _avatar(r),
+                "url": u, "avatar": avatar(r),
                 "confidence": account_confidence(r),
                 "engines": r.get("engines") or [],
                 "verification": (r.get("verification") or {}).get("status"),
                 "tier": account_tier(r),
-                "created_at": _created_at(r),
+                "created_at": created_at(r),
                 "data": {
                     "site": r.get("site"), "url": u, "gone": True,
                     "category": r.get("category") or category_for(r.get("site")),
-                    "display_name": _display_name(r),
+                    "display_name": display_name(r),
                 },
             })
             add_edge("person", nid,

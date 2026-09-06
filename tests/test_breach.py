@@ -3,6 +3,8 @@ harvested secrets never survive summarization. No network."""
 
 import asyncio
 
+import httpx
+
 from recon import breach
 
 
@@ -129,3 +131,68 @@ def test_no_identifiers_short_circuits_without_network(monkeypatch):
     out = asyncio.run(breach.breach_exposure({"params": {"name": "John"}}))
     assert out["checked"] is False
     assert out["identifiers_checked"] == 0
+
+
+# --- caching honesty (defect 10): a 429 is never a clean bill of health ------------
+
+def _client(handler, calls):
+    def counting(request):
+        calls.append(str(request.url))
+        return handler(request)
+
+    def make(**kw):
+        return httpx.AsyncClient(transport=httpx.MockTransport(counting), **kw)
+    return make
+
+
+def _fresh(monkeypatch, handler):
+    calls = []
+    monkeypatch.setattr(breach.safeweb, "async_client", _client(handler, calls))
+    breach._cache.clear()
+    return calls
+
+
+def test_429_is_not_cached_and_the_next_call_asks_again(monkeypatch):
+    def handler(request):
+        if len(calls) == 1:
+            return httpx.Response(429, text="rate limited")
+        return httpx.Response(200, json=_CAVALIER)
+    calls = _fresh(monkeypatch, handler)
+    assert asyncio.run(breach._lookup("email", "a@b.test")) is None
+    out = asyncio.run(breach._lookup("email", "a@b.test"))
+    assert out["compromised"] is True and out["infections"] == 2
+    assert len(calls) == 2
+
+
+def test_answer_is_cached_across_calls(monkeypatch):
+    calls = _fresh(monkeypatch, lambda r: httpx.Response(200, json={"stealers": []}))
+    first = asyncio.run(breach._lookup("username", "Alice"))
+    second = asyncio.run(breach._lookup("username", "alice"))
+    assert first["compromised"] is False and second == first
+    assert len(calls) == 1
+
+
+def test_5xx_and_transport_failures_are_not_cached(monkeypatch):
+    def handler(request):
+        n = len(calls)
+        if n == 1:
+            return httpx.Response(503)
+        if n == 2:
+            raise httpx.ConnectError("down")
+        return httpx.Response(200, json=_CAVALIER)
+    calls = _fresh(monkeypatch, handler)
+    assert asyncio.run(breach._lookup("domain", "b.test")) is None
+    assert asyncio.run(breach._lookup("domain", "b.test")) is None
+    assert asyncio.run(breach._lookup("domain", "b.test"))["compromised"] is True
+    assert len(calls) == 3
+
+
+def test_lookup_sends_the_honest_user_agent(monkeypatch):
+    seen = {}
+
+    def handler(request):
+        seen["ua"] = request.headers.get("user-agent")
+        return httpx.Response(200, json={"stealers": []})
+    _fresh(monkeypatch, handler)
+    asyncio.run(breach._lookup("email", "a@b.test"))
+    assert seen["ua"] == breach.USER_AGENT
