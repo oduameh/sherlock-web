@@ -70,6 +70,53 @@ Review: two independent reviews (initial: six should-fixes; re-review: one block
 loader — a wrong-shape payload cached with a fresh mtime would have broken boot for a week
 — and four should-fixes); all landed before merge.
 
+### B — verification correctness · PR #56 + hotfix #57 · 2026-09-06
+`recon/htmltext.py` is the single home for HTML→text and the challenge / consent / soft-404
+markers (they had diverged between `verify.py` and `stealthweb.py`); every pattern is linear
+and bounded (hostile pages that stalled the event loop for 20 s now cost ≤ 40 ms). V1: a
+not-found page echoing the handle in its title was `confirmed 72` — a headline soft-404
+regex runs before handle corroboration, control similarity is computed after masking both
+handles, and handle-anchored forms ("Torvalds does not use Launchpad") are refuted per
+headline part. V2: unlisted WAF pages (Akamai, Imperva) are `indeterminate` and escalate;
+a page identical to the control that carries no profile metadata and does not name the
+handle is a block page, not a refutation. V7: 429/503 never trigger the stealth ladder;
+per-host backoff (`Retry-After`, minimum 5 s); later rows on that host are `indeterminate`
+with `reason: rate_limited` without a fetch. A failed control probe is `control_probe:
+"failed"` and never cached. Posture: the browser tier never solves Cloudflare challenges
+(Scrapling's solver clicked Turnstile) nor sends a forged Google referer; downloads
+disabled; cookies cleared on host change. Owner decision: a person's name written next to
+the handle that is clearly someone else makes the row an unconfirmed lead; boilerplate
+around the handle yields no opinion.
+Verification: gate green (524 at #57); every hostile-input shape from the audit and both
+reviews timed under 0.5 s.
+Review: first review do-not-merge-as-is (1 blocker: the heading window had been cut and
+re-opened V1; 6 should-fixes); re-review merge-after-fixes (1 blocker in the new
+display-name rule, 2 should-fixes) — all landed with the reviewers' probes as tests.
+**Process defect**: #56 merged red (a missing test import; the gate's failure was masked
+by a shell pipeline) — fixed in #57; the gate is now run unpiped with its exit code
+enforced.
+
+### H1 — HTTP-layer hardening · PR #54 · 2026-09-06
+Cross-site protection for the unauthenticated local API: Host allow-list
+(`APP_ALLOWED_HOSTS`), `Sec-Fetch-Site`/`Origin` (host **and** port) guard on every
+`/api/*` request that is not a pure database read, JSON-only POSTs (415), 64 KiB body cap
+(413, also for chunked bodies), 20 usernames and 500 alert ids per request, typed bodies
+(400 naming the field, never a 500). Security headers on every response and a CSP on
+every HTML document (`script-src 'self'`; the one inline script became a file).
+`/api/health` (registered unconditionally, reachable behind the password gate with
+liveness-only fields) and Railway's health check uses it. `DELETE /api/investigate/{id}`
+(cascades; 409 while running) and `DELETE /api/history/{id}`; the database is created
+0600. The legacy v2 `/api/recon/stream` (344 lines, no caller, no routing, no policy) is
+removed. Quick scan and site picker are policy-filtered. SSRF guard requires `is_global`
+and unwraps 6to4 / IPv4-mapped / Teredo addresses. Quieter, timestamped logging.
+Verification: gate green (439+); headless Chromium: zero console errors (no CSP
+violations); live curl probes on the merged server: 403 / 200 / 400 / 415 / 404 as
+specified.
+Review: merge-after-fixes with curl probes (pivot GETs unprotected, Origin port ignored,
+quick-scan cap missing, health unreachable behind the gate, chunked bodies, DELETE of a
+running case) — all landed with the probes as tests; the fix also uncovered that a bare
+IPv6 entry in the allow-list parsed to "" and matched the userinfo Host trick.
+
 ### Gate script · PR #51 · 2026-09-06
 `./scripts/gate.sh` runs ruff, `node --check` and the suite, failing fast; merges are
 gated on it.
