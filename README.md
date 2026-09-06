@@ -227,6 +227,48 @@ the pages the analyst (or the headless browser tier) visits:
   Sherlock's live site list refreshed at most every `SHERLOCK_SITES_MAX_AGE_H`
   hours with a 5 s timeout, falling back to the stale cache, then the bundled
   copy) | `bundled` | `remote`.
+- **Avatar proxy** — profile pictures (`og:image`, JSON-LD, Gravatar, graph
+  nodes) are relayed by `GET /api/avatar?u=<url>` instead of being loaded by
+  the analyst's browser, so the subject's host never sees the analyst's IP or
+  browser at viewing time. The proxy allows only `http(s)` URLs (400), refuses
+  robots-denied hosts and non-public addresses on every redirect hop (403),
+  fetches with the project's honest User-Agent and a 6 s timeout, caps the
+  body at 2 MiB (413), relays only raster `image/*` types (415 — never SVG),
+  answers 502 on upstream failure (the console then shows no image) and
+  caches successes in memory (200 entries / 16 MiB / 24 h). The page CSP
+  (`img-src 'self' data: blob: https://tile.openstreetmap.org`) blocks any
+  direct third-party image load that slipped past it; fonts are self-hosted
+  under `static/vendor/fonts/` (`font-src 'self'`).
+
+## Data sent to third parties
+
+The console is "public data, honest access", but *public* is about the
+sources, not the subject: to look something up, part of the subject's data has
+to reach the source. Every such flow is listed here so an analyst can make the
+disclosure and legal-basis judgement before running a case. Nothing about the
+analyst is sent except what any HTTP client reveals (the machine's public IP;
+adapter, verification, geo and breach paths send the project's own User-Agent,
+`sherlock-web/1.0 (…)`; the optional stealth tiers impersonate a browser).
+
+| Recipient | What leaves this machine | When | Sent by |
+|---|---|---|---|
+| Profile hosts (the ~400 sites the engines cover) | the handle, inside the profile URL (name/email/phone pivots derive handles from them) | every quick scan and investigation | server |
+| Profile hosts (avatars) | a request for the avatar URL the profile page advertised (`og:image`, JSON-LD, Gravatar) | when a result, the Gravatar card or a case-graph card is rendered | **server**, via `/api/avatar` — before this change the analyst's **browser** fetched it directly, revealing its IP, user agent and the time of viewing |
+| Nominatim (OpenStreetMap) | location strings the subject stated or a profile carried (1 req/s, capped) | footprint map / geo statistics | server |
+| ipwho.is | public IP addresses found in results (never private ones) | footprint map | server |
+| Hudson Rock (Cavalier) | the subject's email, usernames and domain | infostealer exposure pivot | server |
+| Cloudflare DoH, rdap.org, crt.sh | the domain | domain pivot | server |
+| People-search brokers | the name plus city/state | data-broker exposure check | server |
+| Gravatar | `md5(email)` | email pivot | server |
+| Registration/recovery endpoints of many services (holehe, ignorant) | the email address / phone number, to each service's sign-up or recovery endpoint | email and phone pivots | server |
+| GitHub API | the handle | timeline (account creation dates, events) | server |
+| OpenStreetMap tile servers | map-tile requests (which reveal the area being viewed) | footprint map | browser |
+| God's Eye View feeds | see `docs/GODSEYE.md` — a separate app with its own keys and feeds | the [GEO] tab | that app |
+
+Not sent any more: font requests to Google (fonts are self-hosted), and
+avatar requests from the browser. The watchlist monitor re-runs the profile
+and email flows on its schedule. Robots-denied hosts (`recon/policy.py`) are
+never contacted by any path.
 
 ## Access gate (optional)
 
