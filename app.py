@@ -1516,5 +1516,18 @@ def godseye_status() -> JSONResponse:
                          "reachable": _godseye_reachable(GODSEYE_URL)})
 
 
+# Custom 404: a styled page for browser navigation, JSON for API/programmatic
+# clients (so API consumers still get machine-readable errors).
+@app.exception_handler(404)
+async def not_found(request: Request, exc):
+    path = request.url.path
+    accept = request.headers.get("accept", "")
+    wants_html = "text/html" in accept and not path.startswith("/api/")
+    if wants_html:
+        return FileResponse(STATIC_DIR / "404.html", status_code=404,
+                            media_type="text/html")
+    return JSONResponse({"error": "not found", "path": path}, status_code=404)
+
+
 # Icons and any other static assets.
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

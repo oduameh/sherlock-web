@@ -285,7 +285,20 @@
     if (!m) return;
     if (sectionTitleEl) sectionTitleEl.textContent = m.title;
     if (sectionSubEl) sectionSubEl.textContent = m.sub;
+    // Reflect the active section in the browser tab/history title.
+    document.title = m.title + " · Signals Ops";
   }
+
+  // Clickable logo → home (Investigate). Keyboard-native as a <button>.
+  var brandHome = document.getElementById("brandHome");
+  if (brandHome) brandHome.addEventListener("click", function () {
+    switchTab("investigate");
+    closeSidebar();
+  });
+
+  // Copyright year — never goes stale.
+  var copyYear = document.getElementById("copyYear");
+  if (copyYear) copyYear.textContent = String(new Date().getFullYear());
 
   function closeSidebar() {
     els.sidebar.classList.remove("open");
@@ -1304,8 +1317,19 @@
     row.className = "rrow";
     var main = document.createElement("div");
     main.className = "rmain";
+    if (email) {
+      var mailto = document.createElement("a");
+      mailto.href = "mailto:" + email;
+      mailto.className = "grav-field e-subject-email";
+      mailto.textContent = email;
+      mailto.title = "Compose to this address";
+      main.appendChild(mailto);
+    }
     if (!profile) {
-      main.innerHTML = '<span class="dim">Gravatar: no public profile</span>';
+      var none = document.createElement("span");
+      none.className = "dim";
+      none.textContent = "Gravatar: no public profile";
+      main.appendChild(none);
     } else {
       var div = document.createElement("div");
       div.className = "enrich";
@@ -1444,13 +1468,22 @@
     c.found.style.display = "none";
     var dl = document.createElement("dl");
     dl.className = "phone-grid";
-    function addRow(k, v, cls) {
+    function addRow(k, v, cls, href) {
       if (v === null || v === undefined || v === "") return;
       var dt = document.createElement("dt"); dt.textContent = k;
-      var dd = document.createElement("dd"); dd.textContent = String(v);
+      var dd = document.createElement("dd");
+      if (href) {
+        var a = document.createElement("a");
+        a.href = href; a.textContent = String(v);
+        if (href.indexOf("http") === 0) { a.target = "_blank"; a.rel = "noopener noreferrer"; }
+        dd.appendChild(a);
+      } else {
+        dd.textContent = String(v);
+      }
       if (cls) dd.className = cls;
       dl.appendChild(dt); dl.appendChild(dd);
     }
+    var telHref = p.e164 ? "tel:" + p.e164 : null;
     if (p.error) {
       addRow("Error", p.error, "phone-invalid");
       c.rows.appendChild(dl);
@@ -1458,8 +1491,8 @@
     }
     addRow("Valid", p.valid ? "yes" : (p.possible ? "possible, not valid" : "no"),
            p.valid ? "phone-valid" : "phone-invalid");
-    addRow("E.164", p.e164);
-    addRow("International", p.international);
+    addRow("E.164", p.e164, null, telHref);
+    addRow("International", p.international, null, telHref);
     addRow("Country", p.country);
     addRow("Region", p.region);
     if (p.assumed_region) addRow("Assumed region", p.assumed_region + " — no country code given; prefix + for other regions");

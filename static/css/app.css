@@ -10095,3 +10095,73 @@ input[type="checkbox"] { accent-color: var(--accent); }
   #fpCockpit { height: auto; }
   #fpStage { height: 60vh; }
 }
+
+/* ===================================================================== */
+/* QA sweep: clickable logo, footer links/copyright, misc polish         */
+/* ===================================================================== */
+/* .brand became a <button> (clickable logo) — reset native chrome. */
+button.brand {
+  width: 100%; text-align: left; background: none; border: 0;
+  font: inherit; color: inherit; cursor: pointer; -webkit-appearance: none;
+  border-radius: 4px; transition: opacity var(--dur-1, .12s) ease;
+}
+button.brand:hover { opacity: 0.85; }
+button.brand:active { transform: scale(0.99); }
+button.brand:focus-visible { outline: 2px solid var(--accent-strong, #e0a63d); outline-offset: 2px; }
+.side-foot-links {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px;
+  font: 11px/1.4 'JetBrains Mono', ui-monospace, monospace; color: #4a544a;
+}
+.side-foot-links a { color: #8b968a; text-decoration: none; }
+.side-foot-links a:hover { color: #e0a63d; text-decoration: underline; }
+.side-foot-copy {
+  display: block; margin-top: 6px;
+  font: 10px/1.4 'JetBrains Mono', ui-monospace, monospace; color: #4a544a;
+}
+/* Subject phone/email rendered as tel:/mailto: links keep the value styling. */
+.phone-grid dd a, .grav-field a[href^="tel:"], .grav-field a[href^="mailto:"] {
+  color: #e0a63d; text-decoration: none;
+}
+.phone-grid dd a:hover { text-decoration: underline; }
+
+/* ===================================================================== */
+/* Mobile: the new workspaces (case graph / footprint / God's Eye).       */
+/* Their toolbars were built as single fixed-width rows, which overflow   */
+/* a phone viewport. Note: no overflow-x on html/body — that breaks the   */
+/* sticky topbar. Each workspace clips its own box instead.               */
+/* ===================================================================== */
+#cgCockpit, #fpCockpit, #gevWrap { max-width: 100%; overflow-x: clip; }
+
+@media (max-width: 700px) {
+  /* Toolbars stack under their chips instead of fighting for one row. */
+  .cg-triage, .fp-bar { flex-wrap: wrap; row-gap: 8px; padding: 8px 10px; }
+  .cg-tools, .fp-tools {
+    margin-left: 0; width: 100%; flex-wrap: wrap; gap: 5px;
+  }
+  .cg-search { width: 100%; min-width: 0; order: -1; }
+  .cg-tools .btn, .fp-tools .btn { flex: 1 1 auto; min-width: 62px; }
+  .fp-assessment { flex-basis: 100%; }
+
+  /* The timeline is centred and fixed-width; let it fit the viewport. */
+  .cg-timeline {
+    left: 8px; right: 8px; transform: none; width: auto;
+    padding: 6px 8px; gap: 8px;
+  }
+  .cg-timeline input[type=range] { width: auto; flex: 1 1 auto; min-width: 0; }
+
+  /* Side rails become stacked panels rather than fixed columns. */
+  .cg-inspector, .fp-list { flex-basis: auto; max-height: 42vh; }
+
+  /* Entity cards are viewport-relative so they can't push the canvas wide. */
+  .cg-card { max-width: min(168px, 62vw); }
+
+  /* Long URLs/paths in the inspector must wrap, never scroll the page. */
+  .cg-insp-row .v, .cg-insp-line, .fp-item-sub { overflow-wrap: anywhere; }
+}
+
+@media (max-width: 420px) {
+  .cg-tier-chip { padding: 4px 7px; font-size: 10px; }
+  .gev-setup-card { padding: 16px 14px; }
+  .gev-steps { padding-left: 16px; }
+  .gev-steps code, .gev-note code { overflow-wrap: anywhere; }
+}
